@@ -1,13 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { Building2, FileText, Package, TrendingUp } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { FileText, Building2, Package, TrendingUp } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -79,8 +79,8 @@ export default function LoginPage() {
                   Company Management
                 </h3>
                 <p className="text-sm text-slate-400">
-                  Manage issuing and receiving companies with complete business
-                  details
+                  Manage issuing companies and receiving customers with complete
+                  business details
                 </p>
               </div>
             </div>

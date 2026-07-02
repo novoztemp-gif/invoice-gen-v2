@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { format } from "date-fns";
+import { ArrowRight, ExternalLink, Loader2, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { useEffect, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
@@ -12,26 +14,32 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
-import { Loader2, ArrowRight, ExternalLink } from "lucide-react";
-import { format } from "date-fns";
+import { createClient } from "@/lib/supabase/client";
 
 type InvoiceBatch = {
   id: string;
   issuing_company_id: string;
   receiving_company_id: string;
-  invoice_type: string;
+  batch_type: string;
   transport_mode: string;
   vehicle_number: string;
   date_of_supply: string;
   invoice_date_from: string;
   invoice_date_to: string;
-  threshold_limit: number;
+  minimum_invoice_amount: number;
+  maximum_invoice_amount: number;
   total_amount: number;
   status: string | null;
+  batch_status: string;
   sheet_link: string | null;
   pdf_link: string | null;
   created_at: string;
+  selected_customers?: string[] | null;
+  major_customers?: Array<{
+    customer_id: string;
+    amount: number;
+    invoice_count: number;
+  }> | null;
   issuing_companies?: {
     company_name: string;
   };
@@ -59,6 +67,7 @@ export default function InvoiceBatches() {
             receiving_companies:receiving_company_id(company_name)
           `,
           )
+          .or("batch_type.eq.SALES,batch_type.is.null")
           .order("created_at", { ascending: false });
 
         if (error) {
@@ -78,6 +87,37 @@ export default function InvoiceBatches() {
 
     fetchBatches();
   }, []);
+
+  const handleDeleteBatch = async (id: string) => {
+    if (
+      !window.confirm(
+        "Are you sure you want to delete this invoice batch? This action cannot be undone.",
+      )
+    )
+      return;
+
+    try {
+      const supabase = createClient();
+
+      // Delete associated invoices first (to prevent orphaned records)
+      await supabase.from("invoice").delete().eq("invoice_batch_id", id);
+
+      // Delete the batch itself
+      const { error } = await supabase
+        .from("invoice_batch")
+        .delete()
+        .eq("id", id);
+
+      if (error) throw error;
+
+      // Update the UI
+      setBatches(batches.filter((b) => b.id !== id));
+      alert("Invoice batch deleted successfully.");
+    } catch (error) {
+      console.error("Error deleting batch:", error);
+      alert("Failed to delete invoice batch.");
+    }
+  };
 
   const getStatusBadge = (status: string | null) => {
     if (!status) return <Badge variant="secondary">Unknown</Badge>;
@@ -120,8 +160,8 @@ export default function InvoiceBatches() {
           {batches.length === 0 ? (
             <div className="text-center py-12 text-slate-500">
               <p className="text-lg">No invoice batches found.</p>
-              <p className="text-sm mt-2">
-                Create your first batch from the Generate Invoice page.
+              <p className="text-slate-500 max-w-sm mx-auto">
+                Create your first batch from the Sales Invoice page.
               </p>
             </div>
           ) : (
@@ -131,12 +171,11 @@ export default function InvoiceBatches() {
                   <TableRow>
                     <TableHead>Invoice Type</TableHead>
                     <TableHead>Issuing Company</TableHead>
-                    <TableHead>Receiving Company</TableHead>
+                    <TableHead>Receiving Customer</TableHead>
                     <TableHead>Date Range</TableHead>
                     <TableHead className="text-right">Total Amount</TableHead>
-                    <TableHead className="text-right">Threshold</TableHead>
+                    <TableHead className="text-right">Invoice Range</TableHead>
                     <TableHead>Status</TableHead>
-                    <TableHead>Sheet Link</TableHead>
                     <TableHead>Created</TableHead>
                     <TableHead className="w-12"></TableHead>
                   </TableRow>
@@ -150,14 +189,30 @@ export default function InvoiceBatches() {
                         router.push(`/invoice-batches/${batch.id}`)
                       }
                     >
-                      <TableCell className="font-medium capitalize">
-                        {batch.invoice_type || "—"}
+                      <TableCell className="font-medium uppercase">
+                        {batch.batch_type || "—"}
                       </TableCell>
                       <TableCell className="font-medium">
                         {batch.issuing_companies?.company_name || "—"}
                       </TableCell>
                       <TableCell>
-                        {batch.receiving_companies?.company_name || "—"}
+                        {(() => {
+                          const selectedCount =
+                            batch.selected_customers?.length || 0;
+                          const majorCount = batch.major_customers?.length || 0;
+                          const totalCount = selectedCount + majorCount;
+                          if (totalCount > 1) {
+                            return (
+                              <Badge
+                                variant="outline"
+                                className="font-semibold text-slate-700 bg-slate-50 border-slate-200"
+                              >
+                                Multiple Customers ({totalCount})
+                              </Badge>
+                            );
+                          }
+                          return batch.receiving_companies?.company_name || "—";
+                        })()}
                       </TableCell>
                       <TableCell>
                         {format(
@@ -174,34 +229,32 @@ export default function InvoiceBatches() {
                           maximumFractionDigits: 2,
                         })}
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className="text-right whitespace-nowrap">
                         ₹
-                        {batch.threshold_limit.toLocaleString("en-IN", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
+                        {batch.minimum_invoice_amount.toLocaleString("en-IN", {
+                          minimumFractionDigits: 0,
+                        })}
+                        {" - "}₹
+                        {batch.maximum_invoice_amount.toLocaleString("en-IN", {
+                          minimumFractionDigits: 0,
                         })}
                       </TableCell>
                       <TableCell>{getStatusBadge(batch.status)}</TableCell>
-                      <TableCell>
-                        {batch.sheet_link ? (
-                          <a
-                            href={batch.sheet_link}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <ExternalLink className="h-4 w-4" />
-                            <span>View</span>
-                          </a>
-                        ) : (
-                          <span className="text-slate-400">—</span>
-                        )}
-                      </TableCell>
+
                       <TableCell>
                         {format(new Date(batch.created_at), "dd/MM/yyyy HH:mm")}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="text-right flex items-center justify-end gap-2">
+                        <button
+                          className="p-2 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-md transition-colors"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteBatch(batch.id);
+                          }}
+                          title="Delete Batch"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
                         <ArrowRight className="h-4 w-4 text-slate-400" />
                       </TableCell>
                     </TableRow>

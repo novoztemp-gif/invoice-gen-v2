@@ -1,6 +1,9 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Pencil, Search } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -9,17 +12,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Search, ArrowUpDown, ArrowUp, ArrowDown, Pencil } from "lucide-react";
 import { EditReceivingCompanyDialog } from "./EditReceivingCompanyDialog";
 
 type ReceivingCompany = {
   id: string;
   company_name: string;
   address: string;
-  gstin: string;
-  pan: string;
+  gstin?: string | null;
+  pan?: string | null;
   state: string;
   state_code?: string;
   created_at: string;
@@ -73,8 +73,8 @@ export function ReceivingCompaniesTable({
       return (
         company.company_name.toLowerCase().includes(query) ||
         company.address.toLowerCase().includes(query) ||
-        company.gstin.toLowerCase().includes(query) ||
-        company.pan.toLowerCase().includes(query) ||
+        company.gstin?.toLowerCase().includes(query) ||
+        company.pan?.toLowerCase().includes(query) ||
         company.state.toLowerCase().includes(query) ||
         company.state_code?.toLowerCase().includes(query)
       );
@@ -100,7 +100,7 @@ export function ReceivingCompaniesTable({
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-2 top-2.5 h-4 w-4 text-slate-500" />
           <Input
-            placeholder="Search companies..."
+            placeholder="Search customers..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="pl-8"
@@ -108,15 +108,15 @@ export function ReceivingCompaniesTable({
         </div>
         <p className="text-sm text-slate-600">
           Showing {filteredAndSortedCompanies.length} of {companies.length}{" "}
-          companies
+          customers
         </p>
       </div>
 
       {filteredAndSortedCompanies.length === 0 ? (
         <p className="text-slate-500 text-center py-8">
           {searchQuery
-            ? "No companies match your search."
-            : "No companies found. Add your first receiving company!"}
+            ? "No customers match your search."
+            : "No customers found. Add your first receiving customer!"}
         </p>
       ) : (
         <div className="rounded-md border overflow-x-auto">
@@ -124,7 +124,7 @@ export function ReceivingCompaniesTable({
             <TableHeader>
               <TableRow>
                 <TableHead className="min-w-[180px]">
-                  Company Name
+                  Customer Name
                   <Button
                     variant="ghost"
                     onClick={() => handleSort("company_name")}

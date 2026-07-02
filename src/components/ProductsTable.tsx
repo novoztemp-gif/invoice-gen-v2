@@ -1,6 +1,9 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Pencil, Search } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -9,9 +12,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Search, ArrowUpDown, ArrowUp, ArrowDown, Pencil } from "lucide-react";
 import { EditProductDialog } from "./EditProductDialog";
 
 type Product = {

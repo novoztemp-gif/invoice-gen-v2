@@ -177,18 +177,30 @@ export async function POST(request: NextRequest) {
       .eq("id", batch.issuing_company_id)
       .single();
 
-    const { data: receivingCompany } = await supabase
+    const { data: receivingCompaniesList } = await supabase
       .from("receiving_companies")
-      .select("*")
-      .eq("id", batch.receiving_company_id)
-      .single();
+      .select("*");
+
+    const receivingCompaniesMap = new Map();
+    if (receivingCompaniesList) {
+      for (const comp of receivingCompaniesList) {
+        receivingCompaniesMap.set(comp.id, comp);
+      }
+    }
 
     const invoicePayloads = invoices.map((invoice) => {
+      const rCompId =
+        invoice.products?.[0]?.customer_id || batch.receiving_company_id;
+      const receivingCompany = rCompId
+        ? receivingCompaniesMap.get(rCompId)
+        : null;
+
       const payload = {
         // Invoice identification
         invoiceNumber: invoice.invoice_number,
         invoiceDate: formatDate(invoice.invoice_date),
-        invoiceType: batch.invoice_type,
+        invoiceType: batch.batch_type,
+        financialYear: batch.financial_year,
         // Issuing company details
         issuingCompany: issuingCompany
           ? {
@@ -223,7 +235,7 @@ export async function POST(request: NextRequest) {
         transportDetails: {
           mode: batch.transport_mode,
           vehicleNumber: batch.vehicle_number,
-          dateOfSupply: formatDate(batch.date_of_supply),
+          dateOfSupply: formatDate(invoice.invoice_date),
         },
 
         // Products with line items

@@ -1,8 +1,20 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { format } from "date-fns";
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  Edit3,
+  Eye,
+  Loader2,
+} from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import InvoiceEditor from "@/components/InvoiceEditor";
+import InvoicePreview from "@/components/InvoicePreview";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
@@ -12,38 +24,39 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Loader2, ArrowLeft, ChevronDown, ChevronUp } from "lucide-react";
-import { format } from "date-fns";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import fetchJobStats from "./actions";
+import { useInvoiceBatchDetail } from "@/lib/hooks/useInvoiceBatchDetail";
+import { triggerDownload } from "@/lib/utils";
 
 type InvoiceBatch = {
   id: string;
   issuing_company_id: string;
   receiving_company_id: string;
-  invoice_type: string;
+  batch_type: string;
   transport_mode: string;
   vehicle_number: string;
   date_of_supply: string;
   invoice_date_from: string;
   invoice_date_to: string;
-  threshold_limit: number;
+  minimum_invoice_amount: number;
+  maximum_invoice_amount: number;
   total_amount: number;
   status: string | null;
+  batch_status?: string;
   sheet_link: string | null;
   pdf_link: string | null;
   created_at: string;
+  created_by?: string;
+  financial_year?: string;
+  finalized_at?: string;
+  finalized_by?: string;
+  reopened_at?: string;
+  reopened_by?: string;
+  selected_customers?: string[] | null;
+  major_customers?: Array<{
+    customer_id: string;
+    amount: number;
+    invoice_count: number;
+  }> | null;
   products?: Array<{
     product_id: string;
     product_name: string;
@@ -74,6 +87,7 @@ type Invoice = {
     quantity: number;
     rate: number;
     amount: number;
+    customer_id?: string;
   }>;
   total_amount: number;
   status: string | null;
@@ -86,232 +100,24 @@ export default function BatchDetail() {
   const router = useRouter();
   const batchId = params.id as string;
 
-  const [batch, setBatch] = useState<InvoiceBatch | null>(null);
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
-  const [generatingSheet, setGeneratingSheet] = useState(false);
-  const [expandedDates, setExpandedDates] = useState<Record<string, boolean>>(
-    {},
-  );
-  const [jobStats, setJobStats] = useState({
-    pending: 0,
-    processing: 0,
-    completed: 0,
-    failed: 0,
-  });
-  const [sheetDialogOpen, setSheetDialogOpen] = useState(false);
-  const [sheetLink, setSheetLink] = useState("");
-  const [sheetLinkError, setSheetLinkError] = useState("");
-  const [validatingPermissions, setValidatingPermissions] = useState(false);
-
-  const fetchBatchDetails = async () => {
-    try {
-      const supabase = createClient();
-      const { data, error } = await supabase
-        .from("invoice_batch")
-        .select(
-          `
-          *,
-          issuing_companies:issuing_company_id(company_name),
-          receiving_companies:receiving_company_id(company_name)
-        `,
-        )
-        .eq("id", batchId)
-        .single();
-
-      if (error) {
-        console.error("Error fetching batch:", error);
-        alert("Failed to load batch details.");
-        return;
-      }
-
-      setBatch(data);
-    } catch (error) {
-      console.error("Error:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchInvoices = async () => {
-    try {
-      const supabase = createClient();
-      const { data, error } = await supabase
-        .from("invoice")
-        .select("*")
-        .eq("invoice_batch_id", batchId)
-        .order("invoice_date", { ascending: true });
-
-      if (error) {
-        console.error("Error fetching invoices:", error);
-        return;
-      }
-
-      setInvoices(data || []);
-
-      // Expand all dates by default
-      if (data && data.length > 0) {
-        const uniqueDates = [...new Set(data.map((inv) => inv.invoice_date))];
-        const expanded: Record<string, boolean> = {};
-        uniqueDates.forEach((date) => {
-          expanded[date] = true;
-        });
-        setExpandedDates(expanded);
-      }
-    } catch (error) {
-      console.error("Error:", error);
-    }
-  };
-
-  const updateJobStats = async () => {
-    if (invoices.length > 0) {
-      const invoiceIds = invoices.map((inv) => inv.id);
-      const stats = await fetchJobStats(invoiceIds, batchId);
-      setJobStats(stats);
-    } else {
-      setJobStats({
-        pending: 0,
-        processing: 0,
-        completed: 0,
-        failed: 0,
-      });
-    }
-  };
-
-  const handleGenerateSplitups = async () => {
-    setGenerating(true);
-    try {
-      const response = await fetch("/api/generate-invoice-splitups", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          batchId,
-        }),
-      });
-
-      const result = await response.json();
-
-      if (response.ok) {
-        alert(result.message || "Invoice splitups generated successfully!");
-
-        await fetchInvoices();
-        await fetchBatchDetails();
-        await updateJobStats();
-      } else {
-        alert(result.message || "Failed to generate invoice splitups.");
-      }
-    } catch (error) {
-      console.error("Error generating splitups:", error);
-      alert("An error occurred while generating splitups.");
-    } finally {
-      setGenerating(false);
-    }
-  };
-
-  const handleGenerateSheet = async () => {
-    // Validate URL format
-    const urlPattern =
-      /^https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)\/edit$/;
-    const match = sheetLink.match(urlPattern);
-
-    if (!match) {
-      setSheetLinkError(
-        "Invalid Google Sheets URL format. Expected: https://docs.google.com/spreadsheets/d/{spreadsheetId}/edit",
-      );
-      return;
-    }
-
-    const spreadsheetId = match[1];
-    setSheetLinkError("");
-    setValidatingPermissions(true);
-
-    try {
-      // Check permissions using the server-side API
-      const permissionsResponse = await fetch("/api/check-permissions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ spreadsheetId }),
-      });
-
-      const permissionsData = await permissionsResponse.json();
-
-      if (!permissionsResponse.ok || !permissionsData.hasAccess) {
-        setSheetLinkError(
-          permissionsData.message ||
-            "Failed to validate spreadsheet permissions.",
-        );
-        return;
-      }
-
-      const accessToken = permissionsData.accessToken;
-
-      // If we get here, permissions are valid
-      setSheetDialogOpen(false);
-      setGeneratingSheet(true);
-
-      const generateResponse = await fetch("/api/generate-sheets", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          batchId,
-          masterSheetLink: sheetLink,
-        }),
-      });
-
-      const result = await generateResponse.json();
-
-      if (generateResponse.ok) {
-        alert(result.message || "Sheets generated successfully!");
-        setSheetLink(""); // Reset the form
-      } else {
-        alert(result.message || "Failed to generate Sheets.");
-      }
-    } catch (error) {
-      console.error("Error validating permissions:", error);
-      setSheetLinkError(
-        "Failed to validate spreadsheet permissions. Please try again.",
-      );
-    } finally {
-      setValidatingPermissions(false);
-      setGeneratingSheet(false);
-    }
-  };
-
-  const getAccessToken = async (): Promise<string> => {
-    // This is a simplified version - in a real app you'd get this from your auth system
-    // For now, we'll make a request to get the token
-    const response = await fetch("/api/get-access-token", {
-      method: "GET",
-    });
-
-    if (!response.ok) {
-      throw new Error("Failed to get access token");
-    }
-
-    const data = await response.json();
-    return data.access_token;
-  };
-
-  useEffect(() => {
-    fetchBatchDetails();
-    fetchInvoices();
-  }, []);
-
-  useEffect(() => {
-    if (invoices.length > 0) {
-      updateJobStats();
-      // Refresh job stats every 5 seconds
-      const interval = setInterval(updateJobStats, 5000);
-      return () => clearInterval(interval);
-    }
-  }, [invoices]);
+  const {
+    batch,
+    invoices,
+    receivingCustomers,
+    previewIndex,
+    setPreviewIndex,
+    isEditingMode,
+    setIsEditingMode,
+    loading,
+    generating,
+    expandedDates,
+    jobStats,
+    handleDownloadExcel,
+    handleSaveInvoice,
+    handleGenerateSplitups,
+    handleBatchStatusChange,
+    toggleDate,
+  } = useInvoiceBatchDetail({ batchId });
 
   if (loading) {
     return (
@@ -320,6 +126,11 @@ export default function BatchDetail() {
       </div>
     );
   }
+
+  const backPath =
+    batch?.batch_type === "PURCHASE"
+      ? "/purchase-invoice-batches"
+      : "/invoice-batches";
 
   if (!batch) {
     return (
@@ -364,36 +175,33 @@ export default function BatchDetail() {
     }))
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-  const toggleDate = (date: string) => {
-    setExpandedDates((prev) => ({
-      ...prev,
-      [date]: !prev[date],
-    }));
-  };
-
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <div
-            onClick={() => router.push("/invoice-batches")}
-            className="cursor-pointer"
-          >
+          <div onClick={() => router.push(backPath)} className="cursor-pointer">
             <ArrowLeft className="h-5 w-5 mr-2" />
           </div>
           <h1 className="text-3xl font-bold text-slate-900">Batch Details</h1>
-          {batch.status && (
+          {batch.batch_status && (
             <Badge
               variant={
-                batch.status === "generated" || batch.status === "completed"
+                batch.batch_status === "FINALIZED"
                   ? "default"
-                  : batch.status === "failed"
+                  : batch.batch_status === "REOPENED"
                     ? "destructive"
                     : "secondary"
               }
+              className={
+                batch.batch_status === "FINALIZED"
+                  ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
+                  : batch.batch_status === "REOPENED"
+                    ? "bg-orange-100 text-orange-800 hover:bg-orange-200"
+                    : "bg-blue-100 text-blue-800 hover:bg-blue-200"
+              }
             >
-              {batch.status.toUpperCase()}
+              {batch.batch_status}
             </Badge>
           )}
         </div>
@@ -433,87 +241,37 @@ export default function BatchDetail() {
                 )}
               </div>
             )}
-            {/* Generate Sheets Button */}
-            <Dialog open={sheetDialogOpen} onOpenChange={setSheetDialogOpen}>
-              <DialogTrigger asChild>
-                <Button
-                  disabled={
-                    batch.status === "completed" ||
-                    jobStats.pending > 0 ||
-                    jobStats.processing > 0
-                  }
-                >
-                  Generate Sheets
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-[425px]">
-                <DialogHeader>
-                  <DialogTitle>Generate Invoice Sheets</DialogTitle>
-                  <DialogDescription>
-                    Enter the Google Sheets URL where you want to generate the
-                    invoice sheets. All invoices in this batch will be created
-                    as separate tabs in this spreadsheet.
-                  </DialogDescription>
-                </DialogHeader>
-                <div className="grid gap-4 py-4">
-                  <div className="grid gap-2">
-                    <Label htmlFor="sheet-link">Google Sheets URL</Label>
-                    <Input
-                      id="sheet-link"
-                      placeholder="https://docs.google.com/spreadsheets/d/{spreadsheetId}/edit"
-                      value={sheetLink}
-                      onChange={(e) => {
-                        setSheetLink(e.target.value);
-                        setSheetLinkError("");
-                      }}
-                      className={sheetLinkError ? "border-red-500" : ""}
-                    />
-                    {sheetLinkError && (
-                      <p className="text-sm text-red-600">{sheetLinkError}</p>
-                    )}
-                    <p className="text-xs text-slate-500">
-                      Make sure to share the spreadsheet with edit permissions
-                      for the service account.
-                    </p>
-                    <div className="mt-2 p-2 bg-slate-50 rounded border">
-                      <p className="text-xs text-slate-600 font-medium">
-                        Service Account Email:
-                      </p>
-                      <p className="text-xs font-mono text-slate-800 select-all">
-                        {process.env.NEXT_PUBLIC_GOOGLE_SERVICE_ACCOUNT_EMAIL ||
-                          ""}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-                <div className="flex justify-end gap-3">
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setSheetDialogOpen(false);
-                      setSheetLink("");
-                      setSheetLinkError("");
-                    }}
-                    disabled={validatingPermissions}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={handleGenerateSheet}
-                    disabled={validatingPermissions || !sheetLink.trim()}
-                  >
-                    {validatingPermissions ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Validating...
-                      </>
-                    ) : (
-                      "Generate Sheets"
-                    )}
-                  </Button>
-                </div>
-              </DialogContent>
-            </Dialog>
+            {/* Download ZIP Button */}
+            <Button
+              onClick={() =>
+                triggerDownload(
+                  `/api/download-zip?batchId=${params.id}`,
+                  `Invoice_Batch_${batch.financial_year || "Batch"}.zip`,
+                )
+              }
+              className="gap-2"
+              variant="outline"
+            >
+              <Download className="h-4 w-4" />
+              Download ZIP
+            </Button>
+
+            {/* Finalize / Reopen Button */}
+            {batch.batch_status === "FINALIZED" ? (
+              <Button
+                onClick={() => handleBatchStatusChange("REOPEN")}
+                className="gap-2 bg-orange-600 hover:bg-orange-700 text-white"
+              >
+                Reopen Batch
+              </Button>
+            ) : (
+              <Button
+                onClick={() => handleBatchStatusChange("FINALIZE")}
+                className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white"
+              >
+                Finalize Batch
+              </Button>
+            )}
           </div>
         )}
       </div>
@@ -527,9 +285,7 @@ export default function BatchDetail() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <p className="text-sm text-slate-500">Invoice Type</p>
-              <p className="font-medium capitalize">
-                {batch.invoice_type || "—"}
-              </p>
+              <p className="font-medium uppercase">{batch.batch_type || "—"}</p>
             </div>
             <div>
               <p className="text-sm text-slate-500">Issuing Company</p>
@@ -538,10 +294,59 @@ export default function BatchDetail() {
               </p>
             </div>
             <div>
-              <p className="text-sm text-slate-500">Receiving Company</p>
-              <p className="font-medium">
-                {batch.receiving_companies?.company_name || "—"}
+              <p className="text-sm text-slate-500">
+                {batch.batch_type === "PURCHASE"
+                  ? "Supplier(s)"
+                  : "Receiving Customer(s)"}
               </p>
+              <div className="space-y-1 mt-0.5">
+                {batch.selected_customers &&
+                batch.selected_customers.length > 0 ? (
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 tracking-wide uppercase">
+                      {batch.batch_type === "PURCHASE"
+                        ? "Regular Supplier"
+                        : "Regular"}
+                    </span>
+                    <p className="font-medium text-sm">
+                      {batch.selected_customers
+                        .map(
+                          (id: string) =>
+                            receivingCustomers[id]?.company_name || id,
+                        )
+                        .join(", ")}
+                    </p>
+                  </div>
+                ) : null}
+                {batch.major_customers && batch.major_customers.length > 0 ? (
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 tracking-wide uppercase">
+                      {batch.batch_type === "PURCHASE"
+                        ? "Major Supplier"
+                        : "Major"}
+                    </span>
+                    <ul className="list-disc list-inside text-sm font-medium">
+                      {batch.major_customers.map((m, idx) => (
+                        <li key={idx}>
+                          {receivingCustomers[m.customer_id]?.company_name ||
+                            m.customer_id}
+                          : ₹{m.amount.toLocaleString("en-IN")} (
+                          {m.invoice_count} invoice
+                          {m.invoice_count > 1 ? "s" : ""})
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {(!batch.selected_customers ||
+                  batch.selected_customers.length === 0) &&
+                (!batch.major_customers ||
+                  batch.major_customers.length === 0) ? (
+                  <p className="font-medium">
+                    {batch.receiving_companies?.company_name || "—"}
+                  </p>
+                ) : null}
+              </div>
             </div>
             <div>
               <p className="text-sm text-slate-500">Invoice Date Range</p>
@@ -553,7 +358,9 @@ export default function BatchDetail() {
             <div>
               <p className="text-sm text-slate-500">Date of Supply</p>
               <p className="font-medium">
-                {format(new Date(batch.date_of_supply), "dd/MM/yyyy")}
+                {batch.date_of_supply
+                  ? format(new Date(batch.date_of_supply), "dd/MM/yyyy")
+                  : "As per Invoice Date"}
               </p>
             </div>
             <div>
@@ -565,12 +372,15 @@ export default function BatchDetail() {
               <p className="font-medium">{batch.vehicle_number}</p>
             </div>
             <div>
-              <p className="text-sm text-slate-500">Threshold Limit</p>
+              <p className="text-sm text-slate-500">Invoice Amount Range</p>
               <p className="font-medium">
                 ₹
-                {batch.threshold_limit.toLocaleString("en-IN", {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
+                {batch.minimum_invoice_amount?.toLocaleString("en-IN", {
+                  minimumFractionDigits: 0,
+                })}
+                {" - "}₹
+                {batch.maximum_invoice_amount?.toLocaleString("en-IN", {
+                  minimumFractionDigits: 0,
                 })}
               </p>
             </div>
@@ -583,6 +393,61 @@ export default function BatchDetail() {
                   maximumFractionDigits: 2,
                 })}
               </p>
+            </div>
+          </div>
+
+          {/* Audit Trail */}
+          <div className="mt-8 pt-6 border-t border-slate-200">
+            <h4 className="text-sm font-semibold text-slate-800 mb-4 uppercase tracking-wider">
+              Audit Trail
+            </h4>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold">
+                  Created
+                </p>
+                <p className="font-medium mt-1">
+                  {format(new Date(batch.created_at), "dd MMM yyyy, HH:mm")}
+                </p>
+                <p className="text-sm text-slate-600">
+                  User{" "}
+                  {batch.created_by ? batch.created_by.slice(0, 8) : "System"}
+                </p>
+              </div>
+
+              {batch.finalized_at && (
+                <div>
+                  <p className="text-xs text-emerald-600 uppercase tracking-wider font-semibold">
+                    Finalized
+                  </p>
+                  <p className="font-medium mt-1">
+                    {format(new Date(batch.finalized_at), "dd MMM yyyy, HH:mm")}
+                  </p>
+                  <p className="text-sm text-slate-600">
+                    User{" "}
+                    {batch.finalized_by
+                      ? batch.finalized_by.slice(0, 8)
+                      : "Unknown"}
+                  </p>
+                </div>
+              )}
+
+              {batch.reopened_at && (
+                <div>
+                  <p className="text-xs text-orange-600 uppercase tracking-wider font-semibold">
+                    Reopened
+                  </p>
+                  <p className="font-medium mt-1">
+                    {format(new Date(batch.reopened_at), "dd MMM yyyy, HH:mm")}
+                  </p>
+                  <p className="text-sm text-slate-600">
+                    User{" "}
+                    {batch.reopened_by
+                      ? batch.reopened_by.slice(0, 8)
+                      : "Unknown"}
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </CardContent>
@@ -735,16 +600,23 @@ export default function BatchDetail() {
                                         </Badge>
                                       )}
                                     </div>
-                                    {invoice.sheet_link && (
-                                      <a
-                                        href={invoice.sheet_link}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-sm text-blue-600 hover:text-blue-800 underline mt-1 inline-block"
-                                      >
-                                        View Sheet
-                                      </a>
-                                    )}
+                                    {(() => {
+                                      const custId =
+                                        invoice.products?.[0]?.customer_id;
+                                      const custName = custId
+                                        ? receivingCustomers[custId]
+                                            ?.company_name
+                                        : batch.receiving_companies
+                                            ?.company_name;
+                                      return custName ? (
+                                        <p className="text-xs text-slate-500 font-medium mt-0.5">
+                                          {batch.batch_type === "PURCHASE"
+                                            ? "Supplier: "
+                                            : "Customer: "}
+                                          {custName}
+                                        </p>
+                                      ) : null;
+                                    })()}
                                   </div>
                                   <div className="text-right">
                                     <p className="text-sm text-slate-500">
@@ -761,6 +633,56 @@ export default function BatchDetail() {
                                       )}
                                     </p>
                                   </div>
+                                </div>
+                                <div className="mt-4 flex gap-2 w-full">
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="flex-1 text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-200"
+                                    onClick={() => {
+                                      setPreviewIndex(
+                                        invoices.findIndex(
+                                          (inv) => inv.id === invoice.id,
+                                        ),
+                                      );
+                                      setIsEditingMode(false);
+                                    }}
+                                  >
+                                    <Eye className="h-4 w-4 mr-2" />
+                                    Preview
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="flex-1 text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
+                                    onClick={() => {
+                                      setPreviewIndex(
+                                        invoices.findIndex(
+                                          (inv) => inv.id === invoice.id,
+                                        ),
+                                      );
+                                      setIsEditingMode(true);
+                                    }}
+                                  >
+                                    <Edit3 className="h-4 w-4 mr-2" />
+                                    Edit
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="flex-1 text-slate-600 hover:text-slate-900"
+                                    onClick={() => handleDownloadExcel(invoice)}
+                                    disabled={
+                                      !batch?.issuing_companies ||
+                                      Object.keys(receivingCustomers).length ===
+                                        0
+                                    }
+                                  >
+                                    <Download className="h-4 w-4 mr-2" />
+                                    {batch?.batch_type === "PURCHASE"
+                                      ? "Download PDF"
+                                      : "Download"}
+                                  </Button>
                                 </div>
 
                                 <Table>
@@ -794,17 +716,17 @@ export default function BatchDetail() {
                                           {product.quantity}
                                         </TableCell>
                                         <TableCell className="text-right">
-                                          ₹{product.rate.toFixed(2)}
+                                          ₹
+                                          {Number(product.rate || 0).toFixed(2)}
                                         </TableCell>
                                         <TableCell className="text-right">
                                           ₹
-                                          {product.amount.toLocaleString(
-                                            "en-IN",
-                                            {
-                                              minimumFractionDigits: 2,
-                                              maximumFractionDigits: 2,
-                                            },
-                                          )}
+                                          {Number(
+                                            product.amount || 0,
+                                          ).toLocaleString("en-IN", {
+                                            minimumFractionDigits: 2,
+                                            maximumFractionDigits: 2,
+                                          })}
                                         </TableCell>
                                       </TableRow>
                                     ))}
@@ -939,6 +861,49 @@ export default function BatchDetail() {
           )}
         </CardContent>
       </Card>
+      <InvoicePreview
+        isOpen={previewIndex !== null && !isEditingMode}
+        onClose={() => setPreviewIndex(null)}
+        invoice={
+          previewIndex !== null && !isEditingMode
+            ? invoices[previewIndex]
+            : null
+        }
+        issuingCompany={batch?.issuing_companies}
+        receivingCompany={
+          previewIndex !== null && !isEditingMode
+            ? invoices[previewIndex].products?.[0]?.customer_id
+              ? receivingCustomers[
+                  invoices[previewIndex].products[0].customer_id
+                ]
+              : batch?.receiving_companies
+            : null
+        }
+        batch={batch}
+        currentIndex={previewIndex ?? 0}
+        totalInvoices={invoices.length}
+        onNext={() =>
+          setPreviewIndex((p) =>
+            p !== null ? Math.min(invoices.length - 1, p + 1) : null,
+          )
+        }
+        onPrev={() =>
+          setPreviewIndex((p) => (p !== null ? Math.max(0, p - 1) : null))
+        }
+      />
+
+      <InvoiceEditor
+        isOpen={previewIndex !== null && isEditingMode}
+        onClose={() => {
+          setPreviewIndex(null);
+          setIsEditingMode(false);
+        }}
+        invoice={
+          previewIndex !== null && isEditingMode ? invoices[previewIndex] : null
+        }
+        batch={batch}
+        onSave={handleSaveInvoice}
+      />
     </div>
   );
 }

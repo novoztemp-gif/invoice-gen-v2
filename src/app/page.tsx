@@ -1,19 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import {
-  FileText,
-  Building2,
-  Package,
-  Loader2,
   ArrowRight,
+  Building2,
+  FileText,
   IndianRupee,
+  Loader2,
+  Package,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { createClient } from "@/lib/supabase/client";
 
 type DashboardStats = {
   totalBatches: number;
@@ -31,7 +31,7 @@ type DashboardStats = {
     status: string;
     total_amount: number;
     created_at: string;
-    invoice_type: string;
+    batch_type: string;
   }>;
 };
 
@@ -48,7 +48,7 @@ type InvoiceTypeStats = {
     status: string;
     total_amount: number;
     created_at: string;
-    invoice_type: string;
+    batch_type: string;
   }>;
 };
 
@@ -69,10 +69,10 @@ export default function Home() {
     try {
       const supabase = createClient();
 
-      // Fetch batches with invoice_type
+      // Fetch batches with batch_type
       const { data: batches } = await supabase
         .from("invoice_batch")
-        .select("id, status, total_amount, created_at, invoice_type")
+        .select("id, status, total_amount, created_at, batch_type")
         .order("created_at", { ascending: false });
 
       // Fetch invoices
@@ -124,7 +124,7 @@ export default function Home() {
 
       // Calculate sales stats
       const salesBatches =
-        batches?.filter((b) => b.invoice_type === "sales") || [];
+        batches?.filter((b) => b.batch_type === "SALES" || !b.batch_type) || [];
       const salesTotalBatches = salesBatches.length;
       const salesPendingBatches = salesBatches.filter(
         (b) => b.status === "pending",
@@ -151,7 +151,7 @@ export default function Home() {
 
       // Calculate purchase stats
       const purchaseBatches =
-        batches?.filter((b) => b.invoice_type === "purchase") || [];
+        batches?.filter((b) => b.batch_type === "PURCHASE") || [];
       const purchaseTotalBatches = purchaseBatches.length;
       const purchasePendingBatches = purchaseBatches.filter(
         (b) => b.status === "pending",
@@ -586,7 +586,7 @@ export default function Home() {
               <div className="flex items-center gap-2">
                 <Building2 className="h-4 w-4 text-slate-400" />
                 <span className="text-sm text-slate-700">
-                  Receiving Companies
+                  Receiving Customers
                 </span>
               </div>
               <span className="text-sm font-medium text-slate-900">

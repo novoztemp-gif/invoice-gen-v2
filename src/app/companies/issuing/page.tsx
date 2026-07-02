@@ -1,7 +1,8 @@
-import { createClient } from "@/lib/supabase/server";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AddIssuingCompanyDialog } from "@/components/AddIssuingCompanyDialog";
+import { BulkUploadIssuingCompaniesDialog } from "@/components/BulkUploadIssuingCompaniesDialog";
 import { IssuingCompaniesTable } from "@/components/IssuingCompaniesTable";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { createClient } from "@/lib/supabase/server";
 
 export default async function IssuingCompaniesPage() {
   const supabase = await createClient();
@@ -32,7 +33,10 @@ export default async function IssuingCompaniesPage() {
     <div>
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-3xl font-bold text-slate-900">Issuing Companies</h1>
-        <AddIssuingCompanyDialog />
+        <div className="flex gap-2">
+          <BulkUploadIssuingCompaniesDialog />
+          <AddIssuingCompanyDialog />
+        </div>
       </div>
 
       <Card>

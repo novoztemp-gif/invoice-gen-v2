@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -10,16 +10,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { createClient } from "@/lib/supabase/client";
 
 type ReceivingCompany = {
   id: string;
   company_name: string;
   address: string;
-  gstin: string;
-  pan: string;
+  gstin?: string | null;
+  pan?: string | null;
   state: string;
   state_code?: string;
 };
@@ -72,9 +72,9 @@ export function EditReceivingCompanyDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Edit Receiving Company</DialogTitle>
+          <DialogTitle>Edit Receiving Customer</DialogTitle>
           <DialogDescription>
-            Update the details of the company that receives invoices.
+            Update the details of the customer that receives invoices.
           </DialogDescription>
         </DialogHeader>
 
@@ -105,26 +105,24 @@ export function EditReceivingCompanyDialog({
             </div>
 
             <div>
-              <Label htmlFor="gstin">GSTIN *</Label>
+              <Label htmlFor="gstin">GSTIN</Label>
               <Input
                 id="gstin"
-                value={formData.gstin}
+                value={formData.gstin || ""}
                 onChange={(e) =>
                   setFormData({ ...formData, gstin: e.target.value })
                 }
-                required
               />
             </div>
 
             <div>
-              <Label htmlFor="pan">PAN *</Label>
+              <Label htmlFor="pan">PAN</Label>
               <Input
                 id="pan"
-                value={formData.pan}
+                value={formData.pan || ""}
                 onChange={(e) =>
                   setFormData({ ...formData, pan: e.target.value })
                 }
-                required
               />
             </div>
 
@@ -162,7 +160,7 @@ export function EditReceivingCompanyDialog({
               Cancel
             </Button>
             <Button type="submit" disabled={loading}>
-              {loading ? "Updating..." : "Update Company"}
+              {loading ? "Updating..." : "Update Customer"}
             </Button>
           </div>
         </form>

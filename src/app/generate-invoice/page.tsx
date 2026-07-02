@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import {
+  Check,
+  CheckCircle2,
+  ChevronsUpDown,
+  Loader2,
+  Plus,
+  X,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Command,
   CommandEmpty,
@@ -15,442 +20,75 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { DatePicker } from "@/components/ui/date-picker";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Check, ChevronsUpDown, Plus, X, Loader2 } from "lucide-react";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { useInvoiceForm } from "@/lib/hooks/useInvoiceForm";
+import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
-import { DatePicker } from "@/components/ui/date-picker";
-
-function formatDateForStorage(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-type IssuingCompany = {
-  id: string;
-  company_name: string;
-  address: string;
-  gstin: string;
-  pan: string;
-  phone: string;
-  branch?: string;
-  bank_account_name: string;
-  bank_name: string;
-  account_number: string;
-  ifsc_code: string;
-};
-
-type ReceivingCompany = {
-  id: string;
-  company_name: string;
-  address: string;
-  gstin: string;
-  pan: string;
-  state: string;
-  state_code?: string;
-};
-
-type Product = {
-  id: string;
-  product_name: string;
-  hsn_code: string;
-  unit_of_measure: string;
-};
-
-type SelectedProductItem = {
-  product: Product;
-  perDayQtyMin: string;
-  perDayQtyMax: string;
-  perDayRateMin: string;
-  perDayRateMax: string;
-};
 
 export default function GenerateInvoice() {
-  const router = useRouter();
-  const supabase = createClient();
-
-  const [issuingCompanies, setIssuingCompanies] = useState<IssuingCompany[]>(
-    [],
-  );
-  const [receivingCompanies, setReceivingCompanies] = useState<
-    ReceivingCompany[]
-  >([]);
-  const [products, setProducts] = useState<Product[]>([]);
-
-  const [selectedIssuingCompany, setSelectedIssuingCompany] =
-    useState<IssuingCompany | null>(null);
-  const [selectedReceivingCompany, setSelectedReceivingCompany] =
-    useState<ReceivingCompany | null>(null);
-  const [selectedProducts, setSelectedProducts] = useState<
-    SelectedProductItem[]
-  >([]);
-
-  const [tempProduct, setTempProduct] = useState<Product | null>(null);
-  const [tempProductData, setTempProductData] = useState({
-    perDayQtyMin: "",
-    perDayQtyMax: "",
-    perDayRateMin: "",
-    perDayRateMax: "",
-  });
-
-  const [issuingCompanyOpen, setIssuingCompanyOpen] = useState(false);
-  const [receivingCompanyOpen, setReceivingCompanyOpen] = useState(false);
-  const [productOpen, setProductOpen] = useState(false);
-  const [isValidating, setIsValidating] = useState(false);
-
-  const currentYear = new Date().getFullYear();
-
-  const [formData, setFormData] = useState({
-    invoiceType: "",
-    transportMode: "",
-    vehicleNumber: "",
-    dateOfSupply: undefined,
-    invoiceDateFrom: undefined,
-    invoiceDateTo: undefined,
-    thresholdLimit: "",
-    totalAmount: "",
-    financialYearStart: currentYear,
-    financialYearEnd: currentYear + 1,
-  });
-
-  useEffect(() => {
-    const fetchData = async () => {
-      const supabase = createClient();
-
-      const [issuingRes, receivingRes, productsRes] = await Promise.all([
-        supabase
-          .from("issuing_companies")
-          .select("*")
-          .order("company_name", { ascending: true }),
-        supabase
-          .from("receiving_companies")
-          .select("*")
-          .order("company_name", { ascending: true }),
-        supabase
-          .from("products")
-          .select("*")
-          .order("product_name", { ascending: true }),
-      ]);
-
-      if (issuingRes.data) setIssuingCompanies(issuingRes.data);
-      if (receivingRes.data) setReceivingCompanies(receivingRes.data);
-      if (productsRes.data) setProducts(productsRes.data);
-    };
-
-    fetchData();
-  }, []);
-
-  const handleIssuingCompanyChange = (companyId: string) => {
-    const company = issuingCompanies.find((c) => c.id === companyId);
-    setSelectedIssuingCompany(company || null);
-    setIssuingCompanyOpen(false);
-  };
-
-  const handleReceivingCompanyChange = (companyId: string) => {
-    const company = receivingCompanies.find((c) => c.id === companyId);
-    setSelectedReceivingCompany(company || null);
-    setReceivingCompanyOpen(false);
-  };
-
-  const handleProductChange = (productId: string) => {
-    const product = products.find((p) => p.id === productId);
-    setTempProduct(product || null);
-    setProductOpen(false);
-  };
-
-  const handleAddProduct = () => {
-    if (!tempProduct) return;
-
-    if (
-      !tempProductData.perDayQtyMin ||
-      !tempProductData.perDayQtyMax ||
-      !tempProductData.perDayRateMin ||
-      !tempProductData.perDayRateMax
-    ) {
-      alert("Please fill in all product fields before adding!");
-      return;
-    }
-
-    if (selectedProducts.some((p) => p.product.id === tempProduct.id)) {
-      alert("This product has already been added!");
-      return;
-    }
-
-    setSelectedProducts([
-      ...selectedProducts,
-      {
-        product: tempProduct,
-        perDayQtyMin: tempProductData.perDayQtyMin,
-        perDayQtyMax: tempProductData.perDayQtyMax,
-        perDayRateMin: tempProductData.perDayRateMin,
-        perDayRateMax: tempProductData.perDayRateMax,
-      },
-    ]);
-
-    setTempProduct(null);
-    setTempProductData({
-      perDayQtyMin: "",
-      perDayQtyMax: "",
-      perDayRateMin: "",
-      perDayRateMax: "",
-    });
-  };
-
-  const handleRemoveProduct = (productId: string) => {
-    setSelectedProducts(
-      selectedProducts.filter((p) => p.product.id !== productId),
-    );
-  };
-
-  const handleSubmit = () => {
-    if (!formData.invoiceType) {
-      alert("Please select an invoice type!");
-      return;
-    }
-
-    if (!selectedIssuingCompany) {
-      alert("Please select an issuing company!");
-      return;
-    }
-
-    if (!selectedReceivingCompany) {
-      alert("Please select a receiving company!");
-      return;
-    }
-
-    if (selectedProducts.length === 0) {
-      alert("Please add at least one product!");
-      return;
-    }
-
-    for (let i = 0; i < selectedProducts.length; i++) {
-      const product = selectedProducts[i];
-      const minQty = parseFloat(product.perDayQtyMin);
-      const maxQty = parseFloat(product.perDayQtyMax);
-      const minRate = parseFloat(product.perDayRateMin);
-      const maxRate = parseFloat(product.perDayRateMax);
-
-      // Check for negative values
-      if (minQty < 0 || maxQty < 0) {
-        alert(
-          `Product "${product.product.product_name}": Quantities cannot be negative!`,
-        );
-        return;
-      }
-
-      if (minRate < 0 || maxRate < 0) {
-        alert(
-          `Product "${product.product.product_name}": Rates cannot be negative!`,
-        );
-        return;
-      }
-
-      // Check min <= max
-      if (minQty > maxQty) {
-        alert(
-          `Product "${product.product.product_name}": Minimum quantity (${minQty}) cannot be greater than maximum quantity (${maxQty})!`,
-        );
-        return;
-      }
-
-      if (minRate > maxRate) {
-        alert(
-          `Product "${product.product.product_name}": Minimum rate (${minRate}) cannot be greater than maximum rate (${maxRate})!`,
-        );
-        return;
-      }
-    }
-
-    if (
-      !formData.transportMode ||
-      !formData.vehicleNumber ||
-      !formData.dateOfSupply
-    ) {
-      alert("Please fill in all Other Details fields!");
-      return;
-    }
-
-    if (
-      !formData.invoiceDateFrom ||
-      !formData.invoiceDateTo ||
-      !formData.thresholdLimit ||
-      !formData.totalAmount
-    ) {
-      alert("Please fill in all Invoice Configuration fields!");
-      return;
-    }
-
-    if (formData.invoiceDateFrom > formData.invoiceDateTo) {
-      alert("Invoice 'From Date' must be less than or equal to 'To Date'!");
-      return;
-    }
-
-    const thresholdLimit = parseFloat(formData.thresholdLimit);
-    const totalAmount = parseFloat(formData.totalAmount);
-
-    if (thresholdLimit < 0) {
-      alert("Threshold limit cannot be negative!");
-      return;
-    }
-
-    if (totalAmount < 0) {
-      alert("Total amount cannot be negative!");
-      return;
-    }
-
-    validateInvoiceBatch();
-  };
-
-  const resetForm = () => {
-    setSelectedIssuingCompany(null);
-    setSelectedReceivingCompany(null);
-    setSelectedProducts([]);
-    setTempProduct(null);
-    setTempProductData({
-      perDayQtyMin: "",
-      perDayQtyMax: "",
-      perDayRateMin: "",
-      perDayRateMax: "",
-    });
-    setFormData({
-      invoiceType: "",
-      transportMode: "",
-      vehicleNumber: "",
-      dateOfSupply: undefined,
-      invoiceDateFrom: undefined,
-      invoiceDateTo: undefined,
-      thresholdLimit: "",
-      totalAmount: "",
-    });
-  };
-
-  const validateInvoiceBatch = async () => {
-    setIsValidating(true);
-    try {
-      const response = await fetch("/api/validate-invoice-batch", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          products: selectedProducts,
-          invoiceDateFrom: formData.invoiceDateFrom
-            ? formatDateForStorage(formData.invoiceDateFrom)
-            : null,
-          invoiceDateTo: formData.invoiceDateTo
-            ? formatDateForStorage(formData.invoiceDateTo)
-            : null,
-          thresholdLimit: formData.thresholdLimit,
-          totalAmount: formData.totalAmount,
-        }),
-      });
-
-      const result = await response.json();
-
-      if (result.isValid) {
-        await createInvoiceBatch();
-      } else {
-        alert(result.message);
-      }
-    } catch (error) {
-      console.error("Validation error:", error);
-      alert("An error occurred while validating. Please try again.");
-    } finally {
-      setIsValidating(false);
-    }
-  };
-
-  const createInvoiceBatch = async () => {
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
-        alert("You must be logged in to create an invoice batch.");
-        return;
-      }
-
-      const { data, error } = await supabase
-        .from("invoice_batch")
-        .insert({
-          issuing_company_id: selectedIssuingCompany?.id,
-          receiving_company_id: selectedReceivingCompany?.id,
-          invoice_type: formData.invoiceType,
-          transport_mode: formData.transportMode,
-          vehicle_number: formData.vehicleNumber,
-          date_of_supply: formData.dateOfSupply
-            ? formatDateForStorage(formData.dateOfSupply)
-            : null,
-          invoice_date_from: formData.invoiceDateFrom
-            ? formatDateForStorage(formData.invoiceDateFrom)
-            : null,
-          invoice_date_to: formData.invoiceDateTo
-            ? formatDateForStorage(formData.invoiceDateTo)
-            : null,
-          threshold_limit: parseFloat(formData.thresholdLimit),
-          total_amount: parseFloat(formData.totalAmount),
-          products: selectedProducts.map((item) => ({
-            product_id: item.product.id,
-            product_name: item.product.product_name,
-            hsn_code: item.product.hsn_code,
-            unit_of_measure: item.product.unit_of_measure,
-            perDayQtyMin: item.perDayQtyMin,
-            perDayQtyMax: item.perDayQtyMax,
-            perDayRateMin: item.perDayRateMin,
-            perDayRateMax: item.perDayRateMax,
-          })),
-          status: "pending",
-          created_by: user.id,
-        })
-        .select()
-        .single();
-
-      if (error) {
-        console.error("Error creating invoice batch:", error);
-        alert("Failed to create invoice batch. Please try again.");
-        return;
-      }
-
-      console.log("Invoice batch created:", data);
-      alert("Invoice batch created successfully! Redirecting...");
-
-      resetForm();
-
-      router.push("/invoice-batches");
-    } catch (error) {
-      console.error("Error creating invoice batch:", error);
-      alert("An error occurred while creating the batch. Please try again.");
-    }
-  };
+  const {
+    issuingCompanies,
+    receivingCompanies,
+    products,
+    productRules,
+    errorPopup,
+    setErrorPopup,
+    selectedIssuingCompany,
+    selectedCustomers,
+    majorCustomers,
+    customerOpen,
+    setCustomerOpen,
+    majorCustomerOpen,
+    setMajorCustomerOpen,
+    tempMajorCustomer,
+    setTempMajorCustomer,
+    selectedProducts,
+    setSelectedProducts,
+    tempProduct,
+    setTempProduct,
+    issuingCompanyOpen,
+    setIssuingCompanyOpen,
+    productOpen,
+    setProductOpen,
+    recurringProducts,
+    recurringProductOpen,
+    setRecurringProductOpen,
+    tempRecurringProduct,
+    setTempRecurringProduct,
+    isValidating,
+    formData,
+    setFormData,
+    handleIssuingCompanyChange,
+    handleProductChange,
+    handleAddMajorCustomer,
+    handleRemoveMajorCustomer,
+    handleToggleCustomer,
+    handleSelectAllCustomers,
+    handleAddProduct,
+    handleRemoveProduct,
+    handleAddRecurringProduct,
+    handleRemoveRecurringProduct,
+    handleSubmit,
+  } = useInvoiceForm({ batchType: "SALES" });
 
   return (
     <div>
-      <h1 className="text-3xl font-bold text-slate-900 mb-6">
-        Generate Invoice
-      </h1>
-
-      <div className="mb-6">
-        <RadioGroup
-          value={formData.invoiceType}
-          onValueChange={(value) =>
-            setFormData({ ...formData, invoiceType: value })
-          }
-          className="flex gap-6 mt-2"
-        >
-          <div className="flex items-center space-x-2">
-            <RadioGroupItem value="sales" id="sales" />
-            <Label htmlFor="sales">Sales</Label>
-          </div>
-          <div className="flex items-center space-x-2">
-            <RadioGroupItem value="purchase" id="purchase" />
-            <Label htmlFor="purchase">Purchase</Label>
-          </div>
-        </RadioGroup>
-      </div>
+      <h1 className="text-3xl font-bold text-slate-900 mb-6">Sales Invoice</h1>
 
       <div
         className={cn(
@@ -458,6 +96,54 @@ export default function GenerateInvoice() {
           isValidating && "opacity-60 pointer-events-none",
         )}
       >
+        {/* Financial Year */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Financial Year</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="financial-year-start">Start Year *</Label>
+                <Input
+                  id="financial-year-start"
+                  type="number"
+                  placeholder="Enter start year"
+                  value={formData.financialYearStart}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value) || 0;
+                    setFormData({
+                      ...formData,
+                      financialYearStart: val,
+                      financialYearEnd: val + 1,
+                    });
+                  }}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="financial-year-end">End Year</Label>
+                <Input
+                  id="financial-year-end"
+                  type="number"
+                  value={formData.financialYearEnd}
+                  disabled
+                  className="bg-slate-50"
+                />
+              </div>
+              <div className="md:col-span-2 mt-2">
+                <span className="text-sm font-medium text-slate-500">
+                  Live Preview:{" "}
+                </span>
+                <span className="text-sm font-bold text-slate-900">
+                  FY{formData.financialYearStart}-
+                  {String(formData.financialYearEnd).slice(2)}
+                </span>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
         {/* Sender Company (Issuing Invoice) */}
         <Card>
           <CardHeader>
@@ -613,358 +299,599 @@ export default function GenerateInvoice() {
           </CardContent>
         </Card>
 
-        {/* Receiver Company (Receiving Invoice) */}
+        {/* Receiver Customer (Receiving Invoice) */}
+        {/* Customers Selection */}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle>Customers</CardTitle>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleSelectAllCustomers}
+            >
+              {(() => {
+                const regularCompanies = receivingCompanies.filter(
+                  (c) => !majorCustomers.some((m) => m.customer_id === c.id),
+                );
+                return selectedCustomers.length === regularCompanies.length &&
+                  regularCompanies.length > 0
+                  ? "Deselect All"
+                  : "Select All";
+              })()}
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Searchable Multi-Select Dropdown */}
+            <Popover open={customerOpen} onOpenChange={setCustomerOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  role="combobox"
+                  aria-expanded={customerOpen}
+                  className="w-full justify-between"
+                >
+                  Search & Select Customers...
+                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-full p-0" align="start">
+                <Command>
+                  <CommandInput placeholder="Search by name, GSTIN, or state..." />
+                  <CommandList>
+                    <CommandEmpty>No customer found.</CommandEmpty>
+                    <CommandGroup>
+                      {receivingCompanies
+                        .filter(
+                          (c) =>
+                            !majorCustomers.some((m) => m.customer_id === c.id),
+                        )
+                        .map((company) => {
+                          const isSelected = selectedCustomers.includes(
+                            company.id,
+                          );
+                          return (
+                            <CommandItem
+                              key={company.id}
+                              value={`${company.company_name} ${company.gstin || ""} ${company.state || ""}`}
+                              onSelect={() => handleToggleCustomer(company.id)}
+                            >
+                              <Check
+                                className={cn(
+                                  "mr-2 h-4 w-4",
+                                  isSelected ? "opacity-100" : "opacity-0",
+                                )}
+                              />
+                              <div className="flex flex-col">
+                                <span>{company.company_name}</span>
+                                <span className="text-xs text-slate-500">
+                                  {company.state}{" "}
+                                  {company.gstin ? `| ${company.gstin}` : ""}
+                                </span>
+                              </div>
+                            </CommandItem>
+                          );
+                        })}
+                    </CommandGroup>
+                  </CommandList>
+                </Command>
+              </PopoverContent>
+            </Popover>
+
+            {/* Selected Customers Chips */}
+            {selectedCustomers.length > 0 && (
+              <div className="space-y-2">
+                <Label className="text-sm font-medium text-slate-700">
+                  Selected Customers ({selectedCustomers.length})
+                </Label>
+                <div className="flex flex-wrap gap-2">
+                  {selectedCustomers.map((id) => {
+                    const company = receivingCompanies.find((c) => c.id === id);
+                    if (!company) return null;
+                    return (
+                      <div
+                        key={company.id}
+                        className="flex items-center gap-1 bg-slate-100 text-slate-800 px-3 py-1.5 rounded-full text-sm border border-slate-200"
+                      >
+                        <span className="font-medium truncate max-w-[200px]">
+                          {company.company_name}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleCustomer(company.id)}
+                          className="text-slate-500 hover:text-red-500 focus:outline-none ml-1"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <p className="text-xs text-slate-500 mt-2">
+              Can't find the customer you're looking for?{" "}
+              <a
+                href="/companies/receiving"
+                className="text-slate-800 hover:underline"
+              >
+                Add or edit receiving customers here
+              </a>
+            </p>
+          </CardContent>
+        </Card>
+
+        {/* Major Customers Allocation */}
         <Card>
           <CardHeader>
-            <CardTitle>Company Receiving Invoice</CardTitle>
+            <CardTitle>Major Customers</CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2 md:col-span-2">
-                <Label htmlFor="receiving-company">Company Name *</Label>
+          <CardContent className="space-y-6">
+            {/* Add Major Customer Form */}
+            <div className="flex flex-col md:flex-row items-end gap-3 p-4 rounded-lg border border-slate-200 bg-slate-50">
+              <div className="w-full md:flex-1 space-y-1">
+                <Label className="text-xs">Search Customer *</Label>
                 <Popover
-                  open={receivingCompanyOpen}
-                  onOpenChange={setReceivingCompanyOpen}
+                  open={majorCustomerOpen}
+                  onOpenChange={setMajorCustomerOpen}
                 >
                   <PopoverTrigger asChild>
                     <Button
                       variant="outline"
                       role="combobox"
-                      aria-expanded={receivingCompanyOpen}
-                      className="w-full justify-between"
+                      aria-expanded={majorCustomerOpen}
+                      className="w-full justify-between h-10"
                     >
-                      {selectedReceivingCompany
-                        ? selectedReceivingCompany.company_name
-                        : "Select receiving company..."}
+                      {tempMajorCustomer.customer_id
+                        ? receivingCompanies.find(
+                            (c) => c.id === tempMajorCustomer.customer_id,
+                          )?.company_name
+                        : "Select customer..."}
                       <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                     </Button>
                   </PopoverTrigger>
-                  <PopoverContent className="w-full p-0" align="start">
+                  <PopoverContent
+                    className="w-[300px] md:w-[400px] p-0"
+                    align="start"
+                  >
                     <Command>
-                      <CommandInput placeholder="Search company..." />
+                      <CommandInput placeholder="Search by name, GSTIN, or state..." />
                       <CommandList>
-                        <CommandEmpty>No company found.</CommandEmpty>
+                        <CommandEmpty>No customer found.</CommandEmpty>
                         <CommandGroup>
-                          {receivingCompanies.map((company) => (
-                            <CommandItem
-                              key={company.id}
-                              value={company.company_name}
-                              onSelect={() =>
-                                handleReceivingCompanyChange(company.id)
-                              }
-                            >
-                              <Check
-                                className={cn(
-                                  "mr-2 h-4 w-4",
-                                  selectedReceivingCompany?.id === company.id
-                                    ? "opacity-100"
-                                    : "opacity-0",
-                                )}
-                              />
-                              {company.company_name}
-                            </CommandItem>
-                          ))}
+                          {receivingCompanies
+                            .filter(
+                              (company) =>
+                                !majorCustomers.some(
+                                  (m) => m.customer_id === company.id,
+                                ),
+                            )
+                            .map((company) => (
+                              <CommandItem
+                                key={company.id}
+                                value={`${company.company_name} ${company.gstin || ""} ${company.state || ""}`}
+                                onSelect={() => {
+                                  setTempMajorCustomer({
+                                    ...tempMajorCustomer,
+                                    customer_id: company.id,
+                                  });
+                                  setMajorCustomerOpen(false);
+                                }}
+                              >
+                                <Check
+                                  className={cn(
+                                    "mr-2 h-4 w-4",
+                                    tempMajorCustomer.customer_id === company.id
+                                      ? "opacity-100"
+                                      : "opacity-0",
+                                  )}
+                                />
+                                <div className="flex flex-col">
+                                  <span>{company.company_name}</span>
+                                  <span className="text-xs text-slate-500">
+                                    {company.state}{" "}
+                                    {company.gstin ? `| ${company.gstin}` : ""}
+                                  </span>
+                                </div>
+                              </CommandItem>
+                            ))}
                         </CommandGroup>
                       </CommandList>
                     </Command>
                   </PopoverContent>
                 </Popover>
-                <p className="text-xs text-slate-500">
-                  Can't find the company you're looking for?{" "}
-                  <a
-                    href="/companies/receiving"
-                    className="text-slate-800 hover:underline"
-                  >
-                    Add or edit receiving companies here
-                  </a>
-                </p>
               </div>
 
-              {selectedReceivingCompany && (
-                <>
-                  <div className="space-y-2 md:col-span-2">
-                    <Label>Address</Label>
-                    <Input
-                      value={selectedReceivingCompany.address}
-                      disabled
-                      className="bg-slate-50"
-                    />
-                  </div>
+              <div className="w-full md:w-32 space-y-1">
+                <Label className="text-xs">Amount *</Label>
+                <Input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  placeholder="₹"
+                  value={tempMajorCustomer.amount}
+                  onChange={(e) =>
+                    setTempMajorCustomer({
+                      ...tempMajorCustomer,
+                      amount: e.target.value,
+                    })
+                  }
+                  className="h-10 bg-white"
+                />
+              </div>
 
-                  <div className="space-y-2">
-                    <Label>GSTIN</Label>
-                    <Input
-                      value={selectedReceivingCompany.gstin}
-                      disabled
-                      className="bg-slate-50"
-                    />
-                  </div>
+              <div className="w-full md:w-24 space-y-1">
+                <Label className="text-xs">Invoices *</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  step="1"
+                  placeholder="#"
+                  value={tempMajorCustomer.invoice_count}
+                  onChange={(e) =>
+                    setTempMajorCustomer({
+                      ...tempMajorCustomer,
+                      invoice_count: e.target.value,
+                    })
+                  }
+                  className="h-10 bg-white"
+                />
+              </div>
 
-                  <div className="space-y-2">
-                    <Label>PAN</Label>
-                    <Input
-                      value={selectedReceivingCompany.pan}
-                      disabled
-                      className="bg-slate-50"
-                    />
-                  </div>
-
-                  <div className="space-y-2 md:col-span-2">
-                    <Label>State</Label>
-                    <Input
-                      value={selectedReceivingCompany.state}
-                      disabled
-                      className="bg-slate-50"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label>State Code</Label>
-                    <Input
-                      value={selectedReceivingCompany.state_code || ""}
-                      disabled
-                      className="bg-slate-50"
-                    />
-                  </div>
-                </>
-              )}
+              <Button
+                type="button"
+                onClick={handleAddMajorCustomer}
+                className="w-full md:w-auto h-10 px-6 gap-2"
+              >
+                <Plus className="h-4 w-4" /> Add
+              </Button>
             </div>
+
+            {/* List of Added Major Customers */}
+            {majorCustomers.length > 0 ? (
+              <div className="space-y-3">
+                {majorCustomers.map((major, index) => {
+                  const company = receivingCompanies.find(
+                    (c) => c.id === major.customer_id,
+                  );
+                  return (
+                    <div
+                      key={index}
+                      className="flex items-center justify-between p-3 rounded-lg border border-slate-200"
+                    >
+                      <div>
+                        <p className="font-semibold text-slate-900">
+                          {company?.company_name}
+                        </p>
+                        <p className="text-sm text-slate-500">
+                          ₹{parseFloat(major.amount).toLocaleString()} •{" "}
+                          {major.invoice_count} Invoices
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRemoveMajorCustomer(index)}
+                        className="text-red-500 hover:text-red-700 hover:bg-red-50"
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-center py-6 text-slate-500 text-sm">
+                No major customer allocations configured.
+              </div>
+            )}
           </CardContent>
         </Card>
 
         {/* Product Details */}
         <Card>
           <CardHeader>
-            <CardTitle>Product Details</CardTitle>
+            <CardTitle>Products</CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">
-            {/* Added Products List */}
+            <div className="space-y-2">
+              <Label className="text-xs font-semibold">
+                Search & Select Products
+              </Label>
+              <div className="flex gap-2">
+                <Popover open={productOpen} onOpenChange={setProductOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      aria-expanded={productOpen}
+                      className="flex-1 justify-between h-10"
+                    >
+                      Search & Select Products........
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-full p-0" align="start">
+                    <Command>
+                      <CommandInput placeholder="Search by name, HSN code, or unit..." />
+                      <CommandList>
+                        <CommandEmpty>No product found.</CommandEmpty>
+                        <CommandGroup>
+                          {products
+                            .filter((p) =>
+                              productRules.some((r) => r.product_id === p.id),
+                            )
+                            .map((product) => {
+                              const isSelected = selectedProducts.some(
+                                (p) => p.product.id === product.id,
+                              );
+                              return (
+                                <CommandItem
+                                  key={product.id}
+                                  value={`${product.product_name} ${product.hsn_code} ${product.unit_of_measure}`}
+                                  onSelect={() => {
+                                    if (isSelected) {
+                                      setSelectedProducts(
+                                        selectedProducts.filter(
+                                          (p) => p.product.id !== product.id,
+                                        ),
+                                      );
+                                    } else {
+                                      const rule = productRules.find(
+                                        (r) => r.product_id === product.id,
+                                      );
+                                      setSelectedProducts([
+                                        ...selectedProducts,
+                                        {
+                                          product,
+                                          perDayQtyMin:
+                                            rule?.quantity_min?.toString() ||
+                                            "",
+                                          perDayQtyMax:
+                                            rule?.quantity_max?.toString() ||
+                                            "",
+                                          perDayRateMin:
+                                            rule?.rate_min?.toString() || "",
+                                          perDayRateMax:
+                                            rule?.rate_max?.toString() || "",
+                                        },
+                                      ]);
+                                    }
+                                  }}
+                                >
+                                  <Check
+                                    className={cn(
+                                      "mr-2 h-4 w-4",
+                                      isSelected ? "opacity-100" : "opacity-0",
+                                    )}
+                                  />
+                                  <div className="flex flex-col">
+                                    <span>{product.product_name}</span>
+                                    <span className="text-xs text-slate-500">
+                                      HSN: {product.hsn_code} | Unit:{" "}
+                                      {product.unit_of_measure}
+                                    </span>
+                                  </div>
+                                </CommandItem>
+                              );
+                            })}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+                <Button
+                  variant="secondary"
+                  className="h-10 shrink-0"
+                  onClick={() => {
+                    const configuredProducts = products.filter((p) =>
+                      productRules.some((r) => r.product_id === p.id),
+                    );
+                    const newSelections = configuredProducts.map((product) => {
+                      const rule = productRules.find(
+                        (r) => r.product_id === product.id,
+                      );
+                      return {
+                        product,
+                        perDayQtyMin: rule?.quantity_min?.toString() || "",
+                        perDayQtyMax: rule?.quantity_max?.toString() || "",
+                        perDayRateMin: rule?.rate_min?.toString() || "",
+                        perDayRateMax: rule?.rate_max?.toString() || "",
+                      };
+                    });
+                    setSelectedProducts(newSelections);
+                  }}
+                >
+                  Select All
+                </Button>
+              </div>
+            </div>
+
+            {/* Selected Products Cards/Chips with Inputs */}
             {selectedProducts.length > 0 && (
               <div className="space-y-3">
-                <Label className="text-base font-semibold">
-                  Added Products ({selectedProducts.length})
+                <Label className="text-sm font-medium text-slate-700">
+                  Selected Products ({selectedProducts.length})
                 </Label>
-                <div className="space-y-3">
-                  {selectedProducts.map((item, index) => (
+                <div className="flex flex-wrap gap-2">
+                  {selectedProducts.map((item) => (
                     <div
                       key={item.product.id}
-                      className="p-4 border rounded-lg bg-slate-50 space-y-3"
+                      className="flex items-center gap-2 pl-3 pr-1 py-1 bg-slate-100 border border-slate-200 rounded-full text-sm"
                     >
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="font-semibold text-slate-900">
-                              {index + 1}. {item.product.product_name}
-                            </span>
-                            <span className="text-xs text-slate-500 font-mono">
-                              HSN: {item.product.hsn_code}
-                            </span>
-                          </div>
-                          <p className="text-sm text-slate-600 mt-1">
-                            Unit: {item.product.unit_of_measure}
-                          </p>
-                        </div>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleRemoveProduct(item.product.id)}
-                          className="text-red-600 hover:text-red-700 hover:bg-red-50"
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <div>
-                          <Label className="text-xs text-slate-600">
-                            Quantity Range (per day)
-                          </Label>
-                          <p className="text-sm font-medium">
-                            {item.perDayQtyMin || "—"} to{" "}
-                            {item.perDayQtyMax || "—"}
-                          </p>
-                        </div>
-                        <div>
-                          <Label className="text-xs text-slate-600">
-                            Rate Range (per unit per day)
-                          </Label>
-                          <p className="text-sm font-medium">
-                            ₹{item.perDayRateMin || "—"} to ₹
-                            {item.perDayRateMax || "—"}
-                          </p>
-                        </div>
-                      </div>
+                      <span className="font-medium text-slate-800">
+                        {item.product.product_name}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRemoveProduct(item.product.id)}
+                        className="h-5 w-5 p-0 rounded-full hover:bg-slate-200 text-slate-500 hover:text-slate-700"
+                      >
+                        <X className="h-3 w-3" />
+                      </Button>
                     </div>
                   ))}
                 </div>
               </div>
             )}
+          </CardContent>
+        </Card>
 
-            {/* Add New Product Form */}
-            <div className="space-y-4 pt-4 border-t">
-              <Label className="text-base font-semibold">Add Product</Label>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2 md:col-span-2">
-                  <Label htmlFor="product">Product Name *</Label>
-                  <Popover open={productOpen} onOpenChange={setProductOpen}>
-                    <PopoverTrigger asChild>
-                      <Button
-                        variant="outline"
-                        role="combobox"
-                        aria-expanded={productOpen}
-                        className="w-full justify-between"
-                      >
-                        {tempProduct
-                          ? tempProduct.product_name
-                          : "Select product..."}
-                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-full p-0" align="start">
-                      <Command>
-                        <CommandInput placeholder="Search product..." />
-                        <CommandList>
-                          <CommandEmpty>No product found.</CommandEmpty>
-                          <CommandGroup>
-                            {products.map((product) => (
+        {/* Recurring Products */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Recurring Products</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="flex flex-col md:flex-row items-end gap-3 p-4 rounded-lg border border-slate-200 bg-slate-50">
+              <div className="w-full md:flex-1 space-y-1">
+                <Label className="text-xs">Search Product *</Label>
+                <Popover
+                  open={recurringProductOpen}
+                  onOpenChange={setRecurringProductOpen}
+                >
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      aria-expanded={recurringProductOpen}
+                      className="w-full justify-between h-10 bg-white"
+                    >
+                      {tempRecurringProduct.product_id
+                        ? products.find(
+                            (c) => c.id === tempRecurringProduct.product_id,
+                          )?.product_name
+                        : "Select product..."}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    className="w-[300px] md:w-[400px] p-0"
+                    align="start"
+                  >
+                    <Command>
+                      <CommandInput placeholder="Search selected products..." />
+                      <CommandList>
+                        <CommandEmpty>No product found.</CommandEmpty>
+                        <CommandGroup>
+                          {selectedProducts
+                            .filter(
+                              (item) =>
+                                !recurringProducts.some(
+                                  (r) => r.product_id === item.product.id,
+                                ),
+                            )
+                            .map((item) => (
                               <CommandItem
-                                key={product.id}
-                                value={`${product.product_name} ${product.hsn_code}`}
-                                onSelect={() => handleProductChange(product.id)}
+                                key={item.product.id}
+                                value={`${item.product.product_name} ${item.product.hsn_code}`}
+                                onSelect={() => {
+                                  setTempRecurringProduct({
+                                    ...tempRecurringProduct,
+                                    product_id: item.product.id,
+                                  });
+                                  setRecurringProductOpen(false);
+                                }}
                               >
                                 <Check
                                   className={cn(
                                     "mr-2 h-4 w-4",
-                                    tempProduct?.id === product.id
+                                    tempRecurringProduct.product_id ===
+                                      item.product.id
                                       ? "opacity-100"
                                       : "opacity-0",
                                   )}
                                 />
                                 <div className="flex flex-col">
-                                  <span>{product.product_name}</span>
+                                  <span>{item.product.product_name}</span>
                                   <span className="text-xs text-slate-500">
-                                    HSN: {product.hsn_code}
+                                    HSN: {item.product.hsn_code}
                                   </span>
                                 </div>
                               </CommandItem>
                             ))}
-                          </CommandGroup>
-                        </CommandList>
-                      </Command>
-                    </PopoverContent>
-                  </Popover>
-                  <p className="text-xs text-slate-500">
-                    Can't find the product you're looking for?{" "}
-                    <a
-                      href="/products"
-                      className="text-slate-800 hover:underline"
-                    >
-                      Add or edit products here
-                    </a>
-                  </p>
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
+
+              <div className="w-full md:w-32 space-y-1">
+                <Label className="text-xs">Percentage *</Label>
+                <div className="relative">
+                  <Input
+                    type="number"
+                    min="1"
+                    max="100"
+                    step="1"
+                    placeholder="e.g. 60"
+                    value={tempRecurringProduct.percentage}
+                    onChange={(e) =>
+                      setTempRecurringProduct({
+                        ...tempRecurringProduct,
+                        percentage: e.target.value,
+                      })
+                    }
+                    className="h-10 bg-white pr-8"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
+                    %
+                  </span>
                 </div>
+              </div>
 
-                {tempProduct && (
-                  <>
-                    <div className="space-y-2">
-                      <Label>HSN Code</Label>
-                      <Input
-                        value={tempProduct.hsn_code}
-                        disabled
-                        className="bg-slate-50"
-                      />
-                    </div>
+              <Button
+                type="button"
+                onClick={handleAddRecurringProduct}
+                className="w-full md:w-auto h-10 px-6 gap-2"
+              >
+                <Plus className="h-4 w-4" /> Add
+              </Button>
+            </div>
 
-                    <div className="space-y-2">
-                      <Label>Unit of Measure</Label>
-                      <Input
-                        value={tempProduct.unit_of_measure}
-                        disabled
-                        className="bg-slate-50"
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Per Day Quantity Range *</Label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <Input
-                          type="number"
-                          placeholder="Min"
-                          min="0"
-                          step="0.01"
-                          value={tempProductData.perDayQtyMin}
-                          onChange={(e) =>
-                            setTempProductData({
-                              ...tempProductData,
-                              perDayQtyMin: e.target.value,
-                            })
-                          }
-                          required
-                        />
-                        <Input
-                          type="number"
-                          placeholder="Max"
-                          min="0"
-                          step="0.01"
-                          value={tempProductData.perDayQtyMax}
-                          onChange={(e) =>
-                            setTempProductData({
-                              ...tempProductData,
-                              perDayQtyMax: e.target.value,
-                            })
-                          }
-                          required
-                        />
+            {/* List of Added Recurring Products */}
+            {recurringProducts.length > 0 ? (
+              <div className="space-y-3">
+                {recurringProducts.map((rp, index) => {
+                  const product = products.find((p) => p.id === rp.product_id);
+                  return (
+                    <div
+                      key={index}
+                      className="flex items-center justify-between p-3 rounded-lg border border-slate-200"
+                    >
+                      <div>
+                        <p className="font-semibold text-slate-900">
+                          {product?.product_name}
+                        </p>
+                        <p className="text-sm text-slate-500">
+                          {rp.percentage}% Likelihood
+                        </p>
                       </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Per Day Rate Per Unit Range *</Label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <Input
-                          type="number"
-                          placeholder="Min"
-                          min="0"
-                          step="0.01"
-                          value={tempProductData.perDayRateMin}
-                          onChange={(e) =>
-                            setTempProductData({
-                              ...tempProductData,
-                              perDayRateMin: e.target.value,
-                            })
-                          }
-                          required
-                        />
-                        <Input
-                          type="number"
-                          placeholder="Max"
-                          min="0"
-                          step="0.01"
-                          value={tempProductData.perDayRateMax}
-                          onChange={(e) =>
-                            setTempProductData({
-                              ...tempProductData,
-                              perDayRateMax: e.target.value,
-                            })
-                          }
-                          required
-                        />
-                      </div>
-                    </div>
-
-                    <div className="md:col-span-2 flex justify-end">
                       <Button
-                        onClick={handleAddProduct}
-                        className="gap-2"
                         type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          handleRemoveRecurringProduct(rp.product_id)
+                        }
+                        className="text-red-500 hover:text-red-700 hover:bg-red-50"
                       >
-                        <Plus className="h-4 w-4" />
-                        Add Product to Invoice
+                        Remove
                       </Button>
                     </div>
-                  </>
-                )}
+                  );
+                })}
               </div>
-            </div>
+            ) : (
+              <div className="text-center py-6 text-slate-500 text-sm border border-dashed rounded-lg border-slate-200">
+                No recurring products configured.
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -1019,22 +946,47 @@ export default function GenerateInvoice() {
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="threshold-limit">
-                  Threshold Limit (Per Invoice) *
-                </Label>
-                <Input
-                  id="threshold-limit"
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="Enter maximum amount per invoice"
-                  value={formData.thresholdLimit}
-                  onChange={(e) =>
-                    setFormData({ ...formData, thresholdLimit: e.target.value })
-                  }
-                  required
-                />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="minimum-invoice-amount">
+                    Minimum Invoice Amount *
+                  </Label>
+                  <Input
+                    id="minimum-invoice-amount"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Enter minimum invoice amount"
+                    value={formData.minimumInvoiceAmount}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        minimumInvoiceAmount: e.target.value,
+                      })
+                    }
+                    required
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="maximum-invoice-amount">
+                    Maximum Invoice Amount *
+                  </Label>
+                  <Input
+                    id="maximum-invoice-amount"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Enter maximum invoice amount"
+                    value={formData.maximumInvoiceAmount}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        maximumInvoiceAmount: e.target.value,
+                      })
+                    }
+                    required
+                  />
+                </div>
               </div>
 
               <div className="space-y-2">
@@ -1066,20 +1018,18 @@ export default function GenerateInvoice() {
           <CardContent>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="transport-mode">Transportation Mode *</Label>
+                <Label htmlFor="transport-mode">Transportation Mode</Label>
                 <Input
                   id="transport-mode"
-                  placeholder="Enter transportation mode"
                   value={formData.transportMode}
-                  onChange={(e) =>
-                    setFormData({ ...formData, transportMode: e.target.value })
-                  }
-                  required
+                  disabled
+                  readOnly
+                  className="bg-slate-50"
                 />
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="vehicle-number">Vehicle Number *</Label>
+                <Label htmlFor="vehicle-number">Vehicle Number</Label>
                 <Input
                   id="vehicle-number"
                   placeholder="Enter vehicle number"
@@ -1087,22 +1037,22 @@ export default function GenerateInvoice() {
                   onChange={(e) =>
                     setFormData({ ...formData, vehicleNumber: e.target.value })
                   }
-                  required
                 />
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="date-of-supply">
-                  Date of Supply (On or Before) *
+                  Date of Supply (On or Before)
                 </Label>
-                <DatePicker
-                  date={formData.dateOfSupply}
-                  onDateChange={(date) =>
-                    setFormData({ ...formData, dateOfSupply: date })
-                  }
-                  placeholder="Select date of supply"
-                  required
-                />
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-slate-500 flex flex-col justify-center min-h-[44px]">
+                  <span className="text-[10px] font-bold text-slate-400 tracking-wide uppercase">
+                    AUTO GENERATED
+                  </span>
+                  <span className="text-xs mt-0.5">
+                    Date of Supply will automatically match each generated
+                    invoice date.
+                  </span>
+                </div>
               </div>
             </div>
           </CardContent>
@@ -1128,6 +1078,52 @@ export default function GenerateInvoice() {
           )}
         </Button>
       </div>
+      {/* Popup Dialog */}
+      <Dialog
+        open={!!errorPopup}
+        onOpenChange={(open) => !open && setErrorPopup(null)}
+      >
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle
+              className={cn(
+                "flex items-center gap-2",
+                errorPopup?.includes("successfully")
+                  ? "text-green-600"
+                  : "text-red-600",
+              )}
+            >
+              {errorPopup?.includes("successfully") ? (
+                <CheckCircle2 className="w-5 h-5" />
+              ) : (
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+              )}
+              {errorPopup?.includes("successfully")
+                ? "Success"
+                : "Validation Error"}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="py-2">
+            <p className="text-sm text-slate-700">{errorPopup}</p>
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setErrorPopup(null)}>OK</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

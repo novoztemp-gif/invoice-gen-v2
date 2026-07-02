@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -10,9 +10,9 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { createClient } from "@/lib/supabase/client";
 
 export function AddReceivingCompanyDialog() {
   const [open, setOpen] = useState(false);
@@ -69,12 +69,12 @@ export function AddReceivingCompanyDialog() {
               d="M12 4v16m8-8H4"
             />
           </svg>
-          Add Company
+          Add Customer
         </Button>
       </DialogTrigger>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Add Receiving Company</DialogTitle>
+          <DialogTitle>Add Receiving Customer</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -99,13 +99,13 @@ export function AddReceivingCompanyDialog() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="gstin">GSTIN *</Label>
-              <Input id="gstin" name="gstin" required />
+              <Label htmlFor="gstin">GSTIN</Label>
+              <Input id="gstin" name="gstin" />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="pan">PAN *</Label>
-              <Input id="pan" name="pan" required />
+              <Label htmlFor="pan">PAN</Label>
+              <Input id="pan" name="pan" />
             </div>
           </div>
 
@@ -125,7 +125,7 @@ export function AddReceivingCompanyDialog() {
               Cancel
             </Button>
             <Button type="submit" disabled={loading}>
-              {loading ? "Adding..." : "Add Company"}
+              {loading ? "Adding..." : "Add Customer"}
             </Button>
           </div>
         </form>
