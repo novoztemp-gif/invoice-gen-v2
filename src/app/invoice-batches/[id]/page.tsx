@@ -11,6 +11,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
+import { useState } from "react";
 import InvoiceEditor from "@/components/InvoiceEditor";
 import InvoicePreview from "@/components/InvoicePreview";
 import { Badge } from "@/components/ui/badge";
@@ -99,6 +100,11 @@ export default function BatchDetail() {
   const params = useParams();
   const router = useRouter();
   const batchId = params.id as string;
+
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<
+    "FINALIZE" | "REOPEN" | null
+  >(null);
 
   const {
     batch,
@@ -256,17 +262,44 @@ export default function BatchDetail() {
               Download ZIP
             </Button>
 
+            {/* Download Summary Button (Visible only when Finalized) */}
+            {batch.batch_status === "FINALIZED" && (
+              <Button
+                onClick={() =>
+                  triggerDownload(
+                    `/api/download-summary?id=${params.id}`,
+                    `Summary_Batch_${batch.financial_year || "Batch"}.xlsx`,
+                  )
+                }
+                className="gap-2 text-blue-600 border-blue-200 hover:bg-blue-50"
+                variant="outline"
+              >
+                <Download className="h-4 w-4" />
+                Download Summary
+              </Button>
+            )}
+
             {/* Finalize / Reopen Button */}
             {batch.batch_status === "FINALIZED" ? (
               <Button
-                onClick={() => handleBatchStatusChange("REOPEN")}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setConfirmAction("REOPEN");
+                  setShowConfirmModal(true);
+                }}
                 className="gap-2 bg-orange-600 hover:bg-orange-700 text-white"
               >
                 Reopen Batch
               </Button>
             ) : (
               <Button
-                onClick={() => handleBatchStatusChange("FINALIZE")}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setConfirmAction("FINALIZE");
+                  setShowConfirmModal(true);
+                }}
                 className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white"
               >
                 Finalize Batch
@@ -904,6 +937,50 @@ export default function BatchDetail() {
         batch={batch}
         onSave={handleSaveInvoice}
       />
+
+      {/* Custom Confirmation Modal */}
+      {showConfirmModal && confirmAction && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full shadow-xl border border-slate-200 animate-in fade-in zoom-in duration-200">
+            <h3 className="text-lg font-semibold text-slate-900 mb-2">
+              {confirmAction === "FINALIZE" ? "Finalize" : "Reopen"} Invoice
+              Batch
+            </h3>
+            <p className="text-sm text-slate-600 mb-6 leading-relaxed">
+              {confirmAction === "FINALIZE"
+                ? "After finalization this batch becomes read-only. To edit again it must be reopened."
+                : "Reopening will allow invoices to be edited again."}
+            </p>
+            <div className="flex justify-end gap-3">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setShowConfirmModal(false);
+                  setConfirmAction(null);
+                }}
+                className="h-10 px-4"
+              >
+                Cancel
+              </Button>
+              <Button
+                className={
+                  confirmAction === "FINALIZE"
+                    ? "h-10 px-4 bg-emerald-600 hover:bg-emerald-700 text-white"
+                    : "h-10 px-4 bg-orange-600 hover:bg-orange-700 text-white"
+                }
+                onClick={async () => {
+                  setShowConfirmModal(false);
+                  const actionToRun = confirmAction;
+                  setConfirmAction(null);
+                  await handleBatchStatusChange(actionToRun);
+                }}
+              >
+                Yes, {confirmAction === "FINALIZE" ? "Finalize" : "Reopen"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

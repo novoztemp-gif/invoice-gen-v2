@@ -304,18 +304,6 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
   };
 
   const handleBatchStatusChange = async (action: "FINALIZE" | "REOPEN") => {
-    const isFinalize = action === "FINALIZE";
-    const confirmMessage = isFinalize
-      ? "After finalization this batch becomes read-only. To edit again it must be reopened."
-      : "Reopening will allow invoices to be edited again.";
-
-    if (
-      !window.confirm(
-        `${isFinalize ? "Finalize" : "Reopen"} Invoice Batch\n\n${confirmMessage}`,
-      )
-    )
-      return;
-
     try {
       const response = await fetch("/api/batch-status", {
         method: "POST",
