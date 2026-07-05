@@ -47,6 +47,7 @@ export class AutoBalanceEngine {
     editedInvoiceId: string,
     targetDiff: number,
     userId: string,
+    editedInvoiceUpdates?: any,
   ): Promise<{
     success: boolean;
     modifiedInvoicesCount: number;
@@ -175,21 +176,57 @@ export class AutoBalanceEngine {
         );
       }
 
-      // 6. Update modified invoices in database
+      // 6. Update modified invoices in database atomically
       for (const inv of modifiedInvoices) {
-        const { error: updateError } = await this.supabase
-          .from("invoice")
-          .update({
-            products: inv.products,
-            total_amount: inv.total_amount,
-            is_edited: inv.is_edited,
-            edited_at: inv.edited_at,
-          })
-          .eq("id", inv.id);
+        // Enforce positive checks before committing
+        if (inv.total_amount <= 0) {
+          throw new Error(
+            `Balancing generated an invalid invoice total amount: ${inv.total_amount}`,
+          );
+        }
+        for (const p of inv.products) {
+          if (p.quantity <= 0 || p.rate <= 0 || p.amount <= 0) {
+            throw new Error(
+              `Balancing generated invalid product metrics: qty=${p.quantity}, rate=${p.rate}, amount=${p.amount}`,
+            );
+          }
+        }
+      }
 
-        if (updateError) {
-          console.error("Failed to update invoice:", updateError);
-          throw new Error("Database error while updating balanced invoices.");
+      const rpcUpdates = modifiedInvoices.map((inv) => ({
+        id: inv.id,
+        products: inv.products,
+        total_amount: inv.total_amount,
+        is_edited: inv.is_edited,
+        edited_at: inv.edited_at,
+      }));
+
+      if (editedInvoiceUpdates) {
+        const { error: rpcError } = await this.supabase.rpc(
+          "save_and_balance_invoices",
+          {
+            edited_invoice_id: editedInvoiceId,
+            edited_invoice_data: editedInvoiceUpdates,
+            balancing_updates: rpcUpdates,
+          },
+        );
+        if (rpcError) {
+          console.error(
+            "Failed to execute atomic save & balance RPC:",
+            rpcError,
+          );
+          throw new Error(`Database transaction error: ${rpcError.message}`);
+        }
+      } else {
+        const { error: rpcError } = await this.supabase.rpc(
+          "atomic_balance_invoices",
+          {
+            updates: rpcUpdates,
+          },
+        );
+        if (rpcError) {
+          console.error("Failed to execute atomic balance RPC:", rpcError);
+          throw new Error(`Database transaction error: ${rpcError.message}`);
         }
       }
 
@@ -326,7 +363,10 @@ export class AutoBalanceEngine {
     if (qty <= 0) return 0;
 
     const currentRate = Number(product.rate);
-    const minRate = Number(rule.rate_min);
+    const minRate = Math.max(
+      0.01,
+      isNaN(Number(rule.rate_min)) ? 0.01 : Number(rule.rate_min),
+    );
     const maxRate = Number(rule.rate_max);
 
     // How much rate change do we need to perfectly hit targetDiff?
@@ -360,7 +400,10 @@ export class AutoBalanceEngine {
     if (rate <= 0) return 0;
 
     const currentQty = Number(product.quantity);
-    const minQty = Number(rule.quantity_min);
+    const minQty = Math.max(
+      0.01,
+      isNaN(Number(rule.quantity_min)) ? 0.01 : Number(rule.quantity_min),
+    );
     const maxQty = Number(rule.quantity_max);
 
     // How much qty change do we need?

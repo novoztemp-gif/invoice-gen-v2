@@ -417,6 +417,63 @@ export class InvoiceEngine {
   }
 
   /**
+   * Validate that all quantities, rates, line amounts, and invoice totals are strictly greater than zero.
+   */
+  public static validateInvoiceData(invoice: any): {
+    isValid: boolean;
+    message: string;
+  } {
+    if (!invoice) {
+      return { isValid: false, message: "Invoice is null or undefined." };
+    }
+
+    const totalAmount = Number(invoice.total_amount);
+    if (isNaN(totalAmount) || totalAmount <= 0) {
+      return {
+        isValid: false,
+        message: `Invoice total amount must be greater than zero. Found: ${invoice.total_amount}`,
+      };
+    }
+
+    if (!Array.isArray(invoice.products) || invoice.products.length === 0) {
+      return {
+        isValid: false,
+        message: "Invoice must contain at least one product line.",
+      };
+    }
+
+    for (let i = 0; i < invoice.products.length; i++) {
+      const p = invoice.products[i];
+      const qty = Number(p.quantity);
+      const rate = Number(p.rate);
+      const amount = Number(p.amount);
+
+      if (isNaN(qty) || qty <= 0) {
+        return {
+          isValid: false,
+          message: `Product "${p.product_name || p.product_id || i}" has invalid quantity: ${p.quantity}. Must be greater than zero.`,
+        };
+      }
+
+      if (isNaN(rate) || rate <= 0) {
+        return {
+          isValid: false,
+          message: `Product "${p.product_name || p.product_id || i}" has invalid rate: ${p.rate}. Must be greater than zero.`,
+        };
+      }
+
+      if (isNaN(amount) || amount <= 0) {
+        return {
+          isValid: false,
+          message: `Product "${p.product_name || p.product_id || i}" has invalid line amount: ${p.amount}. Must be greater than zero.`,
+        };
+      }
+    }
+
+    return { isValid: true, message: "OK" };
+  }
+
+  /**
    * Save an edited invoice and rebalance the rest of the batch if needed
    */
   public static async saveInvoiceAndRebalance(
@@ -441,6 +498,12 @@ export class InvoiceEngine {
       throw new Error("Batch is finalized and read-only.");
     }
 
+    // Run strict validation on updates
+    const validation = this.validateInvoiceData(updates);
+    if (!validation.isValid) {
+      throw new Error(validation.message);
+    }
+
     // 2. Fetch original invoice to get its original total before saving
     const { data: originalInvoice } = await supabase
       .from("invoice")
@@ -451,25 +514,36 @@ export class InvoiceEngine {
     const originalTotal = Number(originalInvoice?.total_amount || 0);
     const newTotal = Number(updates.total_amount || 0);
 
-    // 3. Save the edited invoice
-    const { error: updateError } = await supabase
-      .from("invoice")
-      .update({
-        ...updates,
-        is_edited: true,
-        edited_at: new Date().toISOString(),
-      })
-      .eq("id", invoiceId);
-
-    if (updateError) {
-      throw new Error(`Failed to update invoice: ${updateError.message}`);
-    }
-
-    // 4. Trigger Auto Balance Engine if total changed
+    // 3. Save and Rebalance atomically if total changed, otherwise perform a single update
     if (originalTotal !== newTotal) {
       const targetDiff = originalTotal - newTotal;
       const engine = new AutoBalanceEngine(supabase);
-      return await engine.balanceBatch(batchId, invoiceId, targetDiff, userId);
+      const editedInvoiceUpdates = {
+        products: updates.products,
+        total_amount: updates.total_amount,
+        is_edited: true,
+        edited_at: new Date().toISOString(),
+      };
+      return await engine.balanceBatch(
+        batchId,
+        invoiceId,
+        targetDiff,
+        userId,
+        editedInvoiceUpdates,
+      );
+    } else {
+      const { error: updateError } = await supabase
+        .from("invoice")
+        .update({
+          ...updates,
+          is_edited: true,
+          edited_at: new Date().toISOString(),
+        })
+        .eq("id", invoiceId);
+
+      if (updateError) {
+        throw new Error(`Failed to update invoice: ${updateError.message}`);
+      }
     }
 
     return {
@@ -539,15 +613,20 @@ export class InvoiceEngine {
       startingCounter,
     );
 
-    // Insert invoices in chunks
-    for (let i = 0; i < invoices.length; i += 100) {
-      const chunk = invoices.slice(i, i + 100);
-      const { error: insertError } = await supabase
-        .from("invoice")
-        .insert(chunk);
-      if (insertError) {
-        throw new Error(`Failed to save invoices: ${insertError.message}`);
+    // Validate all generated invoices before saving
+    for (const inv of invoices) {
+      const validation = this.validateInvoiceData(inv);
+      if (!validation.isValid) {
+        throw new Error(`Generation validation failed: ${validation.message}`);
       }
+    }
+
+    // Insert all invoices atomically in a single bulk insert call
+    const { error: insertError } = await supabase
+      .from("invoice")
+      .insert(invoices);
+    if (insertError) {
+      throw new Error(`Failed to save invoices: ${insertError.message}`);
     }
 
     // Update batch status
@@ -742,17 +821,67 @@ export class InvoiceEngine {
       Math.round(
         invoices.reduce((sum, inv) => sum + inv.total_amount, 0) * 100,
       ) / 100;
-    const grandDiff = Math.round((totalAmount - finalGrandTotal) * 100) / 100;
+    let grandDiff = Math.round((totalAmount - finalGrandTotal) * 100) / 100;
 
     if (Math.abs(grandDiff) > 0.001 && invoices.length > 0) {
-      const lastInvoice = invoices[invoices.length - 1];
-      lastInvoice.total_amount =
-        Math.round((lastInvoice.total_amount + grandDiff) * 100) / 100;
-      if (lastInvoice.products && lastInvoice.products.length > 0) {
-        const lastProd = lastInvoice.products[lastInvoice.products.length - 1];
-        lastProd.amount = Math.round((lastProd.amount + grandDiff) * 100) / 100;
-        lastProd.rate =
-          Math.round((lastProd.amount / lastProd.quantity) * 100) / 100;
+      // Find an invoice that can absorb grandDiff without violating positive constraints
+      for (let i = invoices.length - 1; i >= 0; i--) {
+        const inv = invoices[i];
+        if (inv.products && inv.products.length > 0) {
+          const lastProd = inv.products[inv.products.length - 1];
+          const newAmount =
+            Math.round((lastProd.amount + grandDiff) * 100) / 100;
+          const newTotal =
+            Math.round((inv.total_amount + grandDiff) * 100) / 100;
+          const newRate =
+            Math.round((newAmount / lastProd.quantity) * 100) / 100;
+
+          if (newAmount > 0.01 && newTotal > 0.01 && newRate > 0.01) {
+            inv.total_amount = newTotal;
+            lastProd.amount = newAmount;
+            lastProd.rate = newRate;
+            grandDiff = 0;
+            break;
+          }
+        }
+      }
+
+      // If we still have diff, try to distribute it in tiny parts across multiple invoices
+      if (Math.abs(grandDiff) > 0.001) {
+        for (let i = invoices.length - 1; i >= 0; i--) {
+          const inv = invoices[i];
+          if (inv.products && inv.products.length > 0) {
+            const lastProd = inv.products[inv.products.length - 1];
+            const maxAbsorbable = lastProd.amount - 0.01;
+            if (maxAbsorbable > 0) {
+              const amountToAbsorb =
+                grandDiff > 0
+                  ? grandDiff
+                  : -Math.min(Math.abs(grandDiff), maxAbsorbable);
+              const newAmount =
+                Math.round((lastProd.amount + amountToAbsorb) * 100) / 100;
+              const newTotal =
+                Math.round((inv.total_amount + amountToAbsorb) * 100) / 100;
+              const newRate =
+                Math.round((newAmount / lastProd.quantity) * 100) / 100;
+
+              if (newAmount > 0.01 && newTotal > 0.01 && newRate > 0.01) {
+                inv.total_amount = newTotal;
+                lastProd.amount = newAmount;
+                lastProd.rate = newRate;
+                grandDiff =
+                  Math.round((grandDiff - amountToAbsorb) * 100) / 100;
+              }
+            }
+          }
+          if (Math.abs(grandDiff) < 0.001) break;
+        }
+      }
+
+      if (Math.abs(grandDiff) > 0.001) {
+        throw new Error(
+          `Critical Drift Correction Error: Cannot balance drift of ₹${grandDiff} while respecting positive accounting rules.`,
+        );
       }
     }
 
@@ -929,8 +1058,31 @@ export class InvoiceEngine {
     const diff = Math.round((targetAmount - totalAfter) * 100) / 100;
     if (Math.abs(diff) > 0.01 && products.length > 0) {
       const last = products[products.length - 1];
-      last.amount = Math.round((last.amount + diff) * 100) / 100;
-      last.rate = Math.round((last.amount / last.quantity) * 100) / 100;
+      const newAmount = Math.round((last.amount + diff) * 100) / 100;
+      const newRate = Math.round((newAmount / last.quantity) * 100) / 100;
+      if (newAmount > 0.01 && newRate > 0.01) {
+        last.amount = newAmount;
+        last.rate = newRate;
+      } else {
+        // Find another product in this invoice to absorb the difference
+        let absorbed = false;
+        for (let i = products.length - 2; i >= 0; i--) {
+          const p = products[i];
+          const pAmount = Math.round((p.amount + diff) * 100) / 100;
+          const pRate = Math.round((pAmount / p.quantity) * 100) / 100;
+          if (pAmount > 0.01 && pRate > 0.01) {
+            p.amount = pAmount;
+            p.rate = pRate;
+            absorbed = true;
+            break;
+          }
+        }
+        if (!absorbed) {
+          throw new Error(
+            `Cannot distribute target amount ₹${targetAmount} to products without generating negative rates/amounts.`,
+          );
+        }
+      }
     }
 
     return products;

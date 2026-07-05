@@ -26,6 +26,41 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
+    if (action === "FINALIZE") {
+      const { data: invoices, error: fetchError } = await supabase
+        .from("invoice")
+        .select("*")
+        .eq("invoice_batch_id", batchId);
+
+      if (fetchError || !invoices || invoices.length === 0) {
+        return NextResponse.json(
+          { message: "Cannot finalize a batch with no invoices." },
+          { status: 400 },
+        );
+      }
+
+      const invalidInvoices: string[] = [];
+      for (const inv of invoices) {
+        const validation = InvoiceEngine.validateInvoiceData(inv);
+        if (!validation.isValid) {
+          invalidInvoices.push(
+            `${inv.invoice_number || inv.id}: ${validation.message}`,
+          );
+        }
+      }
+
+      if (invalidInvoices.length > 0) {
+        return NextResponse.json(
+          {
+            message:
+              "Batch finalization blocked. The following invoices violate accounting rules (negative or zero values found):",
+            details: invalidInvoices,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
     await InvoiceEngine.updateBatchStatus(supabase, batchId, action, user.id);
 
     return NextResponse.json({
