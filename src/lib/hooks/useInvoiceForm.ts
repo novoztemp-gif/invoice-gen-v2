@@ -420,7 +420,6 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             perDayQtyMax: item.perDayQtyMax,
             perDayRateMin: item.perDayRateMin,
             perDayRateMax: item.perDayRateMax,
-            monthlyQty: item.monthlyQty || "",
           })),
           recurring_products: recurringProducts.map((rp) => ({
             product_id: rp.product_id,
@@ -436,6 +435,30 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         console.error("Error creating invoice batch:", error);
         setErrorPopup(`Failed to create invoice batch: ${error.message}`);
         return;
+      }
+
+      // If PURCHASE batch, insert actual quantities into purchase_batch_products table
+      if (batchType === "PURCHASE" && data) {
+        const purchaseProductsToInsert = selectedProducts.map((item) => ({
+          batch_id: data.id,
+          product_id: item.product.id,
+          monthly_quantity: parseFloat(item.monthlyQty || "0"),
+        }));
+
+        const { error: purchaseProductsError } = await supabase
+          .from("purchase_batch_products")
+          .insert(purchaseProductsToInsert);
+
+        if (purchaseProductsError) {
+          console.error(
+            "Error saving purchase batch products:",
+            purchaseProductsError,
+          );
+          setErrorPopup(
+            `Batch created, but failed to save monthly quantities: ${purchaseProductsError.message}`,
+          );
+          return;
+        }
       }
 
       console.log("Invoice batch created:", data);
