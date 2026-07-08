@@ -169,6 +169,49 @@ export class AutoBalanceEngine {
         }
       }
 
+      // If remainingDiff is very small (under ₹1.00), try to absorb it in one of the modified invoices
+      if (
+        Math.abs(remainingDiff) >= 0.01 &&
+        Math.abs(remainingDiff) < 1.0 &&
+        modifiedInvoices.length > 0
+      ) {
+        let absorbed = false;
+        for (const inv of modifiedInvoices) {
+          for (const p of inv.products) {
+            const rule = rulesMap.get(p.product_id);
+            if (!rule) continue;
+
+            const minRate = Math.max(
+              0.01,
+              isNaN(Number(rule.rate_min)) ? 0.01 : Number(rule.rate_min),
+            );
+            const maxRate = Number(rule.rate_max);
+
+            const currentAmount = Number(p.amount);
+            const newAmount =
+              Math.round((currentAmount + remainingDiff) * 100) / 100;
+            const newRate = Math.round((newAmount / p.quantity) * 100) / 100;
+
+            if (newRate >= minRate && newRate <= maxRate && newAmount > 0.01) {
+              p.amount = newAmount;
+              p.rate = newRate;
+
+              // Recalculate invoice total to 2 decimal places
+              const totalBeforeTax = inv.products.reduce(
+                (sum, prod) => sum + (Number(prod.amount) || 0),
+                0,
+              );
+              inv.total_amount = Math.round(totalBeforeTax * 100) / 100;
+
+              remainingDiff = 0;
+              absorbed = true;
+              break;
+            }
+          }
+          if (absorbed) break;
+        }
+      }
+
       // If we STILL can't balance it, we must abort to maintain data integrity
       if (Math.abs(remainingDiff) >= 0.01) {
         throw new Error(
@@ -200,6 +243,56 @@ export class AutoBalanceEngine {
         is_edited: inv.is_edited,
         edited_at: inv.edited_at,
       }));
+
+      // 6.5. Pre-validate batch total invariant in-memory before submitting database updates
+      const { data: allInvoices, error: allFetchError } = await this.supabase
+        .from("invoice")
+        .select("id, total_amount")
+        .eq("invoice_batch_id", batchId);
+
+      if (allFetchError || !allInvoices) {
+        throw new Error(
+          "Validation failed: Could not fetch invoices to verify batch total.",
+        );
+      }
+
+      const { data: batchData } = await this.supabase
+        .from("invoice_batch")
+        .select("total_amount")
+        .eq("id", batchId)
+        .single();
+
+      const expectedBatchTotal = Number(batchData?.total_amount || 0);
+
+      const invoiceTotalsMap = new Map<string, number>();
+      for (const inv of allInvoices) {
+        invoiceTotalsMap.set(inv.id, Number(inv.total_amount));
+      }
+
+      // Apply the edited invoice updates (which aren't saved yet)
+      if (editedInvoiceUpdates) {
+        invoiceTotalsMap.set(
+          editedInvoiceId,
+          Number(editedInvoiceUpdates.total_amount),
+        );
+      }
+
+      // Apply rebalancing updates
+      for (const update of rpcUpdates) {
+        invoiceTotalsMap.set(update.id, Number(update.total_amount));
+      }
+
+      let calculatedBatchTotal = 0;
+      for (const amount of invoiceTotalsMap.values()) {
+        calculatedBatchTotal += amount;
+      }
+      calculatedBatchTotal = Math.round(calculatedBatchTotal * 100) / 100;
+
+      if (Math.abs(calculatedBatchTotal - expectedBatchTotal) > 0.01) {
+        throw new Error(
+          `Batch total mismatch: expected ₹${expectedBatchTotal.toFixed(2)}, calculated ₹${calculatedBatchTotal.toFixed(2)} (diff: ₹${(calculatedBatchTotal - expectedBatchTotal).toFixed(2)})`,
+        );
+      }
 
       if (editedInvoiceUpdates) {
         const { error: rpcError } = await this.supabase.rpc(
@@ -343,12 +436,12 @@ export class AutoBalanceEngine {
     }
 
     if (modified) {
-      // Recalculate invoice total
+      // Recalculate invoice total to 2 decimal places
       const totalBeforeTax = invoice.products.reduce(
         (sum, p) => sum + (Number(p.amount) || 0),
         0,
       );
-      invoice.total_amount = Math.round(totalBeforeTax); // CGST/SGST are "Nil" currently
+      invoice.total_amount = Math.round(totalBeforeTax * 100) / 100; // CGST/SGST are "Nil" currently
     }
 
     return { modified, appliedDiff };

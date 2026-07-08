@@ -763,16 +763,14 @@ export class InvoiceEngine {
         currentDate.setDate(startDate.getDate() + dayOffset);
         const invoiceDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-${String(currentDate.getDate()).padStart(2, "0")}`;
 
-        const maxProductsForThisInvoice = Math.floor(Math.random() * 4) + 1;
         const subset = this.pickRandomProductsSubset(
           batch.products,
           batch.recurring_products || [],
           invoiceAmount,
         );
-        const limitedSubset = subset.slice(0, maxProductsForThisInvoice);
 
         const products = this.distributeAmountToProducts(
-          limitedSubset.length > 0 ? limitedSubset : batch.products.slice(0, 1),
+          subset.length > 0 ? subset : batch.products.slice(0, 1),
           invoiceAmount,
         );
 
@@ -824,22 +822,53 @@ export class InvoiceEngine {
     let grandDiff = Math.round((totalAmount - finalGrandTotal) * 100) / 100;
 
     if (Math.abs(grandDiff) > 0.001 && invoices.length > 0) {
-      // Find an invoice that can absorb grandDiff without violating positive constraints
+      // Find an invoice and a product that can absorb grandDiff without violating positive constraints or product rules
       for (let i = invoices.length - 1; i >= 0; i--) {
         const inv = invoices[i];
         if (inv.products && inv.products.length > 0) {
-          const lastProd = inv.products[inv.products.length - 1];
-          const newAmount =
-            Math.round((lastProd.amount + grandDiff) * 100) / 100;
-          const newTotal =
-            Math.round((inv.total_amount + grandDiff) * 100) / 100;
-          const newRate =
-            Math.round((newAmount / lastProd.quantity) * 100) / 100;
+          let absorbed = false;
+          // Try to adjust any product in this invoice to absorb the grandDiff
+          for (let pIdx = inv.products.length - 1; pIdx >= 0; pIdx--) {
+            const p = inv.products[pIdx];
+            const prodConfig = batch.products.find(
+              (pc) => pc.product_id === p.product_id,
+            );
+            if (!prodConfig) continue;
 
-          if (newAmount > 0.01 && newTotal > 0.01 && newRate > 0.01) {
-            inv.total_amount = newTotal;
-            lastProd.amount = newAmount;
-            lastProd.rate = newRate;
+            const minRate = parseFloat(prodConfig.perDayRateMin);
+            const maxRate = parseFloat(prodConfig.perDayRateMax);
+            const minQty = parseFloat(prodConfig.perDayQtyMin);
+            const maxQty = parseFloat(prodConfig.perDayQtyMax);
+
+            const newAmount = Math.round((p.amount + grandDiff) * 100) / 100;
+            const newTotal =
+              Math.round((inv.total_amount + grandDiff) * 100) / 100;
+
+            if (
+              newTotal >= thresholdMin &&
+              newTotal <= thresholdMax &&
+              newAmount > 0.01
+            ) {
+              // Try to find a valid quantity and rate that yields exactly newAmount
+              for (let q = minQty; q <= maxQty; q++) {
+                const r = Math.round((newAmount / q) * 100) / 100;
+                if (
+                  r >= minRate &&
+                  r <= maxRate &&
+                  Math.abs(q * r - newAmount) < 0.01
+                ) {
+                  p.quantity = q;
+                  p.rate = r;
+                  p.amount = newAmount;
+                  inv.total_amount = newTotal;
+                  absorbed = true;
+                  break;
+                }
+              }
+            }
+            if (absorbed) break;
+          }
+          if (absorbed) {
             grandDiff = 0;
             break;
           }
@@ -851,27 +880,55 @@ export class InvoiceEngine {
         for (let i = invoices.length - 1; i >= 0; i--) {
           const inv = invoices[i];
           if (inv.products && inv.products.length > 0) {
-            const lastProd = inv.products[inv.products.length - 1];
-            const maxAbsorbable = lastProd.amount - 0.01;
-            if (maxAbsorbable > 0) {
-              const amountToAbsorb =
-                grandDiff > 0
-                  ? grandDiff
-                  : -Math.min(Math.abs(grandDiff), maxAbsorbable);
-              const newAmount =
-                Math.round((lastProd.amount + amountToAbsorb) * 100) / 100;
-              const newTotal =
-                Math.round((inv.total_amount + amountToAbsorb) * 100) / 100;
-              const newRate =
-                Math.round((newAmount / lastProd.quantity) * 100) / 100;
+            let absorbed = false;
+            for (let pIdx = inv.products.length - 1; pIdx >= 0; pIdx--) {
+              const p = inv.products[pIdx];
+              const prodConfig = batch.products.find(
+                (pc) => pc.product_id === p.product_id,
+              );
+              if (!prodConfig) continue;
 
-              if (newAmount > 0.01 && newTotal > 0.01 && newRate > 0.01) {
-                inv.total_amount = newTotal;
-                lastProd.amount = newAmount;
-                lastProd.rate = newRate;
-                grandDiff =
-                  Math.round((grandDiff - amountToAbsorb) * 100) / 100;
+              const minRate = parseFloat(prodConfig.perDayRateMin);
+              const maxRate = parseFloat(prodConfig.perDayRateMax);
+              const minQty = parseFloat(prodConfig.perDayQtyMin);
+              const maxQty = parseFloat(prodConfig.perDayQtyMax);
+
+              const maxAbsorbable = p.amount - 0.01;
+              if (maxAbsorbable > 0) {
+                const amountToAbsorb =
+                  grandDiff > 0
+                    ? grandDiff
+                    : -Math.min(Math.abs(grandDiff), maxAbsorbable);
+                const newAmount =
+                  Math.round((p.amount + amountToAbsorb) * 100) / 100;
+                const newTotal =
+                  Math.round((inv.total_amount + amountToAbsorb) * 100) / 100;
+
+                if (
+                  newTotal >= thresholdMin &&
+                  newTotal <= thresholdMax &&
+                  newAmount > 0.01
+                ) {
+                  for (let q = minQty; q <= maxQty; q++) {
+                    const r = Math.round((newAmount / q) * 100) / 100;
+                    if (
+                      r >= minRate &&
+                      r <= maxRate &&
+                      Math.abs(q * r - newAmount) < 0.01
+                    ) {
+                      p.quantity = q;
+                      p.rate = r;
+                      p.amount = newAmount;
+                      inv.total_amount = newTotal;
+                      grandDiff =
+                        Math.round((grandDiff - amountToAbsorb) * 100) / 100;
+                      absorbed = true;
+                      break;
+                    }
+                  }
+                }
               }
+              if (absorbed) break;
             }
           }
           if (Math.abs(grandDiff) < 0.001) break;
@@ -893,46 +950,83 @@ export class InvoiceEngine {
     recurringProducts: RecurringProductConfig[],
     targetAmount: number,
   ): ProductConfig[] {
-    const picked: ProductConfig[] = [];
-    const unpicked: ProductConfig[] = [];
+    const productData = allProducts.map((config) => {
+      const minQty = parseFloat(config.perDayQtyMin);
+      const minRate = parseFloat(config.perDayRateMin);
+      const maxQty = parseFloat(config.perDayQtyMax);
+      const maxRate = parseFloat(config.perDayRateMax);
 
-    const shuffled = [...allProducts].sort(() => Math.random() - 0.5);
-    let totalMaxCapacity = 0;
+      return {
+        config,
+        minAmount: minQty * minRate,
+        maxAmount: maxQty * maxRate,
+      };
+    });
 
-    for (const product of shuffled) {
-      const recurring = recurringProducts.find(
-        (r) => r.product_id === product.product_id,
-      );
-      const prob = recurring ? recurring.percentage / 100 : 0.15;
+    const results: ProductConfig[][] = [];
+    const maxResults = 50;
 
-      const maxQty = parseFloat(product.perDayQtyMax);
-      const maxRate = parseFloat(product.perDayRateMax);
-      const maxCap = maxQty * maxRate;
+    const shuffledProducts = [...productData].sort(() => Math.random() - 0.5);
 
-      if (Math.random() <= prob) {
-        picked.push(product);
-        totalMaxCapacity += maxCap;
-      } else {
-        unpicked.push(product);
+    function backtrack(
+      index: number,
+      currentSubset: ProductConfig[],
+      currentMin: number,
+      currentMax: number,
+    ) {
+      if (results.length >= maxResults) return;
+
+      if (
+        currentSubset.length > 0 &&
+        currentMin <= targetAmount &&
+        targetAmount <= currentMax
+      ) {
+        results.push([...currentSubset]);
+      }
+
+      for (let i = index; i < shuffledProducts.length; i++) {
+        const p = shuffledProducts[i];
+        if (currentMin + p.minAmount > targetAmount) {
+          continue;
+        }
+
+        currentSubset.push(p.config);
+        backtrack(
+          i + 1,
+          currentSubset,
+          currentMin + p.minAmount,
+          currentMax + p.maxAmount,
+        );
+        currentSubset.pop();
       }
     }
 
-    if (picked.length === 0 || totalMaxCapacity < targetAmount) {
-      for (const product of unpicked) {
-        const maxQty = parseFloat(product.perDayQtyMax);
-        const maxRate = parseFloat(product.perDayRateMax);
-        const maxCap = maxQty * maxRate;
+    backtrack(0, [], 0, 0);
 
-        picked.push(product);
-        totalMaxCapacity += maxCap;
+    if (results.length === 0) {
+      throw new Error(
+        `No valid combination of available products can satisfy the requested amount ₹${targetAmount.toFixed(2)} within the configured rules.`,
+      );
+    }
 
-        if (totalMaxCapacity >= targetAmount) {
-          break;
+    const scoredSubsets = results.map((subset) => {
+      let score = 0;
+      for (const p of subset) {
+        const rec = recurringProducts.find(
+          (r) => r.product_id === p.product_id,
+        );
+        if (rec) {
+          score += rec.percentage;
+        } else {
+          score += 5;
         }
       }
-    }
+      score += Math.random() * 20;
+      return { subset, score };
+    });
 
-    return picked;
+    scoredSubsets.sort((a, b) => b.score - a.score);
+    return scoredSubsets[0].subset;
   }
 
   private static distributeAmountToProducts(
@@ -970,76 +1064,63 @@ export class InvoiceEngine {
       };
     });
 
-    productData.sort(() => Math.random() - 0.5);
+    const selectedProducts = productData;
+    const totalMin = selectedProducts.reduce((sum, p) => sum + p.minAmount, 0);
 
-    const selectedProducts: typeof productData = [];
-    let totalMin = 0;
-    let totalMax = 0;
+    const A = selectedProducts.map((p) => p.minAmount);
+    let remaining = targetAmount - totalMin;
 
-    for (const product of productData) {
-      if (totalMin + product.minAmount <= targetAmount) {
-        selectedProducts.push(product);
-        totalMin += product.minAmount;
-        totalMax += product.maxAmount;
+    const indices = selectedProducts
+      .map((_, i) => i)
+      .sort(() => Math.random() - 0.5);
+
+    for (const idx of indices) {
+      if (remaining <= 0) break;
+      const p = selectedProducts[idx];
+      const maxAdd = p.maxAmount - A[idx];
+      const add = Math.min(remaining, maxAdd);
+      A[idx] = Math.round((A[idx] + add) * 100) / 100;
+      remaining -= add;
+    }
+
+    let currentSum = A.reduce((sum, val) => sum + val, 0);
+    let diff = Math.round((targetAmount - currentSum) * 100) / 100;
+
+    if (Math.abs(diff) > 0.01) {
+      for (const idx of indices) {
+        const p = selectedProducts[idx];
+        const newAmount = Math.round((A[idx] + diff) * 100) / 100;
+        if (newAmount >= p.minAmount && newAmount <= p.maxAmount) {
+          A[idx] = newAmount;
+          diff = 0;
+          break;
+        }
       }
     }
-
-    if (selectedProducts.length === 0) {
-      productData.sort((a, b) => a.minAmount - b.minAmount);
-      selectedProducts.push(productData[0]);
-      totalMin = productData[0].minAmount;
-      totalMax = productData[0].maxAmount;
-    }
-
-    let totalAllocated = 0;
 
     selectedProducts.forEach((item, index) => {
-      const isLast = index === selectedProducts.length - 1;
-      let productTargetAmount: number;
+      const targetProdAmount = A[index];
 
-      if (isLast) {
-        productTargetAmount = targetAmount - totalAllocated;
+      const qMinPossible = Math.ceil(targetProdAmount / item.maxRate);
+      const qMaxPossible = Math.floor(targetProdAmount / item.minRate);
+      const qLow = Math.max(item.minQty, qMinPossible);
+      const qHigh = Math.min(item.maxQty, qMaxPossible);
+
+      let quantity: number;
+      if (qLow <= qHigh) {
+        quantity = Math.round(qLow + Math.random() * (qHigh - qLow));
       } else {
-        const productRange = item.maxAmount - item.minAmount;
-        const totalRange = totalMax - totalMin;
-        if (totalRange > 0) {
-          const proportion = productRange / totalRange;
-          const randomAdjustment = 0.8 + Math.random() * 0.4;
-          productTargetAmount =
-            (item.minAmount + (targetAmount - totalMin) * proportion) *
-            randomAdjustment;
-        } else {
-          productTargetAmount = targetAmount / selectedProducts.length;
-        }
+        quantity = Math.round(
+          item.minQty + Math.random() * (item.maxQty - item.minQty),
+        );
       }
+      quantity = Math.max(item.minQty, Math.min(item.maxQty, quantity));
 
-      productTargetAmount = Math.max(
-        item.minAmount,
-        Math.min(item.maxAmount, productTargetAmount),
-      );
+      let rate = targetProdAmount / quantity;
+      rate = Math.max(item.minRate, Math.min(item.maxRate, rate));
+      rate = Math.round(rate * 100) / 100;
 
-      const qtyRange = item.maxQty - item.minQty;
-      const qtyRandomFactor = Math.random();
-      const randomQty = item.minQty + qtyRange * qtyRandomFactor;
-      const quantity = Math.round(randomQty);
-
-      const rateRange = item.maxRate - item.minRate;
-      const rateRandomFactor = Math.random();
-      let rate = item.minRate + rateRange * rateRandomFactor;
-
-      let finalAmount = quantity * rate;
-
-      if (!isLast) {
-        if (finalAmount < item.minAmount || finalAmount > item.maxAmount) {
-          const targetRate = productTargetAmount / quantity;
-          rate = Math.max(item.minRate, Math.min(item.maxRate, targetRate));
-          finalAmount = quantity * rate;
-        }
-      } else {
-        rate = productTargetAmount / quantity;
-        rate = Math.max(item.minRate, Math.min(item.maxRate, rate));
-        finalAmount = quantity * rate;
-      }
+      const finalAmount = Math.round(quantity * rate * 100) / 100;
 
       products.push({
         product_id: item.config.product_id,
@@ -1047,41 +1128,67 @@ export class InvoiceEngine {
         hsn_code: item.config.hsn_code,
         unit_of_measure: item.config.unit_of_measure,
         quantity,
-        rate: Math.round(rate * 100) / 100,
-        amount: Math.round(finalAmount * 100) / 100,
+        rate,
+        amount: finalAmount,
       });
-
-      totalAllocated += finalAmount;
     });
 
     const totalAfter = products.reduce((s, p) => s + p.amount, 0);
-    const diff = Math.round((targetAmount - totalAfter) * 100) / 100;
-    if (Math.abs(diff) > 0.01 && products.length > 0) {
-      const last = products[products.length - 1];
-      const newAmount = Math.round((last.amount + diff) * 100) / 100;
-      const newRate = Math.round((newAmount / last.quantity) * 100) / 100;
-      if (newAmount > 0.01 && newRate > 0.01) {
-        last.amount = newAmount;
-        last.rate = newRate;
-      } else {
-        // Find another product in this invoice to absorb the difference
-        let absorbed = false;
-        for (let i = products.length - 2; i >= 0; i--) {
+    let finalDiff = Math.round((targetAmount - totalAfter) * 100) / 100;
+
+    if (Math.abs(finalDiff) > 0.001) {
+      let absorbed = false;
+      for (let i = products.length - 1; i >= 0; i--) {
+        const p = products[i];
+        const config = selectedProducts.find(
+          (pd) => pd.config.product_id === p.product_id,
+        )!;
+        const newAmount = Math.round((p.amount + finalDiff) * 100) / 100;
+        const newRate = Math.round((newAmount / p.quantity) * 100) / 100;
+
+        if (
+          newAmount >= config.minAmount &&
+          newAmount <= config.maxAmount &&
+          newRate >= config.minRate &&
+          newRate <= config.maxRate
+        ) {
+          p.amount = newAmount;
+          p.rate = newRate;
+          absorbed = true;
+          break;
+        }
+      }
+
+      if (!absorbed) {
+        for (let i = products.length - 1; i >= 0; i--) {
           const p = products[i];
-          const pAmount = Math.round((p.amount + diff) * 100) / 100;
-          const pRate = Math.round((pAmount / p.quantity) * 100) / 100;
-          if (pAmount > 0.01 && pRate > 0.01) {
-            p.amount = pAmount;
-            p.rate = pRate;
-            absorbed = true;
-            break;
+          const config = selectedProducts.find(
+            (pd) => pd.config.product_id === p.product_id,
+          )!;
+          const newAmount = Math.round((p.amount + finalDiff) * 100) / 100;
+
+          for (let q = config.minQty; q <= config.maxQty; q++) {
+            const newRate = Math.round((newAmount / q) * 100) / 100;
+            if (
+              newRate >= config.minRate &&
+              newRate <= config.maxRate &&
+              Math.abs(q * newRate - newAmount) < 0.01
+            ) {
+              p.quantity = q;
+              p.amount = newAmount;
+              p.rate = newRate;
+              absorbed = true;
+              break;
+            }
           }
+          if (absorbed) break;
         }
-        if (!absorbed) {
-          throw new Error(
-            `Cannot distribute target amount ₹${targetAmount} to products without generating negative rates/amounts.`,
-          );
-        }
+      }
+
+      if (!absorbed) {
+        throw new Error(
+          `Cannot distribute target amount ₹${targetAmount} to products without violating configured min/max rules.`,
+        );
       }
     }
 
