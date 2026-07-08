@@ -45,6 +45,7 @@ export type SelectedProductItem = {
   perDayQtyMax: string;
   perDayRateMin: string;
   perDayRateMax: string;
+  monthlyQty?: string;
 };
 
 export interface UseInvoiceFormParams {
@@ -240,6 +241,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         perDayQtyMax: rule.quantity_max.toString(),
         perDayRateMin: rule.rate_min.toString(),
         perDayRateMax: rule.rate_max.toString(),
+        monthlyQty: "",
       },
     ]);
     setTempProduct(null);
@@ -418,6 +420,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             perDayQtyMax: item.perDayQtyMax,
             perDayRateMin: item.perDayRateMin,
             perDayRateMax: item.perDayRateMax,
+            monthlyQty: item.monthlyQty || "",
           })),
           recurring_products: recurringProducts.map((rp) => ({
             product_id: rp.product_id,
@@ -473,6 +476,17 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
 
     for (let i = 0; i < selectedProducts.length; i++) {
       const product = selectedProducts[i];
+
+      if (batchType === "PURCHASE") {
+        const monthlyQty = parseFloat(product.monthlyQty || "");
+        if (isNaN(monthlyQty) || monthlyQty <= 0) {
+          setErrorPopup(
+            `Product "${product.product.product_name}": Please enter a valid Monthly Purchase Quantity greater than 0!`,
+          );
+          return;
+        }
+      }
+
       const minQty = parseFloat(product.perDayQtyMin);
       const maxQty = parseFloat(product.perDayQtyMax);
       const minRate = parseFloat(product.perDayRateMin);

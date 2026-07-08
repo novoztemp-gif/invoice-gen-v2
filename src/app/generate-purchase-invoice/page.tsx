@@ -655,6 +655,7 @@ export default function GeneratePurchaseInvoice() {
                                             rule?.rate_min?.toString() || "",
                                           perDayRateMax:
                                             rule?.rate_max?.toString() || "",
+                                          monthlyQty: "",
                                         },
                                       ]);
                                     }
@@ -698,6 +699,7 @@ export default function GeneratePurchaseInvoice() {
                         perDayQtyMax: rule?.quantity_max?.toString() || "",
                         perDayRateMin: rule?.rate_min?.toString() || "",
                         perDayRateMax: rule?.rate_max?.toString() || "",
+                        monthlyQty: "",
                       };
                     });
                     setSelectedProducts(newSelections);
@@ -739,6 +741,57 @@ export default function GeneratePurchaseInvoice() {
             )}
           </CardContent>
         </Card>
+
+        {/* Monthly Purchase Quantities */}
+        {selectedProducts.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Monthly Purchase Quantities</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                <p className="text-sm text-slate-500">
+                  Enter the actual total quantity purchased for each selected
+                  product during this month.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {selectedProducts.map((item, idx) => (
+                    <div
+                      key={item.product.id}
+                      className="space-y-2 p-3 border rounded-lg bg-slate-50/50"
+                    >
+                      <Label
+                        htmlFor={`monthly-qty-${item.product.id}`}
+                        className="font-semibold text-slate-700"
+                      >
+                        {item.product.product_name} (
+                        {item.product.unit_of_measure})
+                      </Label>
+                      <Input
+                        type="number"
+                        id={`monthly-qty-${item.product.id}`}
+                        placeholder={`Enter quantity in ${item.product.unit_of_measure}`}
+                        value={item.monthlyQty || ""}
+                        onChange={(e) => {
+                          const updated = [...selectedProducts];
+                          updated[idx] = {
+                            ...updated[idx],
+                            monthlyQty: e.target.value,
+                          };
+                          setSelectedProducts(updated);
+                        }}
+                        className="bg-white border-slate-200"
+                        min="0.01"
+                        step="0.01"
+                        required
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Recurring Products */}
         <Card>
