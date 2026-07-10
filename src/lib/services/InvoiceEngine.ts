@@ -693,6 +693,70 @@ export class InvoiceEngine {
       throw new Error(`Failed to save invoices: ${insertError.message}`);
     }
 
+    // If it is a PURCHASE batch, populate the daily_stock_ledger
+    if (typedBatch.batch_type === "PURCHASE") {
+      const dailyQtyMap = new Map<string, number>(); // key: date_productId, value: quantity
+
+      for (const inv of invoices) {
+        for (const p of inv.products) {
+          const key = `${inv.invoice_date}_${p.product_id}`;
+          dailyQtyMap.set(key, (dailyQtyMap.get(key) || 0) + p.quantity);
+        }
+      }
+
+      const ledgerRecords = [];
+      for (const [key, qty] of dailyQtyMap.entries()) {
+        const [date, product_id] = key.split("_");
+        ledgerRecords.push({
+          purchase_batch_id: batchId,
+          invoice_batch_id: batchId,
+          ledger_date: date,
+          product_id: product_id,
+          opening_stock: 0,
+          purchased_quantity: qty,
+          sold_quantity: 0,
+          closing_stock: qty,
+        });
+      }
+
+      // Fetch target monthly quantities for final double-check validation
+      const { data: qData } = await supabase
+        .from("purchase_batch_products")
+        .select("product_id, monthly_quantity")
+        .eq("batch_id", batchId);
+
+      const monthlyQuantitiesMap = new Map<string, number>(
+        (qData || []).map((item: any) => [
+          item.product_id,
+          Number(item.monthly_quantity) || 0,
+        ]),
+      );
+
+      // Perform SUM(purchased_quantity) validation on ledger records
+      for (const prod of typedBatch.products) {
+        const targetQty = monthlyQuantitiesMap.get(prod.product_id) || 0;
+        const allocatedQty = ledgerRecords
+          .filter((r) => r.product_id === prod.product_id)
+          .reduce((sum, r) => sum + r.purchased_quantity, 0);
+
+        if (Math.abs(allocatedQty - targetQty) > 0.01) {
+          throw new Error(
+            `Ledger Quantity validation failed for product "${prod.product_name}". Target: ${targetQty}, Allocated in Ledger: ${allocatedQty}`,
+          );
+        }
+      }
+
+      const { error: ledgerError } = await supabase
+        .from("daily_stock_ledger")
+        .insert(ledgerRecords);
+
+      if (ledgerError) {
+        throw new Error(
+          `Failed to save daily stock ledger records: ${ledgerError.message}`,
+        );
+      }
+    }
+
     // Update batch status
     const { error: updateError } = await supabase
       .from("invoice_batch")
