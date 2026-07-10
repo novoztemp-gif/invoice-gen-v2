@@ -606,18 +606,82 @@ export class InvoiceEngine {
       }
     }
 
-    const invoices = this.generateInvoiceSplitupsInternal(
-      typedBatch,
-      numberOfDays,
-      fromDate,
-      startingCounter,
-    );
+    let invoices: any[] = [];
+    if (typedBatch.batch_type === "PURCHASE") {
+      const { data: qData, error: qError } = await supabase
+        .from("purchase_batch_products")
+        .select("product_id, monthly_quantity")
+        .eq("batch_id", batchId);
+
+      if (qError) {
+        throw new Error(
+          `Failed to load monthly purchase quantities: ${qError.message}`,
+        );
+      }
+
+      const monthlyQuantitiesMap = new Map<string, number>(
+        (qData || []).map((item: any) => [
+          item.product_id,
+          Number(item.monthly_quantity) || 0,
+        ]),
+      );
+
+      invoices = this.generatePurchaseInvoiceSplitupsInternal(
+        typedBatch,
+        numberOfDays,
+        fromDate,
+        startingCounter,
+        monthlyQuantitiesMap,
+      );
+    } else {
+      invoices = this.generateInvoiceSplitupsInternal(
+        typedBatch,
+        numberOfDays,
+        fromDate,
+        startingCounter,
+      );
+    }
 
     // Validate all generated invoices before saving
     for (const inv of invoices) {
       const validation = this.validateInvoiceData(inv);
       if (!validation.isValid) {
         throw new Error(`Generation validation failed: ${validation.message}`);
+      }
+    }
+
+    // Validate quantities for PURCHASE batches
+    if (typedBatch.batch_type === "PURCHASE") {
+      const { data: qData } = await supabase
+        .from("purchase_batch_products")
+        .select("product_id, monthly_quantity")
+        .eq("batch_id", batchId);
+
+      const monthlyQuantitiesMap = new Map<string, number>(
+        (qData || []).map((item: any) => [
+          item.product_id,
+          Number(item.monthly_quantity) || 0,
+        ]),
+      );
+
+      const productTotalQty = new Map<string, number>();
+      for (const inv of invoices) {
+        for (const p of inv.products) {
+          productTotalQty.set(
+            p.product_id,
+            (productTotalQty.get(p.product_id) || 0) + p.quantity,
+          );
+        }
+      }
+
+      for (const prod of typedBatch.products) {
+        const targetQty = monthlyQuantitiesMap.get(prod.product_id) || 0;
+        const genQty = productTotalQty.get(prod.product_id) || 0;
+        if (Math.abs(genQty - targetQty) > 0.01) {
+          throw new Error(
+            `Quantity mismatch validation failed for product "${prod.product_name}". Target: ${targetQty} ${prod.unit_of_measure}, Generated: ${genQty} ${prod.unit_of_measure}. Difference: ${targetQty - genQty}`,
+          );
+        }
       }
     }
 
@@ -1193,5 +1257,380 @@ export class InvoiceEngine {
     }
 
     return products;
+  }
+
+  private static generatePurchaseInvoiceSplitupsInternal(
+    batch: InvoiceBatch,
+    numberOfDays: number,
+    startDate: Date,
+    startingCounter: number,
+    monthlyQuantities: Map<string, number>,
+  ) {
+    const thresholdMin = batch.minimum_invoice_amount;
+    const thresholdMax = batch.maximum_invoice_amount;
+    const totalAmount = batch.total_amount;
+
+    // 1. Solve rates for each product
+    const rates = new Map<string, number>();
+    let minAmountSum = 0;
+    let maxAmountSum = 0;
+
+    for (const prod of batch.products) {
+      const qty = monthlyQuantities.get(prod.product_id) || 0;
+      const minR = parseFloat(prod.perDayRateMin);
+      const maxR = parseFloat(prod.perDayRateMax);
+      minAmountSum += qty * minR;
+      maxAmountSum += qty * maxR;
+    }
+
+    if (totalAmount < minAmountSum || totalAmount > maxAmountSum) {
+      throw new Error(
+        `Target total amount (₹${totalAmount}) is out of rate limit bounds for the monthly quantities. Minimum possible is ₹${minAmountSum.toFixed(2)}, Maximum possible is ₹${maxAmountSum.toFixed(2)}.`,
+      );
+    }
+
+    if (maxAmountSum > minAmountSum) {
+      const factor =
+        (totalAmount - minAmountSum) / (maxAmountSum - minAmountSum);
+      for (const prod of batch.products) {
+        const minR = parseFloat(prod.perDayRateMin);
+        const maxR = parseFloat(prod.perDayRateMax);
+        const rate = minR + factor * (maxR - minR);
+        rates.set(prod.product_id, Math.round(rate * 100) / 100);
+      }
+    } else {
+      for (const prod of batch.products) {
+        rates.set(prod.product_id, parseFloat(prod.perDayRateMin));
+      }
+    }
+
+    // Absorb rounding drift in the first product
+    const firstProdWithQty = batch.products.find(
+      (p) => (monthlyQuantities.get(p.product_id) || 0) > 0,
+    );
+    if (firstProdWithQty) {
+      const sumAmounts = batch.products.reduce((sum, prod) => {
+        const qty = monthlyQuantities.get(prod.product_id) || 0;
+        const rate = rates.get(prod.product_id) || 0;
+        return sum + qty * rate;
+      }, 0);
+      const drift = Math.round((totalAmount - sumAmounts) * 100) / 100;
+      const qty = monthlyQuantities.get(firstProdWithQty.product_id) || 0;
+      if (Math.abs(drift) > 0.01 && qty > 0) {
+        const r = rates.get(firstProdWithQty.product_id) || 0;
+        rates.set(
+          firstProdWithQty.product_id,
+          Math.round((r + drift / qty) * 1000) / 1000,
+        );
+      }
+    }
+
+    // 2. Try until we succeed within constraints
+    let attempt = 0;
+    const maxAttempts = 100;
+
+    while (attempt < maxAttempts) {
+      attempt++;
+      try {
+        const invoices = [];
+        let invoiceCounter = startingCounter;
+
+        let selectedCustomers = batch.selected_customers || [];
+        const majorCustomers = batch.major_customers || [];
+        if (
+          selectedCustomers.length === 0 &&
+          majorCustomers.length === 0 &&
+          batch.receiving_company_id
+        ) {
+          selectedCustomers = [batch.receiving_company_id];
+        }
+
+        // Target invoice amounts list
+        const targets: Array<{ amount: number; customerId: string }> = [];
+
+        // Major Customers/Suppliers
+        for (const major of majorCustomers) {
+          if (
+            !major.customer_id ||
+            major.invoice_count < 1 ||
+            major.amount <= 0
+          )
+            continue;
+
+          const n = major.invoice_count;
+          const amounts: number[] = [];
+          if (n === 1) {
+            amounts.push(major.amount);
+          } else {
+            const weights = Array.from(
+              { length: n },
+              () => 0.2 + Math.random() * 0.8,
+            );
+            const sumW = weights.reduce((a, b) => a + b, 0);
+            let allocated = 0;
+            for (let i = 0; i < n - 1; i++) {
+              const amt =
+                Math.round(major.amount * (weights[i] / sumW) * 100) / 100;
+              amounts.push(amt);
+              allocated += amt;
+            }
+            amounts.push(Math.round((major.amount - allocated) * 100) / 100);
+          }
+
+          for (const amt of amounts) {
+            targets.push({ amount: amt, customerId: major.customer_id });
+          }
+        }
+
+        // Regular Customers/Suppliers
+        const majorTotal = majorCustomers.reduce(
+          (s, m) => s + (m.amount || 0),
+          0,
+        );
+        let remainingBatchAmount =
+          Math.round((totalAmount - majorTotal) * 100) / 100;
+
+        if (remainingBatchAmount > 0.01 && selectedCustomers.length > 0) {
+          while (remainingBatchAmount > 0.01) {
+            const randomAmount =
+              thresholdMin + Math.random() * (thresholdMax - thresholdMin);
+            const invoiceAmount =
+              Math.round(Math.min(remainingBatchAmount, randomAmount) * 100) /
+              100;
+
+            const randomCustomerIndex = Math.floor(
+              Math.random() * selectedCustomers.length,
+            );
+            const assignedCustomerId = selectedCustomers[randomCustomerIndex];
+
+            targets.push({
+              amount: invoiceAmount,
+              customerId: assignedCustomerId,
+            });
+            remainingBatchAmount = Math.max(
+              0,
+              Math.round((remainingBatchAmount - invoiceAmount) * 100) / 100,
+            );
+          }
+        }
+
+        // Sort target invoices descending so we allocate the largest invoices first
+        targets.sort((a, b) => b.amount - a.amount);
+
+        // Track remaining quantities
+        const remainingQty = new Map<string, number>();
+        for (const prod of batch.products) {
+          remainingQty.set(
+            prod.product_id,
+            monthlyQuantities.get(prod.product_id) || 0,
+          );
+        }
+
+        // Allocate quantities to each target invoice
+        for (let i = 0; i < targets.length; i++) {
+          const tgt = targets[i];
+          const invoiceAmount = tgt.amount;
+
+          const dayOffset = Math.floor(Math.random() * numberOfDays);
+          const currentDate = new Date(startDate);
+          currentDate.setDate(startDate.getDate() + dayOffset);
+          const invoiceDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-${String(currentDate.getDate()).padStart(2, "0")}`;
+
+          const invoiceProducts: any[] = [];
+
+          if (i === targets.length - 1) {
+            // Last invoice: consume all remaining quantities exactly!
+            for (const prod of batch.products) {
+              const qty =
+                Math.round((remainingQty.get(prod.product_id) || 0) * 100) /
+                100;
+              if (qty > 0) {
+                const rate = rates.get(prod.product_id) || 0;
+                invoiceProducts.push({
+                  product_id: prod.product_id,
+                  product_name: prod.product_name,
+                  hsn_code: prod.hsn_code,
+                  unit_of_measure: prod.unit_of_measure,
+                  quantity: qty,
+                  rate: rate,
+                  amount: Math.round(qty * rate * 100) / 100,
+                });
+                remainingQty.set(prod.product_id, 0);
+              }
+            }
+          } else {
+            // Allocate subset of products for this invoice
+            const activeProds = batch.products.filter(
+              (p) => (remainingQty.get(p.product_id) || 0) > 0,
+            );
+            if (activeProds.length === 0) {
+              throw new Error("No products left to allocate");
+            }
+
+            // Randomly select products to include
+            const selectedSubset = activeProds
+              .sort(() => Math.random() - 0.5)
+              .slice(
+                0,
+                Math.max(1, Math.floor(Math.random() * activeProds.length)),
+              );
+
+            const minVals = selectedSubset.map((p) => {
+              const minQ = parseFloat(p.perDayQtyMin);
+              const rate = rates.get(p.product_id) || 0;
+              return minQ * rate;
+            });
+            const totalMinVals = minVals.reduce((a, b) => a + b, 0);
+
+            if (invoiceAmount < totalMinVals) {
+              throw new Error(
+                "Invoice amount too small for minimum product bounds",
+              );
+            }
+
+            const allocations = [...minVals];
+            let remainingVal = invoiceAmount - totalMinVals;
+
+            const indices = selectedSubset
+              .map((_, idx) => idx)
+              .sort(() => Math.random() - 0.5);
+            for (const idx of indices) {
+              if (remainingVal <= 0) break;
+              const p = selectedSubset[idx];
+              const rate = rates.get(p.product_id) || 0;
+              const maxQ = Math.min(
+                parseFloat(p.perDayQtyMax),
+                remainingQty.get(p.product_id) || 0,
+              );
+              const maxVal = maxQ * rate;
+              const maxAdd = maxVal - allocations[idx];
+              if (maxAdd <= 0) continue;
+              const add = Math.min(remainingVal, maxAdd);
+              allocations[idx] =
+                Math.round((allocations[idx] + add) * 100) / 100;
+              remainingVal -= add;
+            }
+
+            // Absorb remaining drift in allocation
+            const currentSum = allocations.reduce((a, b) => a + b, 0);
+            let driftVal = Math.round((invoiceAmount - currentSum) * 100) / 100;
+            if (Math.abs(driftVal) > 0.01) {
+              for (const idx of indices) {
+                const p = selectedSubset[idx];
+                const rate = rates.get(p.product_id) || 0;
+                const maxQ = Math.min(
+                  parseFloat(p.perDayQtyMax),
+                  remainingQty.get(p.product_id) || 0,
+                );
+                const maxVal = maxQ * rate;
+                const newVal =
+                  Math.round((allocations[idx] + driftVal) * 100) / 100;
+                if (newVal >= minVals[idx] && newVal <= maxVal) {
+                  allocations[idx] = newVal;
+                  driftVal = 0;
+                  break;
+                }
+              }
+            }
+
+            if (Math.abs(driftVal) > 0.01) {
+              throw new Error(
+                "Failed to allocate exact drift to selected subset",
+              );
+            }
+
+            // Convert allocations to quantities and add to products
+            selectedSubset.forEach((p, idx) => {
+              const val = allocations[idx];
+              const rate = rates.get(p.product_id) || 0;
+              const qty = Math.round((val / rate) * 100) / 100;
+              if (qty > 0) {
+                invoiceProducts.push({
+                  product_id: p.product_id,
+                  product_name: p.product_name,
+                  hsn_code: p.hsn_code,
+                  unit_of_measure: p.unit_of_measure,
+                  quantity: qty,
+                  rate: rate,
+                  amount: Math.round(qty * rate * 100) / 100,
+                });
+                remainingQty.set(
+                  p.product_id,
+                  Math.max(
+                    0,
+                    Math.round((remainingQty.get(p.product_id)! - qty) * 100) /
+                      100,
+                  ),
+                );
+              }
+            });
+          }
+
+          const prefix = batch.batch_type === "PURCHASE" ? "PI" : "INV";
+          const invoiceNumber = `${prefix}-${currentDate.getFullYear()}-${String(
+            currentDate.getMonth() + 1,
+          ).padStart(2, "0")}-${String(currentDate.getDate()).padStart(
+            2,
+            "0",
+          )}-${String(invoiceCounter).padStart(4, "0")}`;
+
+          const productsWithCustomerId = invoiceProducts.map((p) => ({
+            ...p,
+            customer_id: tgt.customerId,
+          }));
+
+          const exactTotal =
+            Math.round(
+              productsWithCustomerId.reduce((sum, p) => sum + p.amount, 0) *
+                100,
+            ) / 100;
+
+          invoices.push({
+            invoice_batch_id: batch.id,
+            invoice_number: invoiceNumber,
+            invoice_date: invoiceDate,
+            products: productsWithCustomerId,
+            total_amount: exactTotal,
+            status: "generated",
+            batch_type: batch.batch_type,
+          });
+
+          invoiceCounter++;
+        }
+
+        // Final absolute total drift correction
+        const totalGeneratedAmount = invoices.reduce(
+          (sum, inv) => sum + inv.total_amount,
+          0,
+        );
+        const finalDrift =
+          Math.round((totalAmount - totalGeneratedAmount) * 100) / 100;
+        if (Math.abs(finalDrift) > 0.01 && invoices.length > 0) {
+          const lastInv = invoices[invoices.length - 1];
+          if (lastInv.products.length > 0) {
+            const lastProd = lastInv.products[lastInv.products.length - 1];
+            lastProd.amount =
+              Math.round((lastProd.amount + finalDrift) * 100) / 100;
+            lastProd.rate =
+              Math.round((lastProd.amount / lastProd.quantity) * 1000) / 1000;
+            lastInv.total_amount =
+              Math.round(
+                lastInv.products.reduce(
+                  (sum: number, p: any) => sum + p.amount,
+                  0,
+                ) * 100,
+              ) / 100;
+          }
+        }
+
+        return invoices;
+      } catch (err) {
+        // Retry loop
+      }
+    }
+
+    throw new Error(
+      `Failed to generate purchase invoices after ${maxAttempts} attempts due to constraints mismatch. Please check that total amount and rate/quantity rules are compatible.`,
+    );
   }
 }
