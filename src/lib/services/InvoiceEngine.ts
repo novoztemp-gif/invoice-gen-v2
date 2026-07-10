@@ -1430,6 +1430,7 @@ export class InvoiceEngine {
         for (let i = 0; i < targets.length; i++) {
           const tgt = targets[i];
           const invoiceAmount = tgt.amount;
+          const L = targets.length - i; // remaining invoices
 
           const dayOffset = Math.floor(Math.random() * numberOfDays);
           const currentDate = new Date(startDate);
@@ -1438,133 +1439,94 @@ export class InvoiceEngine {
 
           const invoiceProducts: any[] = [];
 
-          if (i === targets.length - 1) {
-            // Last invoice: consume all remaining quantities exactly!
-            for (const prod of batch.products) {
-              const qty =
-                Math.round((remainingQty.get(prod.product_id) || 0) * 100) /
-                100;
-              if (qty > 0) {
-                const rate = rates.get(prod.product_id) || 0;
-                invoiceProducts.push({
-                  product_id: prod.product_id,
-                  product_name: prod.product_name,
-                  hsn_code: prod.hsn_code,
-                  unit_of_measure: prod.unit_of_measure,
-                  quantity: qty,
-                  rate: rate,
-                  amount: Math.round(qty * rate * 100) / 100,
-                });
-                remainingQty.set(prod.product_id, 0);
-              }
-            }
-          } else {
-            // Allocate subset of products for this invoice
-            const activeProds = batch.products.filter(
-              (p) => (remainingQty.get(p.product_id) || 0) > 0,
-            );
-            if (activeProds.length === 0) {
-              throw new Error("No products left to allocate");
-            }
-
-            // Randomly select products to include
-            const selectedSubset = activeProds
-              .sort(() => Math.random() - 0.5)
-              .slice(
-                0,
-                Math.max(1, Math.floor(Math.random() * activeProds.length)),
-              );
-
-            const minVals = selectedSubset.map((p) => {
-              const minQ = parseFloat(p.perDayQtyMin);
-              const rate = rates.get(p.product_id) || 0;
-              return minQ * rate;
-            });
-            const totalMinVals = minVals.reduce((a, b) => a + b, 0);
-
-            if (invoiceAmount < totalMinVals) {
-              throw new Error(
-                "Invoice amount too small for minimum product bounds",
-              );
-            }
-
-            const allocations = [...minVals];
-            let remainingVal = invoiceAmount - totalMinVals;
-
-            const indices = selectedSubset
-              .map((_, idx) => idx)
-              .sort(() => Math.random() - 0.5);
-            for (const idx of indices) {
-              if (remainingVal <= 0) break;
-              const p = selectedSubset[idx];
-              const rate = rates.get(p.product_id) || 0;
-              const maxQ = Math.min(
-                parseFloat(p.perDayQtyMax),
-                remainingQty.get(p.product_id) || 0,
-              );
-              const maxVal = maxQ * rate;
-              const maxAdd = maxVal - allocations[idx];
-              if (maxAdd <= 0) continue;
-              const add = Math.min(remainingVal, maxAdd);
-              allocations[idx] =
-                Math.round((allocations[idx] + add) * 100) / 100;
-              remainingVal -= add;
-            }
-
-            // Absorb remaining drift in allocation
-            const currentSum = allocations.reduce((a, b) => a + b, 0);
-            let driftVal = Math.round((invoiceAmount - currentSum) * 100) / 100;
-            if (Math.abs(driftVal) > 0.01) {
-              for (const idx of indices) {
-                const p = selectedSubset[idx];
-                const rate = rates.get(p.product_id) || 0;
-                const maxQ = Math.min(
-                  parseFloat(p.perDayQtyMax),
-                  remainingQty.get(p.product_id) || 0,
-                );
-                const maxVal = maxQ * rate;
-                const newVal =
-                  Math.round((allocations[idx] + driftVal) * 100) / 100;
-                if (newVal >= minVals[idx] && newVal <= maxVal) {
-                  allocations[idx] = newVal;
-                  driftVal = 0;
-                  break;
-                }
-              }
-            }
-
-            if (Math.abs(driftVal) > 0.01) {
-              throw new Error(
-                "Failed to allocate exact drift to selected subset",
-              );
-            }
-
-            // Convert allocations to quantities and add to products
-            selectedSubset.forEach((p, idx) => {
-              const val = allocations[idx];
-              const rate = rates.get(p.product_id) || 0;
-              const qty = Math.round((val / rate) * 100) / 100;
-              if (qty > 0) {
-                invoiceProducts.push({
-                  product_id: p.product_id,
-                  product_name: p.product_name,
-                  hsn_code: p.hsn_code,
-                  unit_of_measure: p.unit_of_measure,
-                  quantity: qty,
-                  rate: rate,
-                  amount: Math.round(qty * rate * 100) / 100,
-                });
-                remainingQty.set(
-                  p.product_id,
-                  Math.max(
-                    0,
-                    Math.round((remainingQty.get(p.product_id)! - qty) * 100) /
-                      100,
-                  ),
-                );
-              }
-            });
+          const activeProds = batch.products.filter(
+            (p) => (remainingQty.get(p.product_id) || 0) > 0,
+          );
+          if (activeProds.length === 0) {
+            throw new Error("No products left to allocate");
           }
+
+          // Calculate target quantity for each active product in this invoice
+          const targetsForProds = activeProds.map((p) => {
+            const rem = remainingQty.get(p.product_id) || 0;
+            // Gradually consume remaining pool: divide by remaining invoices count L
+            let targetQ = rem / L;
+
+            // Apply rules constraints
+            const minQ = parseFloat(p.perDayQtyMin);
+            const maxQ = parseFloat(p.perDayQtyMax);
+
+            if (L === 1) {
+              targetQ = rem;
+            } else {
+              targetQ = Math.max(minQ, Math.min(maxQ, targetQ));
+            }
+            targetQ = Math.min(targetQ, rem);
+            return {
+              product: p,
+              targetQ,
+              rate: rates.get(p.product_id) || 0,
+            };
+          });
+
+          const totalTargetVal = targetsForProds.reduce(
+            (sum, item) => sum + item.targetQ * item.rate,
+            0,
+          );
+
+          // Scale allocations to match invoiceAmount
+          const allocations = targetsForProds.map((item) => {
+            let val = 0;
+            if (totalTargetVal > 0) {
+              val =
+                ((item.targetQ * item.rate) / totalTargetVal) * invoiceAmount;
+            } else {
+              val = invoiceAmount / targetsForProds.length;
+            }
+            return Math.round(val * 100) / 100;
+          });
+
+          // Convert allocations to quantities while respecting rules limits
+          const finalQtys = targetsForProds.map((item, idx) => {
+            const val = allocations[idx];
+            let qty = Math.round((val / item.rate) * 100) / 100;
+            const minQ = parseFloat(item.product.perDayQtyMin);
+            const maxQ = parseFloat(item.product.perDayQtyMax);
+            const rem = remainingQty.get(item.product.product_id) || 0;
+
+            if (L === 1) {
+              qty = rem;
+            } else {
+              qty = Math.max(minQ, Math.min(maxQ, qty));
+            }
+            qty = Math.min(qty, rem);
+            return Math.round(qty * 100) / 100;
+          });
+
+          // Construct product rows
+          targetsForProds.forEach((item, idx) => {
+            const qty = finalQtys[idx];
+            if (qty > 0) {
+              invoiceProducts.push({
+                product_id: item.product.product_id,
+                product_name: item.product.product_name,
+                hsn_code: item.product.hsn_code,
+                unit_of_measure: item.product.unit_of_measure,
+                quantity: qty,
+                rate: item.rate,
+                amount: Math.round(qty * item.rate * 100) / 100,
+              });
+              remainingQty.set(
+                item.product.product_id,
+                Math.max(
+                  0,
+                  Math.round(
+                    (remainingQty.get(item.product.product_id)! - qty) * 100,
+                  ) / 100,
+                ),
+              );
+            }
+          });
 
           const prefix = batch.batch_type === "PURCHASE" ? "PI" : "INV";
           const invoiceNumber = `${prefix}-${currentDate.getFullYear()}-${String(
@@ -1585,12 +1547,28 @@ export class InvoiceEngine {
                 100,
             ) / 100;
 
+          // Adjust last invoice product amount to match target invoice amount exactly
+          let diffVal = Math.round((invoiceAmount - exactTotal) * 100) / 100;
+          if (Math.abs(diffVal) > 0.01 && productsWithCustomerId.length > 0) {
+            const lastP =
+              productsWithCustomerId[productsWithCustomerId.length - 1];
+            lastP.amount = Math.round((lastP.amount + diffVal) * 100) / 100;
+            lastP.rate =
+              Math.round((lastP.amount / lastP.quantity) * 1000) / 1000;
+          }
+
+          const finalExactTotal =
+            Math.round(
+              productsWithCustomerId.reduce((sum, p) => sum + p.amount, 0) *
+                100,
+            ) / 100;
+
           invoices.push({
             invoice_batch_id: batch.id,
             invoice_number: invoiceNumber,
             invoice_date: invoiceDate,
             products: productsWithCustomerId,
-            total_amount: exactTotal,
+            total_amount: finalExactTotal,
             status: "generated",
             batch_type: batch.batch_type,
           });
@@ -1598,7 +1576,7 @@ export class InvoiceEngine {
           invoiceCounter++;
         }
 
-        // Final absolute total drift correction
+        // Final absolute total drift correction across all invoices
         const totalGeneratedAmount = invoices.reduce(
           (sum, inv) => sum + inv.total_amount,
           0,
