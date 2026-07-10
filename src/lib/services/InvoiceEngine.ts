@@ -709,13 +709,11 @@ export class InvoiceEngine {
         const [date, product_id] = key.split("_");
         ledgerRecords.push({
           purchase_batch_id: batchId,
-          invoice_batch_id: batchId,
           ledger_date: date,
           product_id: product_id,
           opening_stock: 0,
           purchased_quantity: qty,
           sold_quantity: 0,
-          closing_stock: qty,
         });
       }
 
