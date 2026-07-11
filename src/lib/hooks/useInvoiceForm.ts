@@ -102,6 +102,10 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
   });
 
   const [isValidating, setIsValidating] = useState(false);
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
+  const [reviewRows, setReviewRows] = useState<any[]>([]);
+  const [proposedInvoices, setProposedInvoices] = useState<any[]>([]);
+  const [isSavingSales, setIsSavingSales] = useState(false);
 
   const currentYear = new Date().getFullYear();
 
@@ -386,7 +390,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
 
       if (batchType === "SALES") {
         setIsValidating(true);
-        const res = await fetch("/api/create-sales-batch-transactional", {
+        const res = await fetch("/api/generate-sales-dry-run", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -439,15 +443,13 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         setIsValidating(false);
 
         if (!res.ok) {
-          setErrorPopup(
-            result.message || "Failed to create transactional Sales batch.",
-          );
+          setErrorPopup(result.message || "Failed to run sales dry-run.");
           return;
         }
 
-        setErrorPopup("Sales batch and invoices created atomically!");
-        resetForm();
-        router.push("/invoice-batches");
+        setProposedInvoices(result.invoices || []);
+        setReviewRows(result.reviewRows || []);
+        setIsReviewOpen(true);
         return;
       }
 
@@ -696,6 +698,92 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     validateInvoiceBatch();
   };
 
+  const handleSaveSalesBatch = async (
+    adjustedInvoices: any[],
+    finalReviewRows: any[],
+  ) => {
+    try {
+      setIsSavingSales(true);
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        setErrorPopup("You must be logged in to save the sales batch.");
+        return;
+      }
+
+      const res = await fetch("/api/create-sales-batch-transactional", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          issuingCompanyId: selectedIssuingCompany?.id,
+          receivingCompanyId:
+            selectedCustomers[0] ||
+            (majorCustomers[0] ? majorCustomers[0].customer_id : null),
+          selectedCustomers: selectedCustomers,
+          majorCustomers: majorCustomers.map((m) => ({
+            customer_id: m.customer_id,
+            amount: parseFloat(m.amount) || 0,
+            invoice_count: parseInt(m.invoice_count, 10) || 1,
+          })),
+          transportMode: formData.transportMode,
+          vehicleNumber: formData.vehicleNumber || "",
+          dateOfSupply: formData.invoiceDateTo
+            ? formatDateForStorage(formData.invoiceDateTo)
+            : null,
+          invoiceDateFrom: formData.invoiceDateFrom
+            ? formatDateForStorage(formData.invoiceDateFrom)
+            : null,
+          invoiceDateTo: formData.invoiceDateTo
+            ? formatDateForStorage(formData.invoiceDateTo)
+            : null,
+          minimumInvoiceAmount: formData.minimumInvoiceAmount,
+          maximumInvoiceAmount: formData.maximumInvoiceAmount,
+          totalAmount: formData.totalAmount,
+          financialYearStart: formData.financialYearStart,
+          financialYearEnd: formData.financialYearEnd,
+          products: selectedProducts.map((item) => ({
+            product_id: item.product.id,
+            product_name: item.product.product_name,
+            hsn_code: item.product.hsn_code,
+            unit_of_measure: item.product.unit_of_measure,
+            perDayQtyMin: item.perDayQtyMin,
+            perDayQtyMax: item.perDayQtyMax,
+            perDayRateMin: item.perDayRateMin,
+            perDayRateMax: item.perDayRateMax,
+          })),
+          recurringProducts: recurringProducts.map((rp) => ({
+            product_id: rp.product_id,
+            percentage: parseFloat(rp.percentage),
+          })),
+          stockSourceBatchId: formData.stockSourceBatchId,
+          userId: user.id,
+          invoicesOverride: adjustedInvoices,
+        }),
+      });
+
+      const result = await res.json();
+      setIsSavingSales(false);
+
+      if (!res.ok) {
+        setErrorPopup(
+          result.message || "Failed to save transactional Sales batch.",
+        );
+        return;
+      }
+
+      setIsReviewOpen(false);
+      setErrorPopup("Sales batch and invoices created atomically!");
+      resetForm();
+      router.push("/invoice-batches");
+    } catch (err: any) {
+      setIsSavingSales(false);
+      console.error("Error saving sales batch:", err);
+      setErrorPopup(`Failed to save sales batch: ${err.message}`);
+    }
+  };
+
   return {
     issuingCompanies,
     receivingCompanies,
@@ -740,5 +828,11 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     handleRemoveRecurringProduct,
     handleSubmit,
     resetForm,
+    isReviewOpen,
+    setIsReviewOpen,
+    reviewRows,
+    proposedInvoices,
+    isSavingSales,
+    handleSaveSalesBatch,
   };
 }

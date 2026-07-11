@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { DailyStockReviewModal } from "@/components/DailyStockReviewModal";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -84,6 +85,12 @@ export default function GenerateInvoice() {
     handleAddRecurringProduct,
     handleRemoveRecurringProduct,
     handleSubmit,
+    isReviewOpen,
+    setIsReviewOpen,
+    reviewRows,
+    proposedInvoices,
+    isSavingSales,
+    handleSaveSalesBatch,
   } = useInvoiceForm({ batchType: "SALES" });
 
   const [finalizedPurchaseBatches, setFinalizedPurchaseBatches] = useState<
@@ -1181,6 +1188,15 @@ export default function GenerateInvoice() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <DailyStockReviewModal
+        isOpen={isReviewOpen}
+        onClose={() => setIsReviewOpen(false)}
+        initialRows={reviewRows}
+        originalInvoices={proposedInvoices}
+        onSave={handleSaveSalesBatch}
+        isSaving={isSavingSales}
+      />
     </div>
   );
 }
