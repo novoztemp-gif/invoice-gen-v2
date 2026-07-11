@@ -555,6 +555,68 @@ export class InvoiceEngine {
   }
 
   /**
+   * Dynamically calculate carry-forward stock from the previous finalized Purchase Batch
+   */
+  public static async getCarryForwardStock(
+    supabase: SupabaseClient,
+    currentBatchFromDate: string,
+  ): Promise<Map<string, number>> {
+    const carryForwardMap = new Map<string, number>();
+
+    // 1. Find the latest finalized purchase batch before currentBatchFromDate
+    const { data: prevBatch } = await supabase
+      .from("invoice_batch")
+      .select("id")
+      .eq("batch_type", "PURCHASE")
+      .eq("batch_status", "FINALIZED")
+      .lt("invoice_date_to", currentBatchFromDate)
+      .order("invoice_date_to", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!prevBatch) {
+      return carryForwardMap;
+    }
+
+    // 2. Load the daily stock ledger rows for this previous batch
+    const { data: ledgerRows } = await supabase
+      .from("daily_stock_ledger")
+      .select(
+        "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
+      )
+      .eq("purchase_batch_id", prevBatch.id)
+      .order("ledger_date", { ascending: true });
+
+    if (!ledgerRows || ledgerRows.length === 0) {
+      return carryForwardMap;
+    }
+
+    // 3. Compute dynamic carry forward for the previous batch
+    const productGroups = new Map<string, any[]>();
+    for (const row of ledgerRows) {
+      if (!productGroups.has(row.product_id)) {
+        productGroups.set(row.product_id, []);
+      }
+      productGroups.get(row.product_id)!.push(row);
+    }
+
+    for (const [productId, rows] of productGroups.entries()) {
+      let carryForward = Number(rows[0].opening_stock) || 0;
+
+      for (const row of rows) {
+        const opening = carryForward;
+        const purchased = Number(row.purchased_quantity) || 0;
+        const sold = Number(row.sold_quantity) || 0;
+        carryForward = Math.max(0, opening + purchased - sold);
+      }
+
+      carryForwardMap.set(productId, carryForward);
+    }
+
+    return carryForwardMap;
+  }
+
+  /**
    * Generate invoice split-ups and save them to the database
    */
   public static async generateAndSaveInvoices(
@@ -642,7 +704,8 @@ export class InvoiceEngine {
           .select(
             "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
           )
-          .eq("purchase_batch_id", typedBatch.stock_source_batch_id);
+          .eq("purchase_batch_id", typedBatch.stock_source_batch_id)
+          .order("ledger_date", { ascending: true });
 
         if (ledgerError) {
           throw new Error(
@@ -651,13 +714,26 @@ export class InvoiceEngine {
         }
 
         availableStockMap = new Map<string, number>();
+        const productGroups = new Map<string, any[]>();
         for (const row of ledgerData || []) {
-          const key = `${row.ledger_date}_${row.product_id}`;
-          const available =
-            (row.opening_stock || 0) +
-            (row.purchased_quantity || 0) -
-            (row.sold_quantity || 0);
-          availableStockMap.set(key, Math.max(0, available));
+          if (!productGroups.has(row.product_id)) {
+            productGroups.set(row.product_id, []);
+          }
+          productGroups.get(row.product_id)!.push(row);
+        }
+
+        for (const [productId, rows] of productGroups.entries()) {
+          let carryForward = Number(rows[0].opening_stock) || 0;
+          for (const row of rows) {
+            const opening = carryForward;
+            const purchased = Number(row.purchased_quantity) || 0;
+            const sold = Number(row.sold_quantity) || 0;
+            const available = opening + purchased - sold;
+
+            const key = `${row.ledger_date}_${row.product_id}`;
+            availableStockMap.set(key, Math.max(0, available));
+            carryForward = Math.max(0, available);
+          }
         }
       }
 
@@ -849,14 +925,35 @@ export class InvoiceEngine {
         }
       }
 
+      // 1. Fetch carry-forward stock from previous finalized purchase batch
+      const carryForwardStock = await this.getCarryForwardStock(
+        supabase,
+        typedBatch.invoice_date_from,
+      );
+
+      // 2. Identify the chronologically first date for each product to apply carry-forward
+      const productFirstDates = new Map<string, string>();
+      for (const [key, qty] of dailyQtyMap.entries()) {
+        const [date, product_id] = key.split("_");
+        const existingFirst = productFirstDates.get(product_id);
+        if (!existingFirst || date.localeCompare(existingFirst) < 0) {
+          productFirstDates.set(product_id, date);
+        }
+      }
+
       const ledgerRecords = [];
       for (const [key, qty] of dailyQtyMap.entries()) {
         const [date, product_id] = key.split("_");
+        const isFirstDate = productFirstDates.get(product_id) === date;
+        const carryForward = isFirstDate
+          ? carryForwardStock.get(product_id) || 0
+          : 0;
+
         ledgerRecords.push({
           purchase_batch_id: batchId,
           ledger_date: date,
           product_id: product_id,
-          opening_stock: 0,
+          opening_stock: carryForward,
           purchased_quantity: qty,
           sold_quantity: 0,
         });

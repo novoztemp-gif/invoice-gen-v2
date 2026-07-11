@@ -51,14 +51,41 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const availableStockMap = new Map<string, number>();
+    // 1.5. Compute dynamic ledger carry-forward for building the initial review rows & availableStockMap
+    const productGroups = new Map<string, any[]>();
     for (const row of ledgerData || []) {
-      const key = `${row.ledger_date}_${row.product_id}`;
-      const available =
-        (row.opening_stock || 0) +
-        (row.purchased_quantity || 0) -
-        (row.sold_quantity || 0);
-      availableStockMap.set(key, Math.max(0, available));
+      if (!productGroups.has(row.product_id)) {
+        productGroups.set(row.product_id, []);
+      }
+      productGroups.get(row.product_id)!.push(row);
+    }
+
+    const availableStockMap = new Map<string, number>();
+    const computedLedgerMap = new Map<
+      string,
+      {
+        opening: number;
+        purchased: number;
+        prevSold: number;
+        available: number;
+      }
+    >();
+
+    for (const [productId, rows] of productGroups.entries()) {
+      let carryForward = Number(rows[0].opening_stock) || 0;
+      for (const row of rows) {
+        const opening = carryForward;
+        const purchased = Number(row.purchased_quantity) || 0;
+        const prevSold = Number(row.sold_quantity) || 0;
+
+        const available = opening + purchased - prevSold;
+
+        const key = `${row.ledger_date}_${row.product_id}`;
+        availableStockMap.set(key, Math.max(0, available));
+        computedLedgerMap.set(key, { opening, purchased, prevSold, available });
+
+        carryForward = Math.max(0, available);
+      }
     }
 
     // 2. Prepare the Batch Configuration object to pass to the engine
@@ -125,12 +152,14 @@ export async function POST(request: NextRequest) {
     const reviewRows = (ledgerData || []).map((row: any) => {
       const key = `${row.ledger_date}_${row.product_id}`;
       const proposed = proposedQtyMap.get(key) || 0;
-      const opening = row.opening_stock || 0;
-      const purchased = row.purchased_quantity || 0;
-      const prevSold = row.sold_quantity || 0;
 
-      const effOpening = Math.max(0, opening - prevSold);
-      const remaining = Math.max(0, effOpening + purchased - proposed);
+      const computed = computedLedgerMap.get(key) || {
+        opening: 0,
+        purchased: 0,
+        prevSold: 0,
+        available: 0,
+      };
+      const remaining = Math.max(0, computed.available - proposed);
 
       const productObj = products.find(
         (p: any) => p.product_id === row.product_id,
@@ -142,8 +171,8 @@ export async function POST(request: NextRequest) {
         date: row.ledger_date,
         product_id: row.product_id,
         product_name: productName,
-        opening_stock: effOpening,
-        purchased_quantity: purchased,
+        opening_stock: computed.opening,
+        purchased_quantity: computed.purchased,
         proposed_sold: proposed,
         remaining_stock: remaining,
         unit: unit,

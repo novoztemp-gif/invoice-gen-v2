@@ -43,7 +43,8 @@ export async function POST(request: NextRequest) {
       .select(
         "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
       )
-      .eq("purchase_batch_id", stockSourceBatchId);
+      .eq("purchase_batch_id", stockSourceBatchId)
+      .order("ledger_date", { ascending: true });
 
     if (ledgerError) {
       return NextResponse.json(
@@ -53,13 +54,27 @@ export async function POST(request: NextRequest) {
     }
 
     const availableStockMap = new Map<string, number>();
+    const productGroups = new Map<string, any[]>();
     for (const row of ledgerData || []) {
-      const key = `${row.ledger_date}_${row.product_id}`;
-      const available =
-        (row.opening_stock || 0) +
-        (row.purchased_quantity || 0) -
-        (row.sold_quantity || 0);
-      availableStockMap.set(key, Math.max(0, available));
+      if (!productGroups.has(row.product_id)) {
+        productGroups.set(row.product_id, []);
+      }
+      productGroups.get(row.product_id)!.push(row);
+    }
+
+    for (const [productId, rows] of productGroups.entries()) {
+      let carryForward = Number(rows[0].opening_stock) || 0;
+      for (const row of rows) {
+        const opening = carryForward;
+        const purchased = Number(row.purchased_quantity) || 0;
+        const prevSold = Number(row.sold_quantity) || 0;
+
+        const available = opening + purchased - prevSold;
+        const key = `${row.ledger_date}_${row.product_id}`;
+        availableStockMap.set(key, Math.max(0, available));
+
+        carryForward = Math.max(0, available);
+      }
     }
 
     // 2. Prepare the Batch Configuration object to pass to the engine

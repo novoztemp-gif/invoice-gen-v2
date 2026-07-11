@@ -115,6 +115,37 @@ export default function GenerateInvoice() {
     fetchFinalizedPurchaseBatches();
   }, []);
 
+  const [stockSummary, setStockSummary] = useState<any[]>([]);
+  const [isLoadingSummary, setIsLoadingSummary] = useState(false);
+
+  useEffect(() => {
+    if (!formData.stockSourceBatchId) {
+      setStockSummary([]);
+      return;
+    }
+
+    const fetchStockSummary = async () => {
+      setIsLoadingSummary(true);
+      try {
+        const res = await fetch(
+          `/api/get-purchase-batch-stock-summary?batchId=${formData.stockSourceBatchId}`,
+        );
+        const result = await res.json();
+        if (res.ok) {
+          setStockSummary(result.summary || []);
+        } else {
+          console.error(result.message);
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setIsLoadingSummary(false);
+      }
+    };
+
+    fetchStockSummary();
+  }, [formData.stockSourceBatchId]);
+
   return (
     <div>
       <h1 className="text-3xl font-bold text-slate-900 mb-6">Sales Invoice</h1>
@@ -204,6 +235,57 @@ export default function GenerateInvoice() {
                   </option>
                 ))}
               </select>
+
+              {isLoadingSummary && (
+                <div className="text-sm text-slate-500 py-2">
+                  Loading Stock Availability Summary...
+                </div>
+              )}
+
+              {!isLoadingSummary && stockSummary.length > 0 && (
+                <div className="mt-4 border rounded-lg border-slate-200 overflow-hidden">
+                  <div className="bg-slate-50 border-b border-slate-200 px-4 py-2 font-semibold text-xs text-slate-700 uppercase tracking-wider">
+                    Stock Availability Summary (Read-Only)
+                  </div>
+                  <table className="w-full text-xs text-left text-slate-600 border-collapse">
+                    <thead className="bg-slate-50/50 font-medium text-slate-500 border-b border-slate-100">
+                      <tr>
+                        <th className="px-4 py-2">Product</th>
+                        <th className="px-4 py-2 text-right">
+                          Carry Forward Stock
+                        </th>
+                        <th className="px-4 py-2 text-right">
+                          Current Month Purchased
+                        </th>
+                        <th className="px-4 py-2 text-right font-semibold text-slate-900">
+                          Total Available
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {stockSummary.map((item) => (
+                        <tr
+                          key={item.product_id}
+                          className="hover:bg-slate-50/30"
+                        >
+                          <td className="px-4 py-2 font-medium text-slate-800">
+                            {item.product_name}
+                          </td>
+                          <td className="px-4 py-2 text-right font-mono">
+                            {item.carry_forward.toFixed(2)} {item.unit}
+                          </td>
+                          <td className="px-4 py-2 text-right font-mono">
+                            {item.purchased.toFixed(2)} {item.unit}
+                          </td>
+                          <td className="px-4 py-2 text-right font-mono font-semibold text-slate-900">
+                            {item.total_available.toFixed(2)} {item.unit}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
