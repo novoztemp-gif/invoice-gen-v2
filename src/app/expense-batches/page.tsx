@@ -19,6 +19,7 @@ import { createClient } from "@/lib/supabase/client";
 
 interface ExpenseBatch {
   id: string;
+  batch_name: string;
   financial_year: string;
   expense_date_from: string;
   expense_date_to: string;
@@ -164,7 +165,7 @@ export default function ExpenseBatches() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Batch ID</TableHead>
+                    <TableHead>Batch Name</TableHead>
                     <TableHead>Financial Year</TableHead>
                     <TableHead>Date Range</TableHead>
                     <TableHead className="text-center">Expense Items</TableHead>
@@ -183,8 +184,9 @@ export default function ExpenseBatches() {
                         router.push(`/expense-batches/${batch.id}`)
                       }
                     >
-                      <TableCell className="font-semibold font-mono text-slate-800">
-                        EB-{batch.id.substring(0, 8).toUpperCase()}
+                      <TableCell className="font-semibold text-slate-800">
+                        {batch.batch_name ||
+                          `EB-${batch.id.substring(0, 8).toUpperCase()}`}
                       </TableCell>
                       <TableCell className="font-medium text-slate-600">
                         FY{batch.financial_year}

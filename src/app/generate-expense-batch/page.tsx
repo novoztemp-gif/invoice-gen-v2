@@ -51,6 +51,7 @@ export default function GenerateExpenseBatch() {
     { expense_name: "", expense_category: "General", amount: "" },
   ]);
 
+  const [remarks, setRemarks] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [errorPopup, setErrorPopup] = useState<string | null>(null);
 
@@ -139,6 +140,7 @@ export default function GenerateExpenseBatch() {
           expenseDateFrom: formatDate(expenseDateFrom),
           expenseDateTo: formatDate(expenseDateTo),
           items: items,
+          remarks: remarks || undefined,
         }),
       });
 
@@ -218,6 +220,18 @@ export default function GenerateExpenseBatch() {
                   onDateChange={setExpenseDateTo}
                 />
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="remarks">Remarks (Optional)</Label>
+              <Input
+                id="remarks"
+                type="text"
+                placeholder="e.g. Operating expenses for April"
+                value={remarks}
+                onChange={(e) => setRemarks(e.target.value)}
+                className="bg-white"
+              />
             </div>
 
             <div className="pt-2 flex justify-between items-center bg-slate-50 p-3 rounded-lg border border-slate-100">

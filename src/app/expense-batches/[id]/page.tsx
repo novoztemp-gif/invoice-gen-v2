@@ -18,11 +18,13 @@ import { createClient } from "@/lib/supabase/client";
 
 interface ExpenseBatch {
   id: string;
+  batch_name: string;
   financial_year: string;
   expense_date_from: string;
   expense_date_to: string;
   total_amount: number;
   status: string;
+  remarks: string | null;
   created_at: string;
 }
 
@@ -31,6 +33,7 @@ interface ExpenseItem {
   expense_name: string;
   expense_category: string;
   amount: number;
+  display_order: number;
 }
 
 export default function ExpenseBatchDetails() {
@@ -63,12 +66,12 @@ export default function ExpenseBatchDetails() {
           return;
         }
 
-        // Fetch items
+        // Fetch items sorted by display_order
         const { data: itemsData, error: itemsError } = await supabase
           .from("expense_batch_items")
           .select("*")
           .eq("expense_batch_id", batchId)
-          .order("amount", { ascending: false });
+          .order("display_order", { ascending: true });
 
         if (itemsError) {
           console.error("Error fetching items:", itemsError);
@@ -116,13 +119,27 @@ export default function ExpenseBatchDetails() {
         </Button>
         <div>
           <h1 className="text-3xl font-bold text-slate-900">
-            Expense Batch Details
+            {batch.batch_name || "Expense Batch Details"}
           </h1>
-          <p className="text-slate-500 font-mono text-sm mt-0.5">
-            EB-{batch.id.substring(0, 8).toUpperCase()}
+          <p className="text-slate-500 font-mono text-xs mt-0.5">
+            ID: {batch.id.substring(0, 8).toUpperCase()}
           </p>
         </div>
       </div>
+
+      {/* Remarks Section */}
+      {batch.remarks && (
+        <Card className="shadow-sm border-l-4 border-amber-500 bg-amber-50/15">
+          <CardHeader className="py-2.5">
+            <CardTitle className="text-xs font-semibold text-amber-800 uppercase tracking-wider">
+              Remarks / Notes
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="pb-3 text-sm text-slate-700">
+            {batch.remarks}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Grid summary */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

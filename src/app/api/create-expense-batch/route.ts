@@ -5,7 +5,8 @@ import { createClient } from "@/lib/supabase/server";
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { financialYear, expenseDateFrom, expenseDateTo, items } = body;
+    const { financialYear, expenseDateFrom, expenseDateTo, items, remarks } =
+      body;
 
     // Validation
     if (!financialYear || !expenseDateFrom || !expenseDateTo) {
@@ -55,20 +56,29 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
+    // Generate batch name from starting date
+    const [year, month, day] = expenseDateFrom.split("-").map(Number);
+    const dateObj = new Date(year, month - 1, day);
+    const monthName = dateObj.toLocaleString("en-US", { month: "long" });
+    const batchName = `FY ${financialYear} - ${monthName} Expenses`;
+
     // Call the database transactional RPC
     const batchPayload = {
+      batch_name: batchName,
       financial_year: financialYear,
       expense_date_from: expenseDateFrom,
       expense_date_to: expenseDateTo,
       total_amount: totalAmount,
       status: "pending",
+      remarks: remarks || null,
       created_by: user.id,
     };
 
-    const itemsPayload = items.map((it) => ({
+    const itemsPayload = items.map((it, idx) => ({
       expense_name: it.expense_name.trim(),
       expense_category: it.expense_category || "General",
       amount: Number(it.amount),
+      display_order: idx,
     }));
 
     const { data: newBatchId, error: rpcError } = await supabase.rpc(
