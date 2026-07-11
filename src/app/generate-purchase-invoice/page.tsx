@@ -96,7 +96,7 @@ export default function GeneratePurchaseInvoice() {
       hasEmptyQty = true;
     }
 
-    for (const item of selectedProducts) {
+    const productBreakdown = selectedProducts.map((item) => {
       const q = parseFloat(item.monthlyQty || "");
       if (isNaN(q) || q <= 0) {
         hasEmptyQty = true;
@@ -104,9 +104,26 @@ export default function GeneratePurchaseInvoice() {
       const rMin = parseFloat(item.perDayRateMin) || 0;
       const rMax = parseFloat(item.perDayRateMax) || 0;
 
-      batchMin += (q || 0) * rMin;
-      batchMax += (q || 0) * rMax;
-    }
+      const minVal = (q || 0) * rMin;
+      const maxVal = (q || 0) * rMax;
+
+      batchMin += minVal;
+      batchMax += maxVal;
+
+      return {
+        product_id: item.product.id,
+        product_name: item.product.product_name,
+        monthly_qty: q || 0,
+        min_rate: rMin,
+        max_rate: rMax,
+        min_val: minVal,
+        max_val: maxVal,
+        unit: item.product.unit_of_measure,
+      };
+    });
+
+    // Sort descending by Minimum Value
+    productBreakdown.sort((a, b) => b.min_val - a.min_val);
 
     const enteredAmount = parseFloat(formData.totalAmount) || 0;
     const hasInvalidEntered = isNaN(enteredAmount) || enteredAmount <= 0;
@@ -129,21 +146,59 @@ export default function GeneratePurchaseInvoice() {
       difference = 0;
     }
 
+    // Top 5 products contributing the highest Minimum Value
+    const top5Contributors = [...productBreakdown]
+      .filter((p) => p.monthly_qty > 0)
+      .slice(0, 5);
+
     return {
       batchMin,
       batchMax,
       enteredAmount,
       status,
       difference,
+      productBreakdown,
+      top5Contributors,
     };
   };
 
-  const { batchMin, batchMax, enteredAmount, status, difference } =
-    calcValues();
+  const {
+    batchMin,
+    batchMax,
+    enteredAmount,
+    status,
+    difference,
+    productBreakdown,
+    top5Contributors,
+  } = calcValues();
   const isInvalid = status === "below_min" || status === "above_max";
+
+  const handleProductRowClick = (productId: string) => {
+    const element = document.getElementById(`product-qty-card-${productId}`);
+    if (element) {
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+
+      element.classList.remove("animate-highlight");
+      void element.offsetWidth; // force reflow
+      element.classList.add("animate-highlight");
+
+      setTimeout(() => {
+        element.classList.remove("animate-highlight");
+      }, 1500);
+    }
+  };
 
   return (
     <div>
+      <style>{`
+        @keyframes highlight-flash {
+          0% { background-color: rgb(187 247 208); border-color: rgb(34 197 94); box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.4); }
+          100% { background-color: transparent; border-color: inherit; box-shadow: none; }
+        }
+        .animate-highlight {
+          animation: highlight-flash 1.5s ease-out;
+        }
+      `}</style>
       <h1 className="text-3xl font-bold text-slate-900 mb-6">
         Purchase Invoice
       </h1>
@@ -814,7 +869,8 @@ export default function GeneratePurchaseInvoice() {
                   {selectedProducts.map((item, idx) => (
                     <div
                       key={item.product.id}
-                      className="space-y-2 p-3 border rounded-lg bg-slate-50/50"
+                      id={`product-qty-card-${item.product.id}`}
+                      className="space-y-2 p-3 border rounded-lg bg-slate-50/50 transition-all duration-300"
                     >
                       <Label
                         htmlFor={`monthly-qty-${item.product.id}`}
@@ -896,7 +952,7 @@ export default function GeneratePurchaseInvoice() {
                 <span className="text-xs text-slate-500 font-medium block">
                   Entered Purchase Amount
                 </span>
-                <span className="text-lg font-mono font-semibold">
+                <span className="text-lg font-mono font-semibold text-slate-900">
                   ₹
                   {enteredAmount.toLocaleString("en-IN", {
                     minimumFractionDigits: 2,
@@ -908,14 +964,14 @@ export default function GeneratePurchaseInvoice() {
 
             <hr className="border-slate-200/60" />
 
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
               <div>
                 <span className="text-xs text-slate-500 font-medium block mb-1">
                   Status
                 </span>
                 <span
                   className={cn(
-                    "font-semibold text-sm px-2.5 py-1 rounded-full inline-block",
+                    "font-semibold text-xs px-2.5 py-1 rounded-full inline-block uppercase tracking-wider",
                     status === "valid" && "bg-green-100 text-green-800",
                     (status === "below_min" || status === "above_max") &&
                       "bg-red-100 text-red-800",
@@ -925,32 +981,288 @@ export default function GeneratePurchaseInvoice() {
                   {status === "valid" && "✅ Purchase Amount is Valid"}
                   {status === "below_min" && "❌ Below Minimum Possible Value"}
                   {status === "above_max" && "❌ Above Maximum Possible Value"}
-                  {status === "incomplete" &&
-                    "⚠️ Incomplete Details (Enter quantities and total purchase amount)"}
+                  {status === "incomplete" && "⚠️ Incomplete Details"}
                 </span>
               </div>
 
-              {(status === "below_min" ||
-                status === "above_max" ||
-                status === "valid") && (
-                <div className="sm:text-right">
-                  <span className="text-xs text-slate-500 font-medium block">
-                    {status === "below_min" && "Difference from Minimum"}
-                    {status === "above_max" && "Difference from Maximum"}
-                    {status === "valid" && "Difference"}
+              <div className="space-y-2">
+                <div className="flex justify-between items-center sm:justify-end gap-4">
+                  <span className="text-xs text-slate-500 font-medium">
+                    Difference from Minimum:
                   </span>
-                  <span className="text-base font-mono font-bold">
+                  <span className="text-sm font-mono font-semibold">
                     ₹
-                    {difference.toLocaleString("en-IN", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
+                    {status === "below_min"
+                      ? difference.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                        })
+                      : "0.00"}
                   </span>
                 </div>
-              )}
+                <div className="flex justify-between items-center sm:justify-end gap-4">
+                  <span className="text-xs text-slate-500 font-medium">
+                    Difference from Maximum:
+                  </span>
+                  <span className="text-sm font-mono font-semibold">
+                    ₹
+                    {status === "above_max"
+                      ? difference.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                        })
+                      : "0.00"}
+                  </span>
+                </div>
+              </div>
             </div>
           </CardContent>
         </Card>
+
+        {/* Product Contribution Breakdown Card */}
+        {selectedProducts.length > 0 && (
+          <Card className="border shadow-sm">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base font-semibold">
+                Product Contribution Breakdown
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Desktop Table View */}
+              <div className="hidden sm:block overflow-x-auto border rounded-lg border-slate-200">
+                <table className="w-full text-xs text-left text-slate-600 border-collapse">
+                  <thead className="bg-slate-50 font-medium text-slate-500 border-b border-slate-200">
+                    <tr>
+                      <th className="px-4 py-2.5">Product Name</th>
+                      <th className="px-4 py-2.5 text-right">
+                        Monthly Quantity
+                      </th>
+                      <th className="px-4 py-2.5 text-right">Min Rate</th>
+                      <th className="px-4 py-2.5 text-right">Max Rate</th>
+                      <th className="px-4 py-2.5 text-right font-medium text-slate-800">
+                        Min Value
+                      </th>
+                      <th className="px-4 py-2.5 text-right font-medium text-slate-800">
+                        Max Value
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {productBreakdown.map((item) => (
+                      <tr
+                        key={item.product_id}
+                        onClick={() => handleProductRowClick(item.product_id)}
+                        className="hover:bg-slate-50/80 cursor-pointer transition-colors"
+                      >
+                        <td className="px-4 py-2.5 font-medium text-slate-800 flex items-center gap-1.5">
+                          <span>{item.product_name}</span>
+                          <span className="text-[10px] text-slate-400 font-normal">
+                            ({item.unit})
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono">
+                          {item.monthly_qty.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono">
+                          ₹{item.min_rate.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono">
+                          ₹{item.max_rate.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono font-medium text-slate-900 bg-slate-50/30">
+                          ₹
+                          {item.min_val.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono font-medium text-slate-900 bg-slate-50/30">
+                          ₹
+                          {item.max_val.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile Card-based View */}
+              <div className="block sm:hidden space-y-3">
+                {productBreakdown.map((item) => (
+                  <div
+                    key={item.product_id}
+                    onClick={() => handleProductRowClick(item.product_id)}
+                    className="p-3 border rounded-lg bg-slate-50/50 hover:bg-slate-50 cursor-pointer transition-colors space-y-2"
+                  >
+                    <div className="flex justify-between items-center">
+                      <span className="font-semibold text-slate-800">
+                        {item.product_name}
+                      </span>
+                      <span className="text-[11px] text-slate-500 font-mono">
+                        {item.monthly_qty.toFixed(2)} {item.unit}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      <div>
+                        <span className="text-slate-400 block">
+                          Min Value (Rate: ₹{item.min_rate})
+                        </span>
+                        <span className="font-bold font-mono text-slate-800">
+                          ₹
+                          {item.min_val.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block">
+                          Max Value (Rate: ₹{item.max_rate})
+                        </span>
+                        <span className="font-bold font-mono text-slate-800">
+                          ₹
+                          {item.max_val.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Contribution Totals Section */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-3 border-t border-slate-200 text-sm">
+                <span className="text-slate-500 font-medium">
+                  Contribution Totals
+                </span>
+                <div className="flex flex-col sm:flex-row gap-4 sm:text-right">
+                  <div>
+                    <span className="text-xs text-slate-400 block">
+                      Total Minimum Purchase Value
+                    </span>
+                    <span className="font-semibold font-mono text-slate-800">
+                      ₹
+                      {batchMin.toLocaleString("en-IN", {
+                        minimumFractionDigits: 2,
+                      })}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-xs text-slate-400 block">
+                      Total Maximum Purchase Value
+                    </span>
+                    <span className="font-semibold font-mono text-slate-800">
+                      ₹
+                      {batchMax.toLocaleString("en-IN", {
+                        minimumFractionDigits: 2,
+                      })}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Suggestions Card */}
+        {isInvalid && (
+          <Card className="border border-red-200 bg-red-50/30 shadow-sm">
+            <CardHeader className="pb-3 border-b border-red-100">
+              <CardTitle className="text-base font-semibold text-red-900 flex items-center gap-2">
+                <span>Suggestions</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="pt-4 space-y-4">
+              {status === "below_min" && (
+                <div className="space-y-3">
+                  <p className="text-sm font-medium text-red-800">
+                    ❌ Purchase Amount is below the mathematically achievable
+                    range.
+                  </p>
+                  <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
+                    <li>
+                      Increase Purchase Amount by at least{" "}
+                      <strong className="text-red-700 font-semibold font-mono">
+                        ₹
+                        {difference.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                        })}
+                      </strong>
+                    </li>
+                    <li>
+                      Reduce Monthly Quantities of one or more high-value
+                      products listed below.
+                    </li>
+                  </ul>
+
+                  <div className="pt-2">
+                    <span className="text-xs font-semibold text-slate-700 block mb-2">
+                      Top 5 Products contributing the highest Minimum Value:
+                    </span>
+                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                      <table className="w-full text-xs text-left text-slate-600 border-collapse">
+                        <thead className="bg-slate-50 border-b border-slate-200 font-medium">
+                          <tr>
+                            <th className="px-3 py-2">Product</th>
+                            <th className="px-3 py-2 text-right">Quantity</th>
+                            <th className="px-3 py-2 text-right">
+                              Min Contribution
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {top5Contributors.map((p) => (
+                            <tr
+                              key={p.product_id}
+                              className="hover:bg-slate-50/50"
+                            >
+                              <td className="px-3 py-2 font-medium text-slate-800">
+                                {p.product_name}
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono">
+                                {p.monthly_qty.toLocaleString()} {p.unit}
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono font-medium text-red-700">
+                                ₹
+                                {p.min_val.toLocaleString("en-IN", {
+                                  minimumFractionDigits: 2,
+                                })}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {status === "above_max" && (
+                <div className="space-y-3">
+                  <p className="text-sm font-medium text-red-800">
+                    ❌ Purchase Amount exceeds the mathematically achievable
+                    range.
+                  </p>
+                  <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
+                    <li>
+                      Reduce Purchase Amount by{" "}
+                      <strong className="text-red-700 font-semibold font-mono">
+                        ₹
+                        {difference.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                        })}
+                      </strong>
+                    </li>
+                    <li>Increase Monthly Quantities of selected products.</li>
+                    <li>
+                      Increase configured Maximum Rates in the product
+                      configuration rules.
+                    </li>
+                  </ul>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {/* Recurring Products */}
         <Card>
