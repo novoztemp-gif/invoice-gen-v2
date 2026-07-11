@@ -86,6 +86,62 @@ export default function GeneratePurchaseInvoice() {
     handleSubmit,
   } = useInvoiceForm({ batchType: "PURCHASE" });
 
+  // Live Purchase Value Calculator
+  const calcValues = () => {
+    let batchMin = 0;
+    let batchMax = 0;
+    let hasEmptyQty = false;
+
+    if (selectedProducts.length === 0) {
+      hasEmptyQty = true;
+    }
+
+    for (const item of selectedProducts) {
+      const q = parseFloat(item.monthlyQty || "");
+      if (isNaN(q) || q <= 0) {
+        hasEmptyQty = true;
+      }
+      const rMin = parseFloat(item.perDayRateMin) || 0;
+      const rMax = parseFloat(item.perDayRateMax) || 0;
+
+      batchMin += (q || 0) * rMin;
+      batchMax += (q || 0) * rMax;
+    }
+
+    const enteredAmount = parseFloat(formData.totalAmount) || 0;
+    const hasInvalidEntered = isNaN(enteredAmount) || enteredAmount <= 0;
+
+    let status: "incomplete" | "valid" | "below_min" | "above_max" =
+      "incomplete";
+    let difference = 0;
+
+    if (hasEmptyQty || hasInvalidEntered) {
+      status = "incomplete";
+      difference = 0;
+    } else if (enteredAmount < batchMin) {
+      status = "below_min";
+      difference = batchMin - enteredAmount;
+    } else if (enteredAmount > batchMax) {
+      status = "above_max";
+      difference = enteredAmount - batchMax;
+    } else {
+      status = "valid";
+      difference = 0;
+    }
+
+    return {
+      batchMin,
+      batchMax,
+      enteredAmount,
+      status,
+      difference,
+    };
+  };
+
+  const { batchMin, batchMax, enteredAmount, status, difference } =
+    calcValues();
+  const isInvalid = status === "below_min" || status === "above_max";
+
   return (
     <div>
       <h1 className="text-3xl font-bold text-slate-900 mb-6">
@@ -793,6 +849,109 @@ export default function GeneratePurchaseInvoice() {
           </Card>
         )}
 
+        {/* Purchase Value Calculator Card */}
+        <Card
+          className={cn(
+            "border shadow-sm transition-colors duration-200",
+            status === "valid" &&
+              "bg-green-50/70 border-green-200 text-green-950",
+            (status === "below_min" || status === "above_max") &&
+              "bg-red-50/70 border-red-200 text-red-950",
+            status === "incomplete" &&
+              "bg-amber-50/70 border-amber-200 text-amber-900",
+          )}
+        >
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              Purchase Value Calculator
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Minimum Possible Purchase Value
+                </span>
+                <span className="text-lg font-mono font-semibold">
+                  ₹
+                  {batchMin.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Maximum Possible Purchase Value
+                </span>
+                <span className="text-lg font-mono font-semibold">
+                  ₹
+                  {batchMax.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Entered Purchase Amount
+                </span>
+                <span className="text-lg font-mono font-semibold">
+                  ₹
+                  {enteredAmount.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+            </div>
+
+            <hr className="border-slate-200/60" />
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-sm">
+              <div>
+                <span className="text-xs text-slate-500 font-medium block mb-1">
+                  Status
+                </span>
+                <span
+                  className={cn(
+                    "font-semibold text-sm px-2.5 py-1 rounded-full inline-block",
+                    status === "valid" && "bg-green-100 text-green-800",
+                    (status === "below_min" || status === "above_max") &&
+                      "bg-red-100 text-red-800",
+                    status === "incomplete" && "bg-amber-100 text-amber-800",
+                  )}
+                >
+                  {status === "valid" && "✅ Purchase Amount is Valid"}
+                  {status === "below_min" && "❌ Below Minimum Possible Value"}
+                  {status === "above_max" && "❌ Above Maximum Possible Value"}
+                  {status === "incomplete" &&
+                    "⚠️ Incomplete Details (Enter quantities and total purchase amount)"}
+                </span>
+              </div>
+
+              {(status === "below_min" ||
+                status === "above_max" ||
+                status === "valid") && (
+                <div className="sm:text-right">
+                  <span className="text-xs text-slate-500 font-medium block">
+                    {status === "below_min" && "Difference from Minimum"}
+                    {status === "above_max" && "Difference from Maximum"}
+                    {status === "valid" && "Difference"}
+                  </span>
+                  <span className="text-base font-mono font-bold">
+                    ₹
+                    {difference.toLocaleString("en-IN", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
         {/* Recurring Products */}
         <Card>
           <CardHeader>
@@ -1112,13 +1271,18 @@ export default function GeneratePurchaseInvoice() {
       </div>
 
       {/* Submit Button */}
-      <div className="mt-8 flex justify-end">
+      <div className="mt-8 flex flex-col items-end gap-2">
         <Button
           onClick={handleSubmit}
           size="lg"
           className="px-8"
           type="button"
-          disabled={isValidating}
+          disabled={isValidating || isInvalid}
+          title={
+            isInvalid
+              ? "Purchase amount is outside the mathematically achievable range."
+              : undefined
+          }
         >
           {isValidating ? (
             <>
@@ -1126,9 +1290,14 @@ export default function GeneratePurchaseInvoice() {
               Validating...
             </>
           ) : (
-            "Create Purchase Batch"
+            "Generate Purchase Split-ups"
           )}
         </Button>
+        {isInvalid && (
+          <p className="text-xs text-red-600 font-medium">
+            Purchase amount is outside the mathematically achievable range.
+          </p>
+        )}
       </div>
 
       {/* Popup Dialog */}
