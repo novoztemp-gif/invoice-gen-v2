@@ -905,18 +905,8 @@ export class InvoiceEngine {
         }
         throw updateErr;
       }
-    } else {
-      const { error: insertError } = await supabase
-        .from("invoice")
-        .insert(invoices);
-      if (insertError) {
-        throw new Error(`Failed to save invoices: ${insertError.message}`);
-      }
-    }
-
-    // If it is a PURCHASE batch, populate the daily_stock_ledger
-    if (typedBatch.batch_type === "PURCHASE") {
-      const dailyQtyMap = new Map<string, number>(); // key: date_productId, value: quantity
+    } else if (typedBatch.batch_type === "PURCHASE") {
+      const dailyQtyMap = new Map<string, number>();
 
       for (const inv of invoices) {
         for (const p of inv.products) {
@@ -986,25 +976,38 @@ export class InvoiceEngine {
         }
       }
 
-      const { error: ledgerError } = await supabase
-        .from("daily_stock_ledger")
-        .insert(ledgerRecords);
+      // Invoke transactional save RPC for PURCHASE batches
+      const { data: rpcSuccess, error: rpcError } = await supabase.rpc(
+        "save_purchase_batch_transactional",
+        {
+          batch_id: batchId,
+          invoices_payload: invoices,
+          ledger_payload: ledgerRecords,
+        },
+      );
 
-      if (ledgerError) {
+      if (rpcError || !rpcSuccess) {
         throw new Error(
-          `Failed to save daily stock ledger records: ${ledgerError.message}`,
+          `Failed to save purchase batch atomically: ${rpcError?.message || "RPC failure"}`,
         );
       }
-    }
+    } else {
+      const { error: insertError } = await supabase
+        .from("invoice")
+        .insert(invoices);
+      if (insertError) {
+        throw new Error(`Failed to save invoices: ${insertError.message}`);
+      }
 
-    // Update batch status
-    const { error: updateError } = await supabase
-      .from("invoice_batch")
-      .update({ status: "generated" })
-      .eq("id", batchId);
+      // Update batch status
+      const { error: updateError } = await supabase
+        .from("invoice_batch")
+        .update({ status: "generated" })
+        .eq("id", batchId);
 
-    if (updateError) {
-      console.error("Error updating batch status:", updateError);
+      if (updateError) {
+        console.error("Error updating batch status:", updateError);
+      }
     }
 
     return invoices.length;
