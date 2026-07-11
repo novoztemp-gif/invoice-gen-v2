@@ -86,6 +86,28 @@ export default function GenerateInvoice() {
     handleSubmit,
   } = useInvoiceForm({ batchType: "SALES" });
 
+  const [finalizedPurchaseBatches, setFinalizedPurchaseBatches] = useState<
+    any[]
+  >([]);
+
+  useEffect(() => {
+    const fetchFinalizedPurchaseBatches = async () => {
+      const supabase = createClient();
+      const { data } = await supabase
+        .from("invoice_batch")
+        .select(
+          "id, total_amount, invoice_date_from, invoice_date_to, financial_year",
+        )
+        .eq("batch_type", "PURCHASE")
+        .eq("batch_status", "FINALIZED")
+        .order("invoice_date_from", { ascending: false });
+      if (data) {
+        setFinalizedPurchaseBatches(data);
+      }
+    };
+    fetchFinalizedPurchaseBatches();
+  }, []);
+
   return (
     <div>
       <h1 className="text-3xl font-bold text-slate-900 mb-6">Sales Invoice</h1>
@@ -140,6 +162,41 @@ export default function GenerateInvoice() {
                   {String(formData.financialYearEnd).slice(2)}
                 </span>
               </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Stock Source Configuration */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Stock Source</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              <Label htmlFor="stock-source">
+                Stock Source Batch (Finalized Purchase Batches) *
+              </Label>
+              <select
+                id="stock-source"
+                value={formData.stockSourceBatchId || ""}
+                onChange={(e) =>
+                  setFormData({
+                    ...formData,
+                    stockSourceBatchId: e.target.value,
+                  })
+                }
+                required
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <option value="">Select Stock Source...</option>
+                {finalizedPurchaseBatches.map((batch) => (
+                  <option key={batch.id} value={batch.id}>
+                    Batch {batch.id.substring(0, 8).toUpperCase()} -{" "}
+                    {batch.invoice_date_from} to {batch.invoice_date_to} (
+                    {batch.financial_year})
+                  </option>
+                ))}
+              </select>
             </div>
           </CardContent>
         </Card>

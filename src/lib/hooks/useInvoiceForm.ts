@@ -117,6 +117,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     totalAmount: string;
     financialYearStart: number;
     financialYearEnd: number;
+    stockSourceBatchId?: string;
   }>({
     invoiceType: batchType.toUpperCase(),
     transportMode: "In Hand Delivery",
@@ -129,6 +130,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     totalAmount: "",
     financialYearStart: currentYear,
     financialYearEnd: currentYear + 1,
+    stockSourceBatchId: "",
   });
 
   useEffect(() => {
@@ -386,6 +388,8 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         .from("invoice_batch")
         .insert({
           issuing_company_id: selectedIssuingCompany?.id,
+          stock_source_batch_id:
+            batchType === "SALES" ? formData.stockSourceBatchId || null : null,
           receiving_company_id:
             selectedCustomers[0] ||
             (majorCustomers[0] ? majorCustomers[0].customer_id : null),
@@ -542,6 +546,11 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         );
         return;
       }
+    }
+
+    if (batchType === "SALES" && !formData.stockSourceBatchId) {
+      setErrorPopup("Please select a Stock Source!");
+      return;
     }
 
     if (!formData.transportMode) {

@@ -36,6 +36,7 @@ export interface InvoiceBatch {
   major_customers?: MajorCustomerConfig[] | null;
   receiving_company_id?: string | null;
   batch_type?: string;
+  stock_source_batch_id?: string | null;
 }
 
 export interface CreateBatchParams {
@@ -634,11 +635,38 @@ export class InvoiceEngine {
         monthlyQuantitiesMap,
       );
     } else {
+      let availableStockMap: Map<string, number> | null = null;
+      if (typedBatch.stock_source_batch_id) {
+        const { data: ledgerData, error: ledgerError } = await supabase
+          .from("daily_stock_ledger")
+          .select(
+            "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
+          )
+          .eq("purchase_batch_id", typedBatch.stock_source_batch_id);
+
+        if (ledgerError) {
+          throw new Error(
+            `Failed to load daily stock ledger: ${ledgerError.message}`,
+          );
+        }
+
+        availableStockMap = new Map<string, number>();
+        for (const row of ledgerData || []) {
+          const key = `${row.ledger_date}_${row.product_id}`;
+          const available =
+            (row.opening_stock || 0) +
+            (row.purchased_quantity || 0) -
+            (row.sold_quantity || 0);
+          availableStockMap.set(key, Math.max(0, available));
+        }
+      }
+
       invoices = this.generateInvoiceSplitupsInternal(
         typedBatch,
         numberOfDays,
         fromDate,
         startingCounter,
+        availableStockMap,
       );
     }
 
@@ -685,12 +713,129 @@ export class InvoiceEngine {
       }
     }
 
-    // Insert all invoices atomically in a single bulk insert call
-    const { error: insertError } = await supabase
-      .from("invoice")
-      .insert(invoices);
-    if (insertError) {
-      throw new Error(`Failed to save invoices: ${insertError.message}`);
+    // Insert all invoices and handle daily stock ledger for Sales batches atomically
+    let savedInvoices: any[] = [];
+    if (typedBatch.batch_type === "SALES" && typedBatch.stock_source_batch_id) {
+      // 1. Fetch daily stock ledger for the selected stock source purchase batch
+      const { data: ledgerRows, error: ledgerError } = await supabase
+        .from("daily_stock_ledger")
+        .select(
+          "id, ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
+        )
+        .eq("purchase_batch_id", typedBatch.stock_source_batch_id);
+
+      if (ledgerError) {
+        throw new Error(
+          `Failed to retrieve daily stock ledger: ${ledgerError.message}`,
+        );
+      }
+
+      const ledgerMap = new Map<string, any>();
+      for (const row of ledgerRows || []) {
+        const key = `${row.ledger_date}_${row.product_id}`;
+        ledgerMap.set(key, row);
+      }
+
+      // 2. Validate available stock for each generated invoice product on its specific date
+      const generatedDailyQty = new Map<string, number>();
+      for (const inv of invoices) {
+        for (const p of inv.products) {
+          const key = `${inv.invoice_date}_${p.product_id}`;
+          generatedDailyQty.set(
+            key,
+            (generatedDailyQty.get(key) || 0) + p.quantity,
+          );
+        }
+      }
+
+      for (const [key, requestedQty] of generatedDailyQty.entries()) {
+        const [date, product_id] = key.split("_");
+        const row = ledgerMap.get(key);
+
+        const available = row
+          ? (row.opening_stock || 0) +
+            (row.purchased_quantity || 0) -
+            (row.sold_quantity || 0)
+          : 0;
+
+        if (requestedQty > available) {
+          const productName =
+            typedBatch.products.find((p) => p.product_id === product_id)
+              ?.product_name || "Unknown Product";
+          const formattedDate = this.formatDateString(date);
+          const unit =
+            typedBatch.products.find((p) => p.product_id === product_id)
+              ?.unit_of_measure || "kg";
+
+          throw new Error(
+            `Insufficient stock for ${productName} on ${formattedDate}.\nAvailable: ${available}${unit}\nRequested: ${requestedQty}${unit}`,
+          );
+        }
+      }
+
+      // 3. Insert the invoices
+      const { data: selectInvoices, error: insertError } = await supabase
+        .from("invoice")
+        .insert(invoices)
+        .select();
+
+      if (insertError) {
+        throw new Error(`Failed to save invoices: ${insertError.message}`);
+      }
+      savedInvoices = selectInvoices || [];
+      const insertedIds = savedInvoices.map((inv) => inv.id);
+
+      // 4. Update the daily stock ledger sold_quantity for each row
+      try {
+        for (const [key, qty] of generatedDailyQty.entries()) {
+          const row = ledgerMap.get(key);
+          if (row) {
+            const newSold = (row.sold_quantity || 0) + qty;
+            const limit =
+              (row.opening_stock || 0) + (row.purchased_quantity || 0);
+
+            if (newSold > limit) {
+              const productName =
+                typedBatch.products.find((p) => p.product_id === row.product_id)
+                  ?.product_name || "Product";
+              const formattedDate = this.formatDateString(row.ledger_date);
+              const unit =
+                typedBatch.products.find((p) => p.product_id === row.product_id)
+                  ?.unit_of_measure || "kg";
+              throw new Error(
+                `Insufficient stock for ${productName} on ${formattedDate}.\nAvailable: ${limit - row.sold_quantity}${unit}\nRequested: ${qty}${unit}`,
+              );
+            }
+
+            const { error: updateError } = await supabase
+              .from("daily_stock_ledger")
+              .update({
+                sold_quantity: newSold,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", row.id);
+
+            if (updateError) {
+              throw new Error(
+                `Failed to update daily stock ledger row: ${updateError.message}`,
+              );
+            }
+          }
+        }
+      } catch (updateErr) {
+        // Rollback: delete inserted invoices
+        if (insertedIds.length > 0) {
+          await supabase.from("invoice").delete().in("id", insertedIds);
+        }
+        throw updateErr;
+      }
+    } else {
+      const { error: insertError } = await supabase
+        .from("invoice")
+        .insert(invoices);
+      if (insertError) {
+        throw new Error(`Failed to save invoices: ${insertError.message}`);
+      }
     }
 
     // If it is a PURCHASE batch, populate the daily_stock_ledger
@@ -768,6 +913,28 @@ export class InvoiceEngine {
     return invoices.length;
   }
 
+  private static formatDateString(dateStr: string): string {
+    const date = new Date(dateStr);
+    const day = date.getDate();
+    const months = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
+    const month = months[date.getMonth()];
+    const year = date.getFullYear();
+    return `${day}-${month}-${year}`;
+  }
+
   /**
    * Internal generator logic
    */
@@ -776,12 +943,15 @@ export class InvoiceEngine {
     numberOfDays: number,
     startDate: Date,
     startingCounter: number = 1,
+    availableStockMap?: Map<string, number> | null,
   ) {
     const invoices = [];
     const thresholdMin = batch.minimum_invoice_amount;
     const thresholdMax = batch.maximum_invoice_amount;
     const totalAmount = batch.total_amount;
     let invoiceCounter = startingCounter;
+
+    const allocatedStock = new Map<string, number>(); // key: date_product_id, value: allocated quantity
 
     let selectedCustomers = batch.selected_customers || [];
     const majorCustomers = batch.major_customers || [];
@@ -831,12 +1001,49 @@ export class InvoiceEngine {
         currentDate.setDate(startDate.getDate() + dayOffset);
         const invoiceDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-${String(currentDate.getDate()).padStart(2, "0")}`;
 
+        let dateProducts = batch.products;
+        if (availableStockMap) {
+          dateProducts = batch.products
+            .map((prod) => {
+              const key = `${invoiceDate}_${prod.product_id}`;
+              const avail = availableStockMap.get(key) || 0;
+              const allocated = allocatedStock.get(key) || 0;
+              const currentAvail = Math.max(0, avail - allocated);
+              return {
+                ...prod,
+                perDayQtyMin: Math.min(
+                  parseFloat(prod.perDayQtyMin),
+                  currentAvail,
+                ).toString(),
+                perDayQtyMax: Math.min(
+                  parseFloat(prod.perDayQtyMax),
+                  currentAvail,
+                ).toString(),
+                currentAvailable: currentAvail,
+              };
+            })
+            .filter((prod) => prod.currentAvailable > 0);
+        }
+
         const subset = this.pickRandomProductsSubset(
-          batch.products,
+          dateProducts,
           batch.recurring_products || [],
           invoiceAmount,
         );
-        const products = this.distributeAmountToProducts(subset, invoiceAmount);
+        const products = this.distributeAmountToProducts(
+          subset.length > 0 ? subset : dateProducts.slice(0, 1),
+          invoiceAmount,
+        );
+
+        if (availableStockMap) {
+          for (const p of products) {
+            const key = `${invoiceDate}_${p.product_id}`;
+            allocatedStock.set(
+              key,
+              (allocatedStock.get(key) || 0) + p.quantity,
+            );
+          }
+        }
 
         const exactTotal =
           Math.round(products.reduce((sum, p) => sum + p.amount, 0) * 100) /
@@ -889,16 +1096,50 @@ export class InvoiceEngine {
         currentDate.setDate(startDate.getDate() + dayOffset);
         const invoiceDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-${String(currentDate.getDate()).padStart(2, "0")}`;
 
+        let dateProducts = batch.products;
+        if (availableStockMap) {
+          dateProducts = batch.products
+            .map((prod) => {
+              const key = `${invoiceDate}_${prod.product_id}`;
+              const avail = availableStockMap.get(key) || 0;
+              const allocated = allocatedStock.get(key) || 0;
+              const currentAvail = Math.max(0, avail - allocated);
+              return {
+                ...prod,
+                perDayQtyMin: Math.min(
+                  parseFloat(prod.perDayQtyMin),
+                  currentAvail,
+                ).toString(),
+                perDayQtyMax: Math.min(
+                  parseFloat(prod.perDayQtyMax),
+                  currentAvail,
+                ).toString(),
+                currentAvailable: currentAvail,
+              };
+            })
+            .filter((prod) => prod.currentAvailable > 0);
+        }
+
         const subset = this.pickRandomProductsSubset(
-          batch.products,
+          dateProducts,
           batch.recurring_products || [],
           invoiceAmount,
         );
 
         const products = this.distributeAmountToProducts(
-          subset.length > 0 ? subset : batch.products.slice(0, 1),
+          subset.length > 0 ? subset : dateProducts.slice(0, 1),
           invoiceAmount,
         );
+
+        if (availableStockMap) {
+          for (const p of products) {
+            const key = `${invoiceDate}_${p.product_id}`;
+            allocatedStock.set(
+              key,
+              (allocatedStock.get(key) || 0) + p.quantity,
+            );
+          }
+        }
 
         const exactTotal =
           Math.round(products.reduce((sum, p) => sum + p.amount, 0) * 100) /
