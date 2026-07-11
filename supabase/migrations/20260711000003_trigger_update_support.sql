@@ -1,11 +1,15 @@
--- Update stock restoration function to handle both UPDATE and DELETE events
-CREATE OR REPLACE FUNCTION public.restore_stock_on_invoice_delete()
+-- 1. Drop old triggers and functions to clean up the database
+DROP TRIGGER IF EXISTS trg_restore_stock_on_invoice_delete ON public.invoice;
+DROP FUNCTION IF EXISTS public.restore_stock_on_invoice_delete();
+
+-- 2. Create updated stock synchronization function with a clearer name
+CREATE OR REPLACE FUNCTION public.sync_stock_on_invoice_change()
 RETURNS TRIGGER AS $$
 DECLARE
     parent_batch RECORD;
     prod RECORD;
 BEGIN
-    -- 1. If UPDATE or DELETE: Revert the old quantities from the ledger
+    -- If UPDATE or DELETE: Revert the old quantities from the ledger
     IF TG_OP = 'DELETE' OR TG_OP = 'UPDATE' THEN
         SELECT stock_source_batch_id, batch_type 
         INTO parent_batch
@@ -27,7 +31,7 @@ BEGIN
         END IF;
     END IF;
 
-    -- 2. If UPDATE: Apply the new quantities to the ledger
+    -- If UPDATE: Apply the new quantities to the ledger
     IF TG_OP = 'UPDATE' THEN
         SELECT stock_source_batch_id, batch_type 
         INTO parent_batch
@@ -53,10 +57,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Recreate trigger to fire on both UPDATE and DELETE
-DROP TRIGGER IF EXISTS trg_restore_stock_on_invoice_delete ON public.invoice;
+-- 3. Create the new trigger using the updated name
+DROP TRIGGER IF EXISTS trg_sync_stock_on_invoice_change ON public.invoice;
 
-CREATE TRIGGER trg_restore_stock_on_invoice_delete
+CREATE TRIGGER trg_sync_stock_on_invoice_change
 AFTER UPDATE OR DELETE ON public.invoice
 FOR EACH ROW
-EXECUTE FUNCTION public.restore_stock_on_invoice_delete();
+EXECUTE FUNCTION public.sync_stock_on_invoice_change();
