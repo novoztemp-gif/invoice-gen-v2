@@ -384,12 +384,79 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         return;
       }
 
+      if (batchType === "SALES") {
+        setIsValidating(true);
+        const res = await fetch("/api/create-sales-batch-transactional", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            issuingCompanyId: selectedIssuingCompany?.id,
+            receivingCompanyId:
+              selectedCustomers[0] ||
+              (majorCustomers[0] ? majorCustomers[0].customer_id : null),
+            selectedCustomers: selectedCustomers,
+            majorCustomers: majorCustomers.map((m) => ({
+              customer_id: m.customer_id,
+              amount: parseFloat(m.amount) || 0,
+              invoice_count: parseInt(m.invoice_count, 10) || 1,
+            })),
+            transportMode: formData.transportMode,
+            vehicleNumber: formData.vehicleNumber || "",
+            dateOfSupply: formData.invoiceDateTo
+              ? formatDateForStorage(formData.invoiceDateTo)
+              : null,
+            invoiceDateFrom: formData.invoiceDateFrom
+              ? formatDateForStorage(formData.invoiceDateFrom)
+              : null,
+            invoiceDateTo: formData.invoiceDateTo
+              ? formatDateForStorage(formData.invoiceDateTo)
+              : null,
+            minimumInvoiceAmount: formData.minimumInvoiceAmount,
+            maximumInvoiceAmount: formData.maximumInvoiceAmount,
+            totalAmount: formData.totalAmount,
+            financialYearStart: formData.financialYearStart,
+            financialYearEnd: formData.financialYearEnd,
+            products: selectedProducts.map((item) => ({
+              product_id: item.product.id,
+              product_name: item.product.product_name,
+              hsn_code: item.product.hsn_code,
+              unit_of_measure: item.product.unit_of_measure,
+              perDayQtyMin: item.perDayQtyMin,
+              perDayQtyMax: item.perDayQtyMax,
+              perDayRateMin: item.perDayRateMin,
+              perDayRateMax: item.perDayRateMax,
+            })),
+            recurringProducts: recurringProducts.map((rp) => ({
+              product_id: rp.product_id,
+              percentage: parseFloat(rp.percentage),
+            })),
+            stockSourceBatchId: formData.stockSourceBatchId,
+            userId: user.id,
+          }),
+        });
+
+        const result = await res.json();
+        setIsValidating(false);
+
+        if (!res.ok) {
+          setErrorPopup(
+            result.message || "Failed to create transactional Sales batch.",
+          );
+          return;
+        }
+
+        setErrorPopup("Sales batch and invoices created atomically!");
+        resetForm();
+        router.push("/invoice-batches");
+        return;
+      }
+
+      // PURCHASE path (unchanged)
       const { data, error } = await supabase
         .from("invoice_batch")
         .insert({
           issuing_company_id: selectedIssuingCompany?.id,
-          stock_source_batch_id:
-            batchType === "SALES" ? formData.stockSourceBatchId || null : null,
+          stock_source_batch_id: null,
           receiving_company_id:
             selectedCustomers[0] ||
             (majorCustomers[0] ? majorCustomers[0].customer_id : null),
