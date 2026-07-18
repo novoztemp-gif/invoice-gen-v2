@@ -6,20 +6,26 @@ import {
   Calendar,
   CheckCircle2,
   ChevronRight,
+  Download,
   FileSpreadsheet,
   FileText,
   HelpCircle,
   Loader2,
   RefreshCw,
+  Search,
   Tag,
+  TrendingDown,
+  TrendingUp,
 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -35,6 +41,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { createClient } from "@/lib/supabase/client";
+import { cn } from "@/lib/utils";
 
 interface ExpenseBatch {
   id: string;
@@ -46,6 +53,9 @@ interface ExpenseBatch {
   status: string;
   remarks: string | null;
   created_at: string;
+  distribution_method?: "EQUAL" | "RANDOM" | "MANUAL" | null;
+  splitup_generated_at?: string | null;
+  splitup_generated_by?: string | null;
 }
 
 interface ExpenseItem {
@@ -85,13 +95,22 @@ export default function ExpenseBatchDetails() {
   // Split-up Generation Flow State
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [dialogStep, setDialogStep] = useState<1 | 2>(1);
+  const [chosenMethod, setChosenMethod] = useState<
+    "EQUAL" | "RANDOM" | "MANUAL"
+  >("EQUAL");
   const [proposedLedger, setProposedLedger] = useState<ProposedRow[]>([]);
   const [selectedReviewItemId, setSelectedReviewItemId] = useState<string>("");
   const [savingSplit, setSavingSplit] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
 
-  // Ledger Filter State
-  const [categoryFilter, setCategoryFilter] = useState<string>("All");
+  // Regeneration Confirmation dialog state
+  const [isConfirmRegenOpen, setIsConfirmRegenOpen] = useState(false);
+  const [resettingBatch, setResettingBatch] = useState(false);
+
+  // Daily Ledger Filter State
+  const [searchTerm, setSearchTerm] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("All");
+  const [dateFilter, setDateFilter] = useState("");
 
   const fetchDetails = async () => {
     if (!batchId) return;
@@ -141,6 +160,8 @@ export default function ExpenseBatchDetails() {
         } else {
           setLedgerRows(ledgerData || []);
         }
+      } else {
+        setLedgerRows([]);
       }
     } catch (error) {
       console.error("Error loading batch details:", error);
@@ -153,6 +174,22 @@ export default function ExpenseBatchDetails() {
   useEffect(() => {
     fetchDetails();
   }, [batchId, router]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <Loader2 className="h-8 w-8 animate-spin text-slate-400" />
+      </div>
+    );
+  }
+
+  if (!batch) {
+    return (
+      <div className="text-center py-12 text-slate-500">
+        <p className="text-lg">Batch not found.</p>
+      </div>
+    );
+  }
 
   // Date sequence helper
   const getDatesInRange = (
@@ -232,6 +269,7 @@ export default function ExpenseBatchDetails() {
       }
     }
 
+    setChosenMethod(method === "equal" ? "EQUAL" : "RANDOM");
     setProposedLedger(proposedRows);
     if (items.length > 0) {
       setSelectedReviewItemId(items[0].id);
@@ -376,6 +414,7 @@ export default function ExpenseBatchDetails() {
       return row;
     });
 
+    setChosenMethod("MANUAL");
     setProposedLedger(updatedProposed);
   };
 
@@ -389,6 +428,7 @@ export default function ExpenseBatchDetails() {
         body: JSON.stringify({
           batchId: batchId,
           ledgerRows: proposedLedger,
+          distributionMethod: chosenMethod,
         }),
       });
 
@@ -408,36 +448,113 @@ export default function ExpenseBatchDetails() {
     }
   };
 
+  const handleTriggerRegeneration = async () => {
+    setResettingBatch(true);
+    try {
+      const res = await fetch("/api/regenerate-expense-split-up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batchId }),
+      });
+
+      setResettingBatch(false);
+      if (!res.ok) {
+        const data = await res.json();
+        alert(data.message || "Failed to reset batch.");
+        return;
+      }
+
+      setIsConfirmRegenOpen(false);
+      await fetchDetails();
+    } catch (err) {
+      setResettingBatch(false);
+      console.error(err);
+      alert("Error occurred while resetting batch.");
+    }
+  };
+
+  // Client-Side CSV Export
+  const handleExportCSV = () => {
+    if (filteredLedgerRows.length === 0) return;
+    const dataToExport = filteredLedgerRows.map((row) => ({
+      Date: format(new Date(row.expense_date), "dd/MM/yyyy"),
+      Category: row.expense_category,
+      "Expense Name": row.expense_name,
+      "Amount (INR)": row.amount,
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+    const csvContent = XLSX.utils.sheet_to_csv(worksheet);
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute(
+      "download",
+      `${batch.batch_name.replace(/\s+/g, "_")}_daily_ledger.csv`,
+    );
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Client-Side Excel Export
+  const handleExportExcel = () => {
+    if (filteredLedgerRows.length === 0) return;
+    const dataToExport = filteredLedgerRows.map((row) => ({
+      Date: format(new Date(row.expense_date), "dd/MM/yyyy"),
+      Category: row.expense_category,
+      "Expense Name": row.expense_name,
+      "Amount (INR)": row.amount,
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Daily Expense Ledger");
+    XLSX.writeFile(
+      workbook,
+      `${batch.batch_name.replace(/\s+/g, "_")}_daily_ledger.xlsx`,
+    );
+  };
+
+  // Category and entries filtering logic
   const uniqueCategories = [
     "All",
     ...Array.from(new Set(ledgerRows.map((r) => r.expense_category))),
   ];
 
-  const filteredLedgerRows = ledgerRows.filter(
-    (row) =>
-      categoryFilter === "All" || row.expense_category === categoryFilter,
-  );
+  const filteredLedgerRows = ledgerRows.filter((row) => {
+    const matchesCategory =
+      categoryFilter === "All" || row.expense_category === categoryFilter;
+    const matchesSearch = row.expense_name
+      .toLowerCase()
+      .includes(searchTerm.toLowerCase());
+    const matchesDate = !dateFilter || row.expense_date === dateFilter;
+    return matchesCategory && matchesSearch && matchesDate;
+  });
 
   const totalFilteredLedger = filteredLedgerRows.reduce(
     (sum, r) => sum + Number(r.amount),
     0,
   );
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <Loader2 className="h-8 w-8 animate-spin text-slate-400" />
-      </div>
-    );
-  }
-
-  if (!batch) {
-    return (
-      <div className="text-center py-12 text-slate-500">
-        <p className="text-lg">Batch not found.</p>
-      </div>
-    );
-  }
+  // Statistics calculation helpers
+  const totalDays = batch
+    ? getDatesInRange(batch.expense_date_from, batch.expense_date_to).length
+    : 0;
+  const totalEntries = ledgerRows.length;
+  const categoriesCount = new Set(ledgerRows.map((r) => r.expense_category))
+    .size;
+  const highestExpense =
+    totalEntries > 0 ? Math.max(...ledgerRows.map((r) => r.amount)) : 0;
+  const lowestExpense =
+    totalEntries > 0 ? Math.min(...ledgerRows.map((r) => r.amount)) : 0;
+  const averageExpense =
+    totalEntries > 0
+      ? ledgerRows.reduce((sum, r) => sum + Number(r.amount), 0) / totalEntries
+      : 0;
 
   const reviewItemRows = proposedLedger.filter(
     (r) => r.expense_item_id === selectedReviewItemId,
@@ -470,7 +587,7 @@ export default function ExpenseBatchDetails() {
         </div>
 
         {/* Generate split-up triggers only when status is pending */}
-        {batch.status === "pending" && (
+        {batch.status === "pending" ? (
           <Button
             onClick={() => {
               setDialogStep(1);
@@ -480,6 +597,14 @@ export default function ExpenseBatchDetails() {
             className="gap-2 shadow-sm font-semibold"
           >
             <RefreshCw className="h-4 w-4" /> Generate Split-up
+          </Button>
+        ) : (
+          <Button
+            variant="outline"
+            onClick={() => setIsConfirmRegenOpen(true)}
+            className="gap-2 border-red-200 text-red-700 hover:bg-red-50 font-semibold"
+          >
+            <RefreshCw className="h-4 w-4" /> Regenerate Split-up
           </Button>
         )}
       </div>
@@ -498,70 +623,177 @@ export default function ExpenseBatchDetails() {
         </Card>
       )}
 
-      {/* Grid summary */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Date Range Card */}
+      {/* Summary Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
         <Card className="shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-slate-500 flex items-center gap-1.5">
-              <Calendar className="h-4 w-4 text-slate-400" /> Date Period
+            <CardTitle className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+              Batch Info
             </CardTitle>
           </CardHeader>
-          <CardContent>
-            <p className="text-lg font-bold text-slate-800">
-              {format(new Date(batch.expense_date_from), "dd MMM yyyy")} -{" "}
-              {format(new Date(batch.expense_date_to), "dd MMM yyyy")}
+          <CardContent className="space-y-1">
+            <p className="text-sm font-bold text-slate-800">
+              {batch.batch_name}
             </p>
-            <span className="text-xs text-slate-400 block mt-1">
-              Financial Year: FY{batch.financial_year}
-            </span>
+            <p className="text-xs text-slate-400">FY {batch.financial_year}</p>
+            <p className="text-xs text-slate-400">
+              Period: {format(new Date(batch.expense_date_from), "dd/MM/yyyy")}{" "}
+              - {format(new Date(batch.expense_date_to), "dd/MM/yyyy")}
+            </p>
           </CardContent>
         </Card>
 
-        {/* Items Card */}
         <Card className="shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-slate-500 flex items-center gap-1.5">
-              <FileText className="h-4 w-4 text-slate-400" /> Total Items
+            <CardTitle className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+              Period Stats
             </CardTitle>
           </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-bold text-slate-800">{items.length}</p>
-            <span className="text-xs text-slate-400 block mt-1">
-              Recorded in this batch
-            </span>
-          </CardContent>
-        </Card>
-
-        {/* Total Expenses Card */}
-        <Card className="shadow-sm border-l-4 border-slate-900 bg-slate-50/50">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-slate-500 flex items-center gap-1.5">
-              <Tag className="h-4 w-4 text-slate-400" /> Total Expenses
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-mono font-bold text-slate-900">
-              ₹
+          <CardContent className="space-y-1">
+            <p className="text-lg font-bold text-slate-800">
+              {totalDays} Calendar Days
+            </p>
+            <p className="text-xs text-slate-400">
+              Total Items: {items.length}
+            </p>
+            <p className="text-xs text-slate-400">
+              Configured Total: ₹
               {batch.total_amount.toLocaleString("en-IN", {
                 minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
               })}
             </p>
-            <span className="text-xs text-slate-400 block mt-1">
-              Status:{" "}
-              <span className="font-semibold uppercase text-slate-700">
+          </CardContent>
+        </Card>
+
+        <Card className="shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+              Status & Method
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            <div>
+              <span
+                className={cn(
+                  "inline-block px-2.5 py-0.5 rounded-full text-xs font-bold uppercase",
+                  batch.status === "generated"
+                    ? "bg-green-100 text-green-800"
+                    : "bg-amber-100 text-amber-800",
+                )}
+              >
                 {batch.status}
               </span>
-            </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-1">
+              Method:{" "}
+              <span className="font-semibold">
+                {batch.distribution_method || "N/A"}
+              </span>
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+              Audit Logs
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1 text-xs text-slate-400 leading-relaxed">
+            {batch.splitup_generated_at ? (
+              <>
+                <p>
+                  Generated:{" "}
+                  <span className="text-slate-700 font-medium">
+                    {format(
+                      new Date(batch.splitup_generated_at),
+                      "dd/MM/yyyy HH:mm",
+                    )}
+                  </span>
+                </p>
+                <p>
+                  By:{" "}
+                  <span className="text-slate-700 font-medium">
+                    User #{batch.splitup_generated_by?.substring(0, 8)}
+                  </span>
+                </p>
+              </>
+            ) : (
+              <p className="text-slate-400 italic">No splitup generated yet.</p>
+            )}
           </CardContent>
         </Card>
       </div>
 
+      {/* Daily Ledger Statistics (Only when split-up generated) */}
+      {batch.status === "generated" && (
+        <div className="grid grid-cols-1 sm:grid-cols-5 gap-4">
+          <Card className="shadow-sm py-2">
+            <CardContent className="py-2 text-center space-y-1">
+              <span className="text-[10px] text-slate-400 font-semibold block uppercase">
+                Total Entries
+              </span>
+              <span className="text-lg font-bold text-slate-800 block">
+                {totalEntries}
+              </span>
+            </CardContent>
+          </Card>
+          <Card className="shadow-sm py-2">
+            <CardContent className="py-2 text-center space-y-1">
+              <span className="text-[10px] text-slate-400 font-semibold block uppercase">
+                Categories Used
+              </span>
+              <span className="text-lg font-bold text-slate-800 block">
+                {categoriesCount}
+              </span>
+            </CardContent>
+          </Card>
+          <Card className="shadow-sm py-2 border-l-2 border-red-400">
+            <CardContent className="py-2 text-center space-y-1">
+              <span className="text-[10px] text-slate-400 font-semibold block uppercase flex items-center justify-center gap-1">
+                <TrendingUp className="h-3 w-3 text-red-500" /> Peak Day
+              </span>
+              <span className="text-sm font-mono font-bold text-slate-800 block">
+                ₹
+                {highestExpense.toLocaleString("en-IN", {
+                  maximumFractionDigits: 0,
+                })}
+              </span>
+            </CardContent>
+          </Card>
+          <Card className="shadow-sm py-2 border-l-2 border-green-400">
+            <CardContent className="py-2 text-center space-y-1">
+              <span className="text-[10px] text-slate-400 font-semibold block uppercase flex items-center justify-center gap-1">
+                <TrendingDown className="h-3 w-3 text-green-500" /> Lowest Day
+              </span>
+              <span className="text-sm font-mono font-bold text-slate-800 block">
+                ₹
+                {lowestExpense.toLocaleString("en-IN", {
+                  maximumFractionDigits: 0,
+                })}
+              </span>
+            </CardContent>
+          </Card>
+          <Card className="shadow-sm py-2">
+            <CardContent className="py-2 text-center space-y-1">
+              <span className="text-[10px] text-slate-400 font-semibold block uppercase">
+                Average Day
+              </span>
+              <span className="text-sm font-mono font-bold text-slate-800 block">
+                ₹
+                {averageExpense.toLocaleString("en-IN", {
+                  maximumFractionDigits: 0,
+                })}
+              </span>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       {/* Expense Items Breakdown */}
       <Card className="shadow-sm">
         <CardHeader>
-          <CardTitle>Recorded Expenses</CardTitle>
+          <CardTitle>Configured Operating Expenses</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
@@ -606,39 +838,92 @@ export default function ExpenseBatchDetails() {
       {/* Daily Split-up Section (Visible only when status is 'generated') */}
       {batch.status === "generated" && (
         <Card className="shadow-sm">
-          <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b pb-4">
-            <div>
-              <CardTitle>Daily Split-up Ledger</CardTitle>
-              <p className="text-xs text-slate-500 mt-1">
-                Day-wise distribution of operating expenses across the period.
-              </p>
+          <CardHeader className="flex flex-col gap-4 border-b pb-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <CardTitle>Daily Split-up Ledger</CardTitle>
+                <p className="text-xs text-slate-500 mt-1">
+                  Day-wise distribution of operating expenses across the period.
+                </p>
+              </div>
+              {/* CSV/Excel Exports */}
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleExportCSV}
+                  className="gap-1 text-xs"
+                >
+                  <Download className="h-3.5 w-3.5" /> CSV
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleExportExcel}
+                  className="gap-1 text-xs"
+                >
+                  <FileSpreadsheet className="h-3.5 w-3.5" /> Excel
+                </Button>
+              </div>
             </div>
-            {/* Category Filter Dropdown */}
-            <div className="flex items-center gap-2">
-              <Label
-                htmlFor="category-filter"
-                className="text-xs text-slate-500 font-medium whitespace-nowrap"
-              >
-                Filter Category:
-              </Label>
-              <select
-                id="category-filter"
-                value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
-                className="flex h-9 rounded-md border border-input bg-white px-3 py-1 text-xs shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                {uniqueCategories.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {cat}
-                  </option>
-                ))}
-              </select>
+
+            {/* Filters Row */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+              {/* Search Name Input */}
+              <div className="relative">
+                <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
+                <Input
+                  placeholder="Search Expense Name..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="pl-9 text-xs h-9 bg-white"
+                />
+              </div>
+
+              {/* Category Filter Select */}
+              <div className="flex items-center gap-2">
+                <Label
+                  htmlFor="category-filter"
+                  className="text-xs text-slate-500 font-semibold whitespace-nowrap"
+                >
+                  Category:
+                </Label>
+                <select
+                  id="category-filter"
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  className="flex h-9 w-full rounded-md border border-input bg-white px-3 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  {uniqueCategories.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Date Filter Input */}
+              <div className="flex items-center gap-2">
+                <Label
+                  htmlFor="date-filter"
+                  className="text-xs text-slate-500 font-semibold whitespace-nowrap"
+                >
+                  Date:
+                </Label>
+                <Input
+                  id="date-filter"
+                  type="date"
+                  value={dateFilter}
+                  onChange={(e) => setDateFilter(e.target.value)}
+                  className="text-xs h-9 bg-white"
+                />
+              </div>
             </div>
           </CardHeader>
           <CardContent className="pt-6">
             {filteredLedgerRows.length === 0 ? (
               <div className="text-center py-10 text-slate-400 text-sm">
-                No ledger records match the selected category.
+                No ledger records match the selected filters.
               </div>
             ) : (
               <div className="space-y-4">
@@ -692,6 +977,62 @@ export default function ExpenseBatchDetails() {
           </CardContent>
         </Card>
       )}
+
+      {/* Regeneration Confirmation Dialog */}
+      <Dialog open={isConfirmRegenOpen} onOpenChange={setIsConfirmRegenOpen}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle className="text-red-600 flex items-center gap-2">
+              <RefreshCw className="h-5 w-5 animate-spin" /> Confirm
+              Regeneration
+            </DialogTitle>
+            <DialogDescription className="pt-2 text-slate-600 text-xs leading-relaxed">
+              Are you sure you want to regenerate this split-up? Re-generating
+              the split-up will:
+              <br />
+              <strong className="text-red-700 block mt-2">
+                • Permanent Erasure
+              </strong>
+              : Delete all existing daily ledger rows for this batch from the
+              database.
+              <br />
+              <strong className="text-red-700 block">
+                • Replace Allocations
+              </strong>
+              : Overwrite previous daily amount allocations with new
+              distributions.
+              <br />
+              <strong className="text-red-700 block">
+                • Reset Batch State
+              </strong>
+              : Revert the status back to{" "}
+              <span className="underline">pending</span>.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="pt-4">
+            <Button
+              variant="secondary"
+              onClick={() => setIsConfirmRegenOpen(false)}
+              disabled={resettingBatch}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleTriggerRegeneration}
+              disabled={resettingBatch}
+            >
+              {resettingBatch ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Resetting...
+                </>
+              ) : (
+                "Yes, Regenerate"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Generate Split-up Workflow Dialog */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>

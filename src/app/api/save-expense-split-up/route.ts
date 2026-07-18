@@ -4,21 +4,34 @@ import { createClient } from "@/lib/supabase/server";
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { batchId, ledgerRows } = body;
+    const { batchId, ledgerRows, distributionMethod } = body;
 
     if (
       !batchId ||
       !ledgerRows ||
       !Array.isArray(ledgerRows) ||
-      ledgerRows.length === 0
+      ledgerRows.length === 0 ||
+      !distributionMethod
     ) {
       return NextResponse.json(
-        { message: "Batch ID and ledger rows array are required" },
+        {
+          message:
+            "Batch ID, ledger rows array, and distribution method are required",
+        },
         { status: 400 },
       );
     }
 
     const supabase = await createClient();
+
+    // Verify session user for audit logging
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
 
     // 1. Fetch batch metadata
     const { data: batch, error: batchErr } = await supabase
@@ -85,7 +98,7 @@ export async function POST(request: Request) {
       }
     }
 
-    // 6. Invoke RPC transaction to save split-up
+    // 6. Invoke RPC transaction to save split-up with audit data
     const { data: success, error: rpcError } = await supabase.rpc(
       "save_expense_split_up_transactional",
       {
@@ -97,6 +110,9 @@ export async function POST(request: Request) {
           expense_name: row.expense_name,
           amount: Number(row.amount),
         })),
+        p_distribution_method: distributionMethod,
+        p_generated_by: user.id,
+        p_generated_at: new Date().toISOString(),
       },
     );
 
