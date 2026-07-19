@@ -159,7 +159,7 @@ export function DailyStockReviewModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="w-[85vw] max-w-[85vw] h-[85vh] max-h-[85vh] flex flex-col p-6">
+      <DialogContent className="w-[85vw] max-w-[85vw] sm:max-w-[85vw] h-[85vh] max-h-[85vh] sm:max-h-[85vh] flex flex-col p-6">
         <DialogHeader>
           <DialogTitle className="text-xl font-semibold text-slate-900">
             Daily Stock Review

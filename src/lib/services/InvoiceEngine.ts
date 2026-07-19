@@ -1108,6 +1108,15 @@ export class InvoiceEngine {
               });
               currentInvoiceProducts = [];
               currentInvoiceAmount = 0;
+            } else {
+              const amt = Math.round(remainingQty * p.rate * 100) / 100;
+              currentInvoiceProducts.push({
+                ...p,
+                quantity: remainingQty,
+                amount: amt,
+              });
+              currentInvoiceAmount = amt;
+              remainingQty = 0;
             }
             continue;
           }
