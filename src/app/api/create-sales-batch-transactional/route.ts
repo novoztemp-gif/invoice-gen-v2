@@ -53,7 +53,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const availableStockMap = new Map<string, number>();
+    const availableStockMap = new Map<string, any>();
     const productGroups = new Map<string, any[]>();
     for (const row of ledgerData || []) {
       if (!productGroups.has(row.product_id)) {
@@ -63,6 +63,9 @@ export async function POST(request: NextRequest) {
     }
 
     for (const [productId, rows] of productGroups.entries()) {
+      // Sort rows chronologically
+      rows.sort((a: any, b: any) => a.ledger_date.localeCompare(b.ledger_date));
+
       let carryForward = Number(rows[0].opening_stock) || 0;
       for (const row of rows) {
         const opening = carryForward;
@@ -71,7 +74,10 @@ export async function POST(request: NextRequest) {
 
         const available = opening + purchased - prevSold;
         const key = `${row.ledger_date}_${row.product_id}`;
-        availableStockMap.set(key, Math.max(0, available));
+        availableStockMap.set(key, {
+          opening: opening,
+          purchased: Math.max(0, purchased - prevSold),
+        });
 
         carryForward = Math.max(0, available);
       }

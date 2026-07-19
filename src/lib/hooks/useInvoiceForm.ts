@@ -396,6 +396,33 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           return;
         }
 
+        const invalidRow = (result.reviewRows || []).find(
+          (row: any) => row.remaining_stock > 15 || row.remaining_stock < 0,
+        );
+        if (invalidRow) {
+          console.error(
+            "VERIFICATION FAILED: Invalid remaining stock generated!",
+          );
+          console.error("Product:", invalidRow.product_name);
+          console.error("Date:", invalidRow.date);
+          console.error("Opening:", invalidRow.opening_stock);
+          console.error("Purchased:", invalidRow.purchased_quantity);
+          console.error(
+            "Available:",
+            invalidRow.opening_stock + invalidRow.purchased_quantity,
+          );
+          console.error("Proposed Sold:", invalidRow.proposed_sold);
+          console.error("Remaining:", invalidRow.remaining_stock);
+          console.error(
+            "Last modified by: InvoiceEngine.generateInvoiceSplitupsInternal",
+          );
+
+          setErrorPopup(
+            `Verification failed: Invalid remaining stock generated for ${invalidRow.product_name} on ${invalidRow.date}. Remaining: ${invalidRow.remaining_stock}. Check developer console for details.`,
+          );
+          return;
+        }
+
         setProposedInvoices(result.invoices || []);
         setReviewRows(result.reviewRows || []);
         setIsReviewOpen(true);
@@ -627,6 +654,19 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     finalReviewRows: any[],
   ) => {
     try {
+      console.log("adjustedInvoices length:", adjustedInvoices?.length);
+      const stringifiedInvoices = JSON.stringify(adjustedInvoices);
+      console.log(
+        "adjustedInvoices stringified length:",
+        stringifiedInvoices?.length,
+      );
+      if (adjustedInvoices && adjustedInvoices.length > 0) {
+        console.log(
+          "Sample Invoice:",
+          JSON.stringify(adjustedInvoices[0]).slice(0, 1000),
+        );
+      }
+
       setIsSavingSales(true);
       const {
         data: { user },

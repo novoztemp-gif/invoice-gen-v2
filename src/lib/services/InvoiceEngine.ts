@@ -656,7 +656,7 @@ export class InvoiceEngine {
         startingCounter,
       );
     } else {
-      let availableStockMap: Map<string, number> | null = null;
+      let availableStockMap: Map<string, any> | null = null;
       if (typedBatch.stock_source_batch_id) {
         const { data: ledgerData, error: ledgerError } = await supabase
           .from("daily_stock_ledger")
@@ -672,7 +672,7 @@ export class InvoiceEngine {
           );
         }
 
-        availableStockMap = new Map<string, number>();
+        availableStockMap = new Map<string, any>();
         const productGroups = new Map<string, any[]>();
         for (const row of ledgerData || []) {
           if (!productGroups.has(row.product_id)) {
@@ -690,7 +690,10 @@ export class InvoiceEngine {
             const available = opening + purchased - sold;
 
             const key = `${row.ledger_date}_${row.product_id}`;
-            availableStockMap.set(key, Math.max(0, available));
+            availableStockMap.set(key, {
+              opening: opening,
+              purchased: Math.max(0, purchased - sold),
+            });
             carryForward = Math.max(0, available);
           }
         }
@@ -1004,7 +1007,7 @@ export class InvoiceEngine {
     numberOfDays: number,
     startDate: Date,
     startingCounter: number = 1,
-    availableStockMap?: Map<string, number> | null,
+    availableStockMap?: Map<string, any> | null,
   ) {
     const invoices = [];
     const thresholdMin = batch.minimum_invoice_amount;
@@ -1028,8 +1031,7 @@ export class InvoiceEngine {
       remainingAmount: m.amount,
     }));
 
-    const cumulativeSold = new Map<string, number>();
-
+    // Build the date list
     const dateList: string[] = [];
     for (let dayOffset = 0; dayOffset < numberOfDays; dayOffset++) {
       const currentDate = new Date(startDate);
@@ -1040,51 +1042,138 @@ export class InvoiceEngine {
       dateList.push(dateStr);
     }
 
+    // ── Sequential per-product stock tracker ───────────────────────────────
+    // runningRemaining[productId] = remaining stock carried into the NEXT day
+    const runningRemaining = new Map<string, number>();
+
+    // Seed with the opening stock from the ledger for each product on the first date
+    for (const prodConfig of batch.products) {
+      if (availableStockMap) {
+        // Find the earliest ledger entry for this product to get day-1 opening
+        const firstKey = `${dateList[0]}_${prodConfig.product_id}`;
+        // The ledger key stores "available after previous sales" – we treat it
+        // as the opening of day 0 here; the loop below will re-derive it properly.
+        runningRemaining.set(prodConfig.product_id, 0);
+      } else {
+        runningRemaining.set(prodConfig.product_id, 0);
+      }
+    }
+
     for (const invoiceDate of dateList) {
       const productsOnDay: any[] = [];
 
       for (const prodConfig of batch.products) {
+        let available = 0;
+        let dayOpening = 0;
+        let dayPurchased = 0;
+
         const ledgerKey = `${invoiceDate}_${prodConfig.product_id}`;
-        const ledgerAvail = availableStockMap
-          ? availableStockMap.get(ledgerKey) || 0
-          : 999999;
-        const soldSoFar = cumulativeSold.get(prodConfig.product_id) || 0;
-        const actualAvail = Math.max(0, ledgerAvail - soldSoFar);
+        const val = availableStockMap ? availableStockMap.get(ledgerKey) : null;
 
-        if (actualAvail > 0) {
-          let targetRemaining = Math.floor(Math.random() * 3);
-          if (actualAvail < targetRemaining) {
-            targetRemaining = actualAvail;
+        if (availableStockMap) {
+          if (val !== undefined && val !== null) {
+            if (typeof val === "object" && val !== null) {
+              // New format: { opening: number, purchased: number }
+              const isFirstDate = invoiceDate === dateList[0];
+              if (isFirstDate) {
+                dayOpening = (val as any).opening || 0;
+              } else {
+                dayOpening = runningRemaining.get(prodConfig.product_id) ?? 0;
+              }
+              dayPurchased = (val as any).purchased || 0;
+              available = Math.round((dayOpening + dayPurchased) * 100) / 100;
+            } else if (typeof val === "number") {
+              // Old format: pre-calculated available stock number
+              available = val;
+            }
+          } else {
+            // Key not found in map, default to 0 available stock
+            available = 0;
           }
-          const qtyToSell = Math.round(actualAvail - targetRemaining);
-
-          if (qtyToSell > 0) {
-            const minRate = parseFloat(prodConfig.perDayRateMin) || 0;
-            const maxRate = parseFloat(prodConfig.perDayRateMax) || 0;
-            let rate = minRate + Math.random() * (maxRate - minRate);
-            rate = Math.round(rate * 100) / 100;
-
-            const amount = Math.round(qtyToSell * rate * 100) / 100;
-
-            productsOnDay.push({
-              product_id: prodConfig.product_id,
-              product_name: prodConfig.product_name,
-              hsn_code: prodConfig.hsn_code,
-              unit_of_measure: prodConfig.unit_of_measure,
-              quantity: qtyToSell,
-              rate,
-              amount,
-            });
-
-            cumulativeSold.set(prodConfig.product_id, soldSoFar + qtyToSell);
-          }
+        } else {
+          // No availableStockMap provided (e.g. Purchase Batch), default to unlimited
+          available = 999999;
         }
+
+        if (available <= 0) {
+          // Nothing to sell today for this product; carry forward 0
+          runningRemaining.set(prodConfig.product_id, 0);
+          continue;
+        }
+
+        // Business rule: Remaining ∈ [0, 15]
+        const maxTargetRemaining = Math.min(15, available);
+        const targetRemaining =
+          Math.round(Math.random() * maxTargetRemaining * 100) / 100;
+
+        let qtyToSell = Math.max(
+          0,
+          Math.round((available - targetRemaining) * 100) / 100,
+        );
+
+        let actualRemaining = Math.round((available - qtyToSell) * 100) / 100;
+
+        const initialProposedSold = qtyToSell;
+        const initialRemaining = actualRemaining;
+
+        // Perform final normalization step to strictly enforce Remaining ∈ [0, 15]
+        if (actualRemaining > 15) {
+          qtyToSell =
+            Math.round((qtyToSell + (actualRemaining - 15)) * 100) / 100;
+          actualRemaining = 15;
+        } else if (actualRemaining < 0) {
+          qtyToSell = Math.round((qtyToSell + actualRemaining) * 100) / 100;
+          actualRemaining = 0;
+        }
+
+        // Recompute to guarantee 0 <= remaining <= 15
+        actualRemaining = Math.round((available - qtyToSell) * 100) / 100;
+
+        if (
+          prodConfig.product_name.toUpperCase().includes("CHICKEN") &&
+          invoiceDate === "2026-07-24"
+        ) {
+          console.log(`
+[CHICKEN LOG]
+Product: ${prodConfig.product_name}
+Date: ${invoiceDate}
+Opening Stock: ${dayOpening}
+Purchased: ${dayPurchased}
+Available: ${available}
+Initial Proposed Sold: ${initialProposedSold}
+Initial Remaining: ${initialRemaining}
+Normalized Proposed Sold: ${qtyToSell}
+Normalized Remaining: ${actualRemaining}
+`);
+        }
+
+        runningRemaining.set(prodConfig.product_id, actualRemaining);
+
+        if (qtyToSell <= 0) continue;
+
+        const minRate = parseFloat(prodConfig.perDayRateMin) || 0;
+        const maxRate = parseFloat(prodConfig.perDayRateMax) || 0;
+        let rate = minRate + Math.random() * (maxRate - minRate);
+        rate = Math.round(rate * 100) / 100;
+
+        const amount = Math.round(qtyToSell * rate * 100) / 100;
+
+        productsOnDay.push({
+          product_id: prodConfig.product_id,
+          product_name: prodConfig.product_name,
+          hsn_code: prodConfig.hsn_code,
+          unit_of_measure: prodConfig.unit_of_measure,
+          quantity: qtyToSell,
+          rate,
+          amount,
+        });
       }
 
       if (productsOnDay.length === 0) {
         continue;
       }
 
+      // ── Bin-pack products into invoices within [thresholdMin, thresholdMax] ──
       const dayInvoices: any[] = [];
       let currentInvoiceProducts: any[] = [];
       let currentInvoiceAmount = 0;
@@ -1142,6 +1231,7 @@ export class InvoiceEngine {
         });
       }
 
+      // Merge last invoice into previous if it's below threshold
       if (dayInvoices.length > 1) {
         const lastInv = dayInvoices[dayInvoices.length - 1];
         if (lastInv.total_amount < thresholdMin) {

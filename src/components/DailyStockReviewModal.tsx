@@ -46,6 +46,11 @@ export function DailyStockReviewModal({
     }
   }, [isOpen, initialRows]);
 
+  // Helper to get a random target remaining stock between 0 and 15 (2 decimal places)
+  const getRandomTargetRemaining = () => {
+    return Math.round(Math.random() * 15 * 100) / 100;
+  };
+
   const handleQtyChange = (
     date: string,
     productId: string,
@@ -66,24 +71,40 @@ export function DailyStockReviewModal({
 
     const chronoIndex = productRows.findIndex((x) => x.idx === editedRowIndex);
 
-    updatedRows[editedRowIndex].proposed_sold = newQty;
+    // Update edited row with user-provided quantity
+    const editedRow = updatedRows[editedRowIndex];
+    editedRow.proposed_sold = newQty;
+    editedRow.remaining_stock =
+      Math.round(
+        (editedRow.opening_stock +
+          editedRow.purchased_quantity -
+          editedRow.proposed_sold) *
+          100,
+      ) / 100;
 
-    for (let i = chronoIndex; i < productRows.length; i++) {
+    // Cascade updates for subsequent rows of the same product
+    for (let i = chronoIndex + 1; i < productRows.length; i++) {
       const currentIdx = productRows[i].idx;
+      const prevIdx = productRows[i - 1].idx;
       const currentRow = updatedRows[currentIdx];
 
-      if (i > chronoIndex) {
-        const prevIdx = productRows[i - 1].idx;
-        currentRow.opening_stock = updatedRows[prevIdx].remaining_stock;
-      }
+      // Opening stock comes from previous day's remaining stock
+      currentRow.opening_stock = updatedRows[prevIdx].remaining_stock;
 
-      currentRow.remaining_stock =
+      const available =
         Math.round(
-          (currentRow.opening_stock +
-            currentRow.purchased_quantity -
-            currentRow.proposed_sold) *
-            100,
+          (currentRow.opening_stock + currentRow.purchased_quantity) * 100,
         ) / 100;
+
+      const targetRemaining = getRandomTargetRemaining();
+
+      // Determine proposed_sold to achieve target remaining, bounded by availability
+      let proposedSold = Math.max(0, available - targetRemaining);
+      proposedSold = Math.min(proposedSold, available);
+
+      currentRow.proposed_sold = Math.round(proposedSold * 100) / 100;
+      currentRow.remaining_stock =
+        Math.round((available - currentRow.proposed_sold) * 100) / 100;
     }
 
     setRows(updatedRows);
@@ -159,7 +180,7 @@ export function DailyStockReviewModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="w-[85vw] max-w-[85vw] sm:max-w-[85vw] h-[85vh] max-h-[85vh] sm:max-h-[85vh] flex flex-col p-6">
+      <DialogContent className="w-[90vw] max-w-[90vw] sm:max-w-[90vw] h-[90vh] max-h-[90vh] sm:max-h-[90vh] flex flex-col p-6">
         <DialogHeader>
           <DialogTitle className="text-xl font-semibold text-slate-900">
             Daily Stock Review
@@ -189,6 +210,7 @@ export function DailyStockReviewModal({
                 <th className="px-4 py-3">Product</th>
                 <th className="px-4 py-3 text-right">Opening Stock</th>
                 <th className="px-4 py-3 text-right">Purchased</th>
+                <th className="px-4 py-3 text-right">Available</th>
                 <th className="px-4 py-3 text-center w-36">Proposed Sold</th>
                 <th className="px-4 py-3 text-right">Remaining Stock</th>
               </tr>
@@ -221,6 +243,12 @@ export function DailyStockReviewModal({
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-slate-600">
                         {row.purchased_quantity.toFixed(2)} {row.unit}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono text-emerald-700 font-semibold">
+                        {(row.opening_stock + row.purchased_quantity).toFixed(
+                          2,
+                        )}{" "}
+                        {row.unit}
                       </td>
                       <td className="px-4 py-3 text-center">
                         <div className="flex items-center justify-center gap-1">

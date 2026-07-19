@@ -14,6 +14,10 @@ DECLARE
     product_name_str TEXT;
     formatted_date_str TEXT;
     unit_str TEXT;
+    prod RECORD;
+    running_carry_forward NUMERIC(15,2);
+    requested_qty NUMERIC(15,2);
+    is_first BOOLEAN;
 BEGIN
     -- 1. Insert the Sales Batch with status = 'generated'
     INSERT INTO public.invoice_batch (
@@ -39,7 +43,7 @@ BEGIN
     ) VALUES (
         (batch_payload->>'issuing_company_id')::UUID,
         (batch_payload->>'receiving_company_id')::UUID,
-        COALESCE(ARRAY(SELECT jsonb_array_elements_text(batch_payload->'selected_customers'))::UUID[], '{}'::UUID[]),
+        COALESCE(batch_payload->'selected_customers', '[]'::JSONB),
         COALESCE(batch_payload->'major_customers', '[]'::JSONB),
         batch_payload->>'batch_type',
         batch_payload->>'transport_mode',
@@ -85,61 +89,61 @@ BEGIN
         );
     END LOOP;
 
-    -- 3. Accumulate quantities and check/update daily stock ledger
-    FOR daily_qty_record IN 
-        WITH inv_products AS (
-            SELECT 
-                (inv_row->>'invoice_date')::DATE as date_supply,
-                (prod_row->>'product_id')::UUID as prod_id,
-                (prod_row->>'quantity')::NUMERIC as qty
+    -- 3. Accumulate quantities and check/update daily stock ledger chronologically per product
+    FOR prod IN
+        SELECT DISTINCT (prod_row->>'product_id')::UUID as prod_id
+        FROM jsonb_array_elements(invoices_payload) AS inv_row
+        CROSS JOIN LATERAL jsonb_array_elements(inv_row->'products') AS prod_row
+    LOOP
+        is_first := TRUE;
+        -- Fetch and loop through the ledger rows for this product chronologically
+        FOR ledger_row IN
+            SELECT id, ledger_date, opening_stock, purchased_quantity, sold_quantity
+            FROM public.daily_stock_ledger
+            WHERE purchase_batch_id = stock_source_id
+              AND product_id = prod.prod_id
+            ORDER BY ledger_date ASC
+            FOR UPDATE
+        LOOP
+            -- Determine the correct opening stock
+            IF is_first THEN
+                running_carry_forward := ledger_row.opening_stock;
+                is_first := FALSE;
+            END IF;
+
+            -- Find the requested quantity for this product on this day from the invoices payload
+            SELECT COALESCE(SUM((prod_row->>'quantity')::NUMERIC), 0) INTO requested_qty
             FROM jsonb_array_elements(invoices_payload) AS inv_row
             CROSS JOIN LATERAL jsonb_array_elements(inv_row->'products') AS prod_row
-        )
-        SELECT date_supply, prod_id, SUM(qty) as total_qty
-        FROM inv_products
-        GROUP BY date_supply, prod_id
-    LOOP
-        -- Lock the row using FOR UPDATE to prevent race conditions
-        SELECT id, opening_stock, purchased_quantity, sold_quantity
-        INTO ledger_row
-        FROM public.daily_stock_ledger
-        WHERE purchase_batch_id = stock_source_id
-          AND ledger_date = daily_qty_record.date_supply
-          AND product_id = daily_qty_record.prod_id
-        FOR UPDATE;
+            WHERE (inv_row->>'invoice_date')::DATE = ledger_row.ledger_date
+              AND (prod_row->>'product_id')::UUID = prod.prod_id;
 
-        IF NOT FOUND THEN
-            SELECT product_name, unit_of_measure INTO product_name_str, unit_str FROM public.products WHERE id = daily_qty_record.prod_id;
-            formatted_date_str := to_char(daily_qty_record.date_supply, 'DD-Mon-YYYY');
-            
-            RAISE EXCEPTION 'Insufficient stock for % on %. Available: 0.00 %, Requested: % %',
-                COALESCE(product_name_str, 'Unknown Product'),
-                formatted_date_str,
-                COALESCE(unit_str, 'kg'),
-                daily_qty_record.total_qty,
-                COALESCE(unit_str, 'kg');
-        END IF;
+            -- Calculate available stock: opening_stock + purchased_quantity - existing sold_quantity
+            available_stock := running_carry_forward + ledger_row.purchased_quantity - ledger_row.sold_quantity;
 
-        available_stock := (ledger_row.opening_stock) + (ledger_row.purchased_quantity) - (ledger_row.sold_quantity);
+            IF requested_qty > available_stock THEN
+                SELECT product_name, unit_of_measure INTO product_name_str, unit_str FROM public.products WHERE id = prod.prod_id;
+                formatted_date_str := to_char(ledger_row.ledger_date, 'DD-Mon-YYYY');
+                
+                RAISE EXCEPTION 'Insufficient stock for % on %. Available: % %, Requested: % %',
+                    COALESCE(product_name_str, 'Unknown Product'),
+                    formatted_date_str,
+                    available_stock,
+                    COALESCE(unit_str, 'kg'),
+                    requested_qty,
+                    COALESCE(unit_str, 'kg');
+            END IF;
 
-        IF daily_qty_record.total_qty > available_stock THEN
-            SELECT product_name, unit_of_measure INTO product_name_str, unit_str FROM public.products WHERE id = daily_qty_record.prod_id;
-            formatted_date_str := to_char(daily_qty_record.date_supply, 'DD-Mon-YYYY');
-            
-            RAISE EXCEPTION 'Insufficient stock for % on %. Available: % %, Requested: % %',
-                COALESCE(product_name_str, 'Unknown Product'),
-                formatted_date_str,
-                available_stock,
-                COALESCE(unit_str, 'kg'),
-                daily_qty_record.total_qty,
-                COALESCE(unit_str, 'kg');
-        END IF;
+            -- Update the daily_stock_ledger row in the database
+            UPDATE public.daily_stock_ledger
+            SET opening_stock = running_carry_forward,
+                sold_quantity = sold_quantity + requested_qty,
+                updated_at = now()
+            WHERE id = ledger_row.id;
 
-        -- Update the ledger
-        UPDATE public.daily_stock_ledger
-        SET sold_quantity = sold_quantity + daily_qty_record.total_qty,
-            updated_at = now()
-        WHERE id = ledger_row.id;
+            -- Recalculate carry forward for the next day: opening + purchased - (existing sold + new sold)
+            running_carry_forward := running_carry_forward + ledger_row.purchased_quantity - (ledger_row.sold_quantity + requested_qty);
+        END LOOP;
     END LOOP;
 
     RETURN new_batch_id;
