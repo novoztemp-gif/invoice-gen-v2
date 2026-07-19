@@ -90,8 +90,7 @@ export function DailyStockReviewModal({
   };
 
   const checkRowInvalid = (row: StockReviewRow) => {
-    const limit = row.opening_stock + row.purchased_quantity;
-    return row.proposed_sold > limit || row.remaining_stock < 0;
+    return row.remaining_stock < 0 || row.remaining_stock > 15;
   };
 
   const isInvalid = rows.some((row) => checkRowInvalid(row));
@@ -160,7 +159,7 @@ export function DailyStockReviewModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-5xl max-h-[90vh] flex flex-col p-6">
+      <DialogContent className="w-[85vw] max-w-[85vw] h-[85vh] max-h-[85vh] flex flex-col p-6">
         <DialogHeader>
           <DialogTitle className="text-xl font-semibold text-slate-900">
             Daily Stock Review
@@ -175,8 +174,9 @@ export function DailyStockReviewModal({
           <div className="my-2 bg-red-50 text-red-950 border border-red-200 rounded-lg p-3 flex items-center gap-2">
             <AlertCircle className="h-5 w-5 text-red-600 shrink-0" />
             <p className="text-sm text-red-800">
-              One or more days have invalid sold quantities (Sold exceeds
-              Opening + Purchased). Please correct them to continue.
+              One or more days have invalid remaining stock. Remaining Stock
+              must be between 0 and 15 units (inclusive). Please correct them to
+              continue.
             </p>
           </div>
         )}

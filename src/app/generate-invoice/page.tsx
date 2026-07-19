@@ -66,11 +66,6 @@ export default function GenerateInvoice() {
     setIssuingCompanyOpen,
     productOpen,
     setProductOpen,
-    recurringProducts,
-    recurringProductOpen,
-    setRecurringProductOpen,
-    tempRecurringProduct,
-    setTempRecurringProduct,
     isValidating,
     formData,
     setFormData,
@@ -82,8 +77,6 @@ export default function GenerateInvoice() {
     handleSelectAllCustomers,
     handleAddProduct,
     handleRemoveProduct,
-    handleAddRecurringProduct,
-    handleRemoveRecurringProduct,
     handleSubmit,
     isReviewOpen,
     setIsReviewOpen,
@@ -882,160 +875,6 @@ export default function GenerateInvoice() {
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Recurring Products */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Recurring Products</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="flex flex-col md:flex-row items-end gap-3 p-4 rounded-lg border border-slate-200 bg-slate-50">
-              <div className="w-full md:flex-1 space-y-1">
-                <Label className="text-xs">Search Product *</Label>
-                <Popover
-                  open={recurringProductOpen}
-                  onOpenChange={setRecurringProductOpen}
-                >
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant="outline"
-                      role="combobox"
-                      aria-expanded={recurringProductOpen}
-                      className="w-full justify-between h-10 bg-white"
-                    >
-                      {tempRecurringProduct.product_id
-                        ? products.find(
-                            (c) => c.id === tempRecurringProduct.product_id,
-                          )?.product_name
-                        : "Select product..."}
-                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent
-                    className="w-[300px] md:w-[400px] p-0"
-                    align="start"
-                  >
-                    <Command>
-                      <CommandInput placeholder="Search selected products..." />
-                      <CommandList>
-                        <CommandEmpty>No product found.</CommandEmpty>
-                        <CommandGroup>
-                          {selectedProducts
-                            .filter(
-                              (item) =>
-                                !recurringProducts.some(
-                                  (r) => r.product_id === item.product.id,
-                                ),
-                            )
-                            .map((item) => (
-                              <CommandItem
-                                key={item.product.id}
-                                value={`${item.product.product_name} ${item.product.hsn_code}`}
-                                onSelect={() => {
-                                  setTempRecurringProduct({
-                                    ...tempRecurringProduct,
-                                    product_id: item.product.id,
-                                  });
-                                  setRecurringProductOpen(false);
-                                }}
-                              >
-                                <Check
-                                  className={cn(
-                                    "mr-2 h-4 w-4",
-                                    tempRecurringProduct.product_id ===
-                                      item.product.id
-                                      ? "opacity-100"
-                                      : "opacity-0",
-                                  )}
-                                />
-                                <div className="flex flex-col">
-                                  <span>{item.product.product_name}</span>
-                                  <span className="text-xs text-slate-500">
-                                    HSN: {item.product.hsn_code}
-                                  </span>
-                                </div>
-                              </CommandItem>
-                            ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-              </div>
-
-              <div className="w-full md:w-32 space-y-1">
-                <Label className="text-xs">Percentage *</Label>
-                <div className="relative">
-                  <Input
-                    type="number"
-                    min="1"
-                    max="100"
-                    step="1"
-                    placeholder="e.g. 60"
-                    value={tempRecurringProduct.percentage}
-                    onChange={(e) =>
-                      setTempRecurringProduct({
-                        ...tempRecurringProduct,
-                        percentage: e.target.value,
-                      })
-                    }
-                    className="h-10 bg-white pr-8"
-                  />
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
-                    %
-                  </span>
-                </div>
-              </div>
-
-              <Button
-                type="button"
-                onClick={handleAddRecurringProduct}
-                className="w-full md:w-auto h-10 px-6 gap-2"
-              >
-                <Plus className="h-4 w-4" /> Add
-              </Button>
-            </div>
-
-            {/* List of Added Recurring Products */}
-            {recurringProducts.length > 0 ? (
-              <div className="space-y-3">
-                {recurringProducts.map((rp, index) => {
-                  const product = products.find((p) => p.id === rp.product_id);
-                  return (
-                    <div
-                      key={index}
-                      className="flex items-center justify-between p-3 rounded-lg border border-slate-200"
-                    >
-                      <div>
-                        <p className="font-semibold text-slate-900">
-                          {product?.product_name}
-                        </p>
-                        <p className="text-sm text-slate-500">
-                          {rp.percentage}% Likelihood
-                        </p>
-                      </div>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() =>
-                          handleRemoveRecurringProduct(rp.product_id)
-                        }
-                        className="text-red-500 hover:text-red-700 hover:bg-red-50"
-                      >
-                        Remove
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="text-center py-6 text-slate-500 text-sm border border-dashed rounded-lg border-slate-200">
-                No recurring products configured.
               </div>
             )}
           </CardContent>

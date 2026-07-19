@@ -65,11 +65,6 @@ export default function GeneratePurchaseInvoice() {
     setIssuingCompanyOpen,
     productOpen,
     setProductOpen,
-    recurringProducts,
-    recurringProductOpen,
-    setRecurringProductOpen,
-    tempRecurringProduct,
-    setTempRecurringProduct,
     isValidating,
     formData,
     setFormData,
@@ -81,97 +76,107 @@ export default function GeneratePurchaseInvoice() {
     handleSelectAllCustomers,
     handleAddProduct,
     handleRemoveProduct,
-    handleAddRecurringProduct,
-    handleRemoveRecurringProduct,
     handleSubmit,
   } = useInvoiceForm({ batchType: "PURCHASE" });
 
+  const [occurrenceProductOpen, setOccurrenceProductOpen] = useState(false);
+  const [selectedOccurProduct, setSelectedOccurProduct] = useState("");
+  const [occurPercent, setOccurPercent] = useState("");
+
   // Live Purchase Value Calculator
   const calcValues = () => {
-    let batchMin = 0;
-    let batchMax = 0;
-    let hasEmptyQty = false;
+    const T = parseFloat(formData.totalAmount || "") || 0;
+    const I_min = parseFloat(formData.minimumInvoiceAmount || "") || 0;
+    const I_max = parseFloat(formData.maximumInvoiceAmount || "") || 0;
 
-    if (selectedProducts.length === 0) {
-      hasEmptyQty = true;
+    let N = 0;
+    let N_min = 0;
+    let N_max = 0;
+    if (I_min > 0 && I_max > 0) {
+      const I_avg = (I_min + I_max) / 2;
+      N = Math.round(T / I_avg);
+      N_min = Math.ceil(T / I_max);
+      N_max = Math.floor(T / I_min);
+      N = Math.max(N_min, Math.min(N_max, N));
+      if (N < 1 && T > 0) {
+        N = 1;
+      }
     }
 
+    let minSingleProdVal = 0;
+    let maxSingleProdSum = 0;
+
+    if (selectedProducts.length > 0) {
+      const prodVals = selectedProducts.map((p) => {
+        const qMin = parseFloat(p.perDayQtyMin) || 0;
+        const qMax = parseFloat(p.perDayQtyMax) || 0;
+        const rMin = parseFloat(p.perDayRateMin) || 0;
+        const rMax = parseFloat(p.perDayRateMax) || 0;
+        return {
+          minVal: qMin * rMin,
+          maxVal: qMax * rMax,
+        };
+      });
+
+      minSingleProdVal = Math.min(...prodVals.map((pv) => pv.minVal));
+      maxSingleProdSum = prodVals.reduce((sum, pv) => sum + pv.maxVal, 0);
+    }
+
+    const V_min_single = Math.max(I_min, minSingleProdVal);
+    const V_max_single = Math.min(I_max, maxSingleProdSum);
+
+    const E_min = N * V_min_single;
+    const E_max = N * V_max_single;
+
     const productBreakdown = selectedProducts.map((item) => {
-      const q = parseFloat(item.monthlyQty || "");
-      if (isNaN(q) || q <= 0) {
-        hasEmptyQty = true;
-      }
+      const qMin = parseFloat(item.perDayQtyMin) || 0;
+      const qMax = parseFloat(item.perDayQtyMax) || 0;
       const rMin = parseFloat(item.perDayRateMin) || 0;
       const rMax = parseFloat(item.perDayRateMax) || 0;
-
-      const minVal = (q || 0) * rMin;
-      const maxVal = (q || 0) * rMax;
-
-      batchMin += minVal;
-      batchMax += maxVal;
-
       return {
         product_id: item.product.id,
         product_name: item.product.product_name,
-        monthly_qty: q || 0,
+        occurrence_percentage: item.occurrencePercentage || "",
+        min_qty: qMin,
+        max_qty: qMax,
         min_rate: rMin,
         max_rate: rMax,
-        min_val: minVal,
-        max_val: maxVal,
+        min_val: qMin * rMin,
+        max_val: qMax * rMax,
         unit: item.product.unit_of_measure,
       };
     });
 
-    // Sort descending by Minimum Value
-    productBreakdown.sort((a, b) => b.min_val - a.min_val);
-
-    const enteredAmount = parseFloat(formData.totalAmount) || 0;
-    const hasInvalidEntered = isNaN(enteredAmount) || enteredAmount <= 0;
-
-    let status: "incomplete" | "valid" | "below_min" | "above_max" =
-      "incomplete";
-    let difference = 0;
-
-    if (hasEmptyQty || hasInvalidEntered) {
-      status = "incomplete";
-      difference = 0;
-    } else if (enteredAmount < batchMin) {
-      status = "below_min";
-      difference = batchMin - enteredAmount;
-    } else if (enteredAmount > batchMax) {
-      status = "above_max";
-      difference = enteredAmount - batchMax;
-    } else {
-      status = "valid";
-      difference = 0;
+    let status: "incomplete" | "valid" | "invalid" = "incomplete";
+    if (T > 0 && I_min > 0 && I_max > 0 && selectedProducts.length > 0) {
+      if (N_min > N_max || T < E_min || T > E_max) {
+        status = "invalid";
+      } else {
+        status = "valid";
+      }
     }
 
-    // Top 5 products contributing the highest Minimum Value
-    const top5Contributors = [...productBreakdown]
-      .filter((p) => p.monthly_qty > 0)
-      .slice(0, 5);
-
     return {
-      batchMin,
-      batchMax,
-      enteredAmount,
+      totalAmount: T,
+      estimatedInvoices: N,
+      selectedCount: selectedProducts.length,
+      batchMin: E_min,
+      batchMax: E_max,
       status,
-      difference,
       productBreakdown,
-      top5Contributors,
     };
   };
 
   const {
+    totalAmount,
+    estimatedInvoices,
+    selectedCount,
     batchMin,
     batchMax,
-    enteredAmount,
     status,
-    difference,
     productBreakdown,
-    top5Contributors,
   } = calcValues();
-  const isInvalid = status === "below_min" || status === "above_max";
+  const isInvalid = status === "invalid";
 
   const handleProductRowClick = (productId: string) => {
     const element = document.getElementById(`product-qty-card-${productId}`);
@@ -700,724 +705,6 @@ export default function GeneratePurchaseInvoice() {
           </CardContent>
         </Card>
 
-        {/* Products */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Products</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="space-y-2">
-              <Label className="text-xs font-semibold">
-                Search & Select Products
-              </Label>
-              <div className="flex gap-2">
-                <Popover open={productOpen} onOpenChange={setProductOpen}>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant="outline"
-                      role="combobox"
-                      aria-expanded={productOpen}
-                      className="flex-1 justify-between h-10"
-                    >
-                      Search & Select Products...
-                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-full p-0" align="start">
-                    <Command>
-                      <CommandInput placeholder="Search by name, HSN code, or unit..." />
-                      <CommandList>
-                        <CommandEmpty>No product found.</CommandEmpty>
-                        <CommandGroup>
-                          {products
-                            .filter((p) =>
-                              productRules.some((r) => r.product_id === p.id),
-                            )
-                            .map((product) => {
-                              const isSelected = selectedProducts.some(
-                                (p) => p.product.id === product.id,
-                              );
-                              return (
-                                <CommandItem
-                                  key={product.id}
-                                  value={`${product.product_name} ${product.hsn_code} ${product.unit_of_measure}`}
-                                  onSelect={() => {
-                                    if (isSelected) {
-                                      setSelectedProducts(
-                                        selectedProducts.filter(
-                                          (p) => p.product.id !== product.id,
-                                        ),
-                                      );
-                                    } else {
-                                      const rule = productRules.find(
-                                        (r) => r.product_id === product.id,
-                                      );
-                                      setSelectedProducts([
-                                        ...selectedProducts,
-                                        {
-                                          product,
-                                          perDayQtyMin:
-                                            rule?.quantity_min?.toString() ||
-                                            "",
-                                          perDayQtyMax:
-                                            rule?.quantity_max?.toString() ||
-                                            "",
-                                          perDayRateMin:
-                                            rule?.rate_min?.toString() || "",
-                                          perDayRateMax:
-                                            rule?.rate_max?.toString() || "",
-                                          monthlyQty: "",
-                                        },
-                                      ]);
-                                    }
-                                  }}
-                                >
-                                  <Check
-                                    className={cn(
-                                      "mr-2 h-4 w-4",
-                                      isSelected ? "opacity-100" : "opacity-0",
-                                    )}
-                                  />
-                                  <div className="flex flex-col">
-                                    <span>{product.product_name}</span>
-                                    <span className="text-xs text-slate-500">
-                                      HSN: {product.hsn_code} | Unit:{" "}
-                                      {product.unit_of_measure}
-                                    </span>
-                                  </div>
-                                </CommandItem>
-                              );
-                            })}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-                <Button
-                  variant="secondary"
-                  className="h-10 shrink-0"
-                  onClick={() => {
-                    const configuredProducts = products.filter((p) =>
-                      productRules.some((r) => r.product_id === p.id),
-                    );
-                    const newSelections = configuredProducts.map((product) => {
-                      const rule = productRules.find(
-                        (r) => r.product_id === product.id,
-                      );
-                      return {
-                        product,
-                        perDayQtyMin: rule?.quantity_min?.toString() || "",
-                        perDayQtyMax: rule?.quantity_max?.toString() || "",
-                        perDayRateMin: rule?.rate_min?.toString() || "",
-                        perDayRateMax: rule?.rate_max?.toString() || "",
-                        monthlyQty: "",
-                      };
-                    });
-                    setSelectedProducts(newSelections);
-                  }}
-                >
-                  Select All
-                </Button>
-              </div>
-            </div>
-
-            {/* Selected Products Cards */}
-            {selectedProducts.length > 0 && (
-              <div className="space-y-3">
-                <Label className="text-sm font-medium text-slate-700">
-                  Selected Products ({selectedProducts.length})
-                </Label>
-                <div className="flex flex-wrap gap-2">
-                  {selectedProducts.map((item) => (
-                    <div
-                      key={item.product.id}
-                      className="flex items-center gap-2 pl-3 pr-1 py-1 bg-slate-100 border border-slate-200 rounded-full text-sm"
-                    >
-                      <span className="font-medium text-slate-800">
-                        {item.product.product_name}
-                      </span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleRemoveProduct(item.product.id)}
-                        className="h-5 w-5 p-0 rounded-full hover:bg-slate-200 text-slate-500 hover:text-slate-700"
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Monthly Purchase Quantities */}
-        {selectedProducts.length > 0 && (
-          <Card>
-            <CardHeader>
-              <CardTitle>Monthly Purchase Quantities</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <p className="text-sm text-slate-500">
-                  Enter the actual total quantity purchased for each selected
-                  product during this month.
-                </p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {selectedProducts.map((item, idx) => (
-                    <div
-                      key={item.product.id}
-                      id={`product-qty-card-${item.product.id}`}
-                      className="space-y-2 p-3 border rounded-lg bg-slate-50/50 transition-all duration-300"
-                    >
-                      <Label
-                        htmlFor={`monthly-qty-${item.product.id}`}
-                        className="font-semibold text-slate-700"
-                      >
-                        {item.product.product_name} (
-                        {item.product.unit_of_measure})
-                      </Label>
-                      <Input
-                        type="number"
-                        id={`monthly-qty-${item.product.id}`}
-                        placeholder={`Enter quantity in ${item.product.unit_of_measure}`}
-                        value={item.monthlyQty || ""}
-                        onChange={(e) => {
-                          const updated = [...selectedProducts];
-                          updated[idx] = {
-                            ...updated[idx],
-                            monthlyQty: e.target.value,
-                          };
-                          setSelectedProducts(updated);
-                        }}
-                        className="bg-white border-slate-200"
-                        min="0.01"
-                        step="0.01"
-                        required
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Purchase Value Calculator Card */}
-        <Card
-          className={cn(
-            "border shadow-sm transition-colors duration-200",
-            status === "valid" &&
-              "bg-green-50/70 border-green-200 text-green-950",
-            (status === "below_min" || status === "above_max") &&
-              "bg-red-50/70 border-red-200 text-red-950",
-            status === "incomplete" &&
-              "bg-amber-50/70 border-amber-200 text-amber-900",
-          )}
-        >
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base font-semibold flex items-center gap-2">
-              Purchase Value Calculator
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
-              <div className="space-y-1">
-                <span className="text-xs text-slate-500 font-medium block">
-                  Minimum Possible Purchase Value
-                </span>
-                <span className="text-lg font-mono font-semibold">
-                  ₹
-                  {batchMin.toLocaleString("en-IN", {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}
-                </span>
-              </div>
-              <div className="space-y-1">
-                <span className="text-xs text-slate-500 font-medium block">
-                  Maximum Possible Purchase Value
-                </span>
-                <span className="text-lg font-mono font-semibold">
-                  ₹
-                  {batchMax.toLocaleString("en-IN", {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}
-                </span>
-              </div>
-              <div className="space-y-1">
-                <span className="text-xs text-slate-500 font-medium block">
-                  Entered Purchase Amount
-                </span>
-                <span className="text-lg font-mono font-semibold text-slate-900">
-                  ₹
-                  {enteredAmount.toLocaleString("en-IN", {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}
-                </span>
-              </div>
-            </div>
-
-            <hr className="border-slate-200/60" />
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
-              <div>
-                <span className="text-xs text-slate-500 font-medium block mb-1">
-                  Status
-                </span>
-                <span
-                  className={cn(
-                    "font-semibold text-xs px-2.5 py-1 rounded-full inline-block uppercase tracking-wider",
-                    status === "valid" && "bg-green-100 text-green-800",
-                    (status === "below_min" || status === "above_max") &&
-                      "bg-red-100 text-red-800",
-                    status === "incomplete" && "bg-amber-100 text-amber-800",
-                  )}
-                >
-                  {status === "valid" && "✅ Purchase Amount is Valid"}
-                  {status === "below_min" && "❌ Below Minimum Possible Value"}
-                  {status === "above_max" && "❌ Above Maximum Possible Value"}
-                  {status === "incomplete" && "⚠️ Incomplete Details"}
-                </span>
-              </div>
-
-              <div className="space-y-2">
-                <div className="flex justify-between items-center sm:justify-end gap-4">
-                  <span className="text-xs text-slate-500 font-medium">
-                    Difference from Minimum:
-                  </span>
-                  <span className="text-sm font-mono font-semibold">
-                    ₹
-                    {status === "below_min"
-                      ? difference.toLocaleString("en-IN", {
-                          minimumFractionDigits: 2,
-                        })
-                      : "0.00"}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center sm:justify-end gap-4">
-                  <span className="text-xs text-slate-500 font-medium">
-                    Difference from Maximum:
-                  </span>
-                  <span className="text-sm font-mono font-semibold">
-                    ₹
-                    {status === "above_max"
-                      ? difference.toLocaleString("en-IN", {
-                          minimumFractionDigits: 2,
-                        })
-                      : "0.00"}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Product Contribution Breakdown Card */}
-        {selectedProducts.length > 0 && (
-          <Card className="border shadow-sm">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base font-semibold">
-                Product Contribution Breakdown
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {/* Desktop Table View */}
-              <div className="hidden sm:block overflow-x-auto border rounded-lg border-slate-200">
-                <table className="w-full text-xs text-left text-slate-600 border-collapse">
-                  <thead className="bg-slate-50 font-medium text-slate-500 border-b border-slate-200">
-                    <tr>
-                      <th className="px-4 py-2.5">Product Name</th>
-                      <th className="px-4 py-2.5 text-right">
-                        Monthly Quantity
-                      </th>
-                      <th className="px-4 py-2.5 text-right">Min Rate</th>
-                      <th className="px-4 py-2.5 text-right">Max Rate</th>
-                      <th className="px-4 py-2.5 text-right font-medium text-slate-800">
-                        Min Value
-                      </th>
-                      <th className="px-4 py-2.5 text-right font-medium text-slate-800">
-                        Max Value
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {productBreakdown.map((item) => (
-                      <tr
-                        key={item.product_id}
-                        onClick={() => handleProductRowClick(item.product_id)}
-                        className="hover:bg-slate-50/80 cursor-pointer transition-colors"
-                      >
-                        <td className="px-4 py-2.5 font-medium text-slate-800 flex items-center gap-1.5">
-                          <span>{item.product_name}</span>
-                          <span className="text-[10px] text-slate-400 font-normal">
-                            ({item.unit})
-                          </span>
-                        </td>
-                        <td className="px-4 py-2.5 text-right font-mono">
-                          {item.monthly_qty.toFixed(2)}
-                        </td>
-                        <td className="px-4 py-2.5 text-right font-mono">
-                          ₹{item.min_rate.toFixed(2)}
-                        </td>
-                        <td className="px-4 py-2.5 text-right font-mono">
-                          ₹{item.max_rate.toFixed(2)}
-                        </td>
-                        <td className="px-4 py-2.5 text-right font-mono font-medium text-slate-900 bg-slate-50/30">
-                          ₹
-                          {item.min_val.toLocaleString("en-IN", {
-                            minimumFractionDigits: 2,
-                          })}
-                        </td>
-                        <td className="px-4 py-2.5 text-right font-mono font-medium text-slate-900 bg-slate-50/30">
-                          ₹
-                          {item.max_val.toLocaleString("en-IN", {
-                            minimumFractionDigits: 2,
-                          })}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Mobile Card-based View */}
-              <div className="block sm:hidden space-y-3">
-                {productBreakdown.map((item) => (
-                  <div
-                    key={item.product_id}
-                    onClick={() => handleProductRowClick(item.product_id)}
-                    className="p-3 border rounded-lg bg-slate-50/50 hover:bg-slate-50 cursor-pointer transition-colors space-y-2"
-                  >
-                    <div className="flex justify-between items-center">
-                      <span className="font-semibold text-slate-800">
-                        {item.product_name}
-                      </span>
-                      <span className="text-[11px] text-slate-500 font-mono">
-                        {item.monthly_qty.toFixed(2)} {item.unit}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-[11px]">
-                      <div>
-                        <span className="text-slate-400 block">
-                          Min Value (Rate: ₹{item.min_rate})
-                        </span>
-                        <span className="font-bold font-mono text-slate-800">
-                          ₹
-                          {item.min_val.toLocaleString("en-IN", {
-                            minimumFractionDigits: 2,
-                          })}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-slate-400 block">
-                          Max Value (Rate: ₹{item.max_rate})
-                        </span>
-                        <span className="font-bold font-mono text-slate-800">
-                          ₹
-                          {item.max_val.toLocaleString("en-IN", {
-                            minimumFractionDigits: 2,
-                          })}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Contribution Totals Section */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-3 border-t border-slate-200 text-sm">
-                <span className="text-slate-500 font-medium">
-                  Contribution Totals
-                </span>
-                <div className="flex flex-col sm:flex-row gap-4 sm:text-right">
-                  <div>
-                    <span className="text-xs text-slate-400 block">
-                      Total Minimum Purchase Value
-                    </span>
-                    <span className="font-semibold font-mono text-slate-800">
-                      ₹
-                      {batchMin.toLocaleString("en-IN", {
-                        minimumFractionDigits: 2,
-                      })}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-xs text-slate-400 block">
-                      Total Maximum Purchase Value
-                    </span>
-                    <span className="font-semibold font-mono text-slate-800">
-                      ₹
-                      {batchMax.toLocaleString("en-IN", {
-                        minimumFractionDigits: 2,
-                      })}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Suggestions Card */}
-        {isInvalid && (
-          <Card className="border border-red-200 bg-red-50/30 shadow-sm">
-            <CardHeader className="pb-3 border-b border-red-100">
-              <CardTitle className="text-base font-semibold text-red-900 flex items-center gap-2">
-                <span>Suggestions</span>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="pt-4 space-y-4">
-              {status === "below_min" && (
-                <div className="space-y-3">
-                  <p className="text-sm font-medium text-red-800">
-                    ❌ Purchase Amount is below the mathematically achievable
-                    range.
-                  </p>
-                  <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
-                    <li>
-                      Increase Purchase Amount by at least{" "}
-                      <strong className="text-red-700 font-semibold font-mono">
-                        ₹
-                        {difference.toLocaleString("en-IN", {
-                          minimumFractionDigits: 2,
-                        })}
-                      </strong>
-                    </li>
-                    <li>
-                      Reduce Monthly Quantities of one or more high-value
-                      products listed below.
-                    </li>
-                  </ul>
-
-                  <div className="pt-2">
-                    <span className="text-xs font-semibold text-slate-700 block mb-2">
-                      Top 5 Products contributing the highest Minimum Value:
-                    </span>
-                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
-                      <table className="w-full text-xs text-left text-slate-600 border-collapse">
-                        <thead className="bg-slate-50 border-b border-slate-200 font-medium">
-                          <tr>
-                            <th className="px-3 py-2">Product</th>
-                            <th className="px-3 py-2 text-right">Quantity</th>
-                            <th className="px-3 py-2 text-right">
-                              Min Contribution
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {top5Contributors.map((p) => (
-                            <tr
-                              key={p.product_id}
-                              className="hover:bg-slate-50/50"
-                            >
-                              <td className="px-3 py-2 font-medium text-slate-800">
-                                {p.product_name}
-                              </td>
-                              <td className="px-3 py-2 text-right font-mono">
-                                {p.monthly_qty.toLocaleString()} {p.unit}
-                              </td>
-                              <td className="px-3 py-2 text-right font-mono font-medium text-red-700">
-                                ₹
-                                {p.min_val.toLocaleString("en-IN", {
-                                  minimumFractionDigits: 2,
-                                })}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {status === "above_max" && (
-                <div className="space-y-3">
-                  <p className="text-sm font-medium text-red-800">
-                    ❌ Purchase Amount exceeds the mathematically achievable
-                    range.
-                  </p>
-                  <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
-                    <li>
-                      Reduce Purchase Amount by{" "}
-                      <strong className="text-red-700 font-semibold font-mono">
-                        ₹
-                        {difference.toLocaleString("en-IN", {
-                          minimumFractionDigits: 2,
-                        })}
-                      </strong>
-                    </li>
-                    <li>Increase Monthly Quantities of selected products.</li>
-                    <li>
-                      Increase configured Maximum Rates in the product
-                      configuration rules.
-                    </li>
-                  </ul>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Recurring Products */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Recurring Products</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="flex flex-col md:flex-row items-end gap-3 p-4 rounded-lg border border-slate-200 bg-slate-50">
-              <div className="w-full md:flex-1 space-y-1">
-                <Label className="text-xs">Search Product *</Label>
-                <Popover
-                  open={recurringProductOpen}
-                  onOpenChange={setRecurringProductOpen}
-                >
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant="outline"
-                      role="combobox"
-                      aria-expanded={recurringProductOpen}
-                      className="w-full justify-between h-10 bg-white"
-                    >
-                      {tempRecurringProduct.product_id
-                        ? products.find(
-                            (c) => c.id === tempRecurringProduct.product_id,
-                          )?.product_name
-                        : "Select product..."}
-                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent
-                    className="w-[300px] md:w-[400px] p-0"
-                    align="start"
-                  >
-                    <Command>
-                      <CommandInput placeholder="Search selected products..." />
-                      <CommandList>
-                        <CommandEmpty>No product found.</CommandEmpty>
-                        <CommandGroup>
-                          {selectedProducts
-                            .filter(
-                              (item) =>
-                                !recurringProducts.some(
-                                  (r) => r.product_id === item.product.id,
-                                ),
-                            )
-                            .map((item) => (
-                              <CommandItem
-                                key={item.product.id}
-                                value={`${item.product.product_name} ${item.product.hsn_code}`}
-                                onSelect={() => {
-                                  setTempRecurringProduct({
-                                    ...tempRecurringProduct,
-                                    product_id: item.product.id,
-                                  });
-                                  setRecurringProductOpen(false);
-                                }}
-                              >
-                                <Check
-                                  className={cn(
-                                    "mr-2 h-4 w-4",
-                                    tempRecurringProduct.product_id ===
-                                      item.product.id
-                                      ? "opacity-100"
-                                      : "opacity-0",
-                                  )}
-                                />
-                                <div className="flex flex-col">
-                                  <span>{item.product.product_name}</span>
-                                  <span className="text-xs text-slate-500">
-                                    HSN: {item.product.hsn_code}
-                                  </span>
-                                </div>
-                              </CommandItem>
-                            ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-              </div>
-
-              <div className="w-full md:w-32 space-y-1">
-                <Label className="text-xs">Percentage *</Label>
-                <div className="relative">
-                  <Input
-                    type="number"
-                    min="1"
-                    max="100"
-                    step="1"
-                    placeholder="e.g. 60"
-                    value={tempRecurringProduct.percentage}
-                    onChange={(e) =>
-                      setTempRecurringProduct({
-                        ...tempRecurringProduct,
-                        percentage: e.target.value,
-                      })
-                    }
-                    className="h-10 bg-white pr-8"
-                  />
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
-                    %
-                  </span>
-                </div>
-              </div>
-
-              <Button
-                type="button"
-                onClick={handleAddRecurringProduct}
-                className="w-full md:w-auto h-10 px-6 gap-2"
-              >
-                <Plus className="h-4 w-4" /> Add
-              </Button>
-            </div>
-
-            {/* List of Added Recurring Products */}
-            {recurringProducts.length > 0 ? (
-              <div className="space-y-3">
-                {recurringProducts.map((rp, index) => {
-                  const product = products.find((p) => p.id === rp.product_id);
-                  return (
-                    <div
-                      key={index}
-                      className="flex items-center justify-between p-3 rounded-lg border border-slate-200"
-                    >
-                      <div>
-                        <p className="font-semibold text-slate-900">
-                          {product?.product_name}
-                        </p>
-                        <p className="text-sm text-slate-500">
-                          {rp.percentage}% Likelihood
-                        </p>
-                      </div>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() =>
-                          handleRemoveRecurringProduct(rp.product_id)
-                        }
-                        className="text-red-500 hover:text-red-700 hover:bg-red-50"
-                      >
-                        Remove
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="text-center py-6 text-slate-500 text-sm border border-dashed rounded-lg border-slate-200">
-                No recurring products configured.
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
         {/* Invoice Configuration & Limits */}
         <Card>
           <CardHeader>
@@ -1510,28 +797,404 @@ export default function GeneratePurchaseInvoice() {
                     required
                   />
                 </div>
-              </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="total-amount">
-                  Total Amount (All Invoices) *
-                </Label>
-                <Input
-                  id="total-amount"
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="Enter total amount for all invoices"
-                  value={formData.totalAmount}
-                  onChange={(e) =>
-                    setFormData({ ...formData, totalAmount: e.target.value })
-                  }
-                  required
-                />
+                <div className="space-y-2">
+                  <Label htmlFor="total-amount">Target Purchase Amount *</Label>
+                  <Input
+                    id="total-amount"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Enter target purchase amount"
+                    value={formData.totalAmount}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        totalAmount: e.target.value,
+                      })
+                    }
+                    required
+                  />
+                </div>
               </div>
             </div>
           </CardContent>
         </Card>
+
+        {/* Products */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Products</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="space-y-2">
+              <Label className="text-xs font-semibold">
+                Search & Select Products
+              </Label>
+              <div className="flex gap-2">
+                <Popover open={productOpen} onOpenChange={setProductOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      aria-expanded={productOpen}
+                      className="flex-1 justify-between h-10"
+                    >
+                      Search & Select Products...
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-full p-0" align="start">
+                    <Command>
+                      <CommandInput placeholder="Search by name, HSN code, or unit..." />
+                      <CommandList>
+                        <CommandEmpty>No product found.</CommandEmpty>
+                        <CommandGroup>
+                          {products
+                            .filter((p) =>
+                              productRules.some((r) => r.product_id === p.id),
+                            )
+                            .map((product) => {
+                              const isSelected = selectedProducts.some(
+                                (p) => p.product.id === product.id,
+                              );
+                              return (
+                                <CommandItem
+                                  key={product.id}
+                                  value={`${product.product_name} ${product.hsn_code} ${product.unit_of_measure}`}
+                                  onSelect={() => {
+                                    if (isSelected) {
+                                      setSelectedProducts(
+                                        selectedProducts.filter(
+                                          (p) => p.product.id !== product.id,
+                                        ),
+                                      );
+                                    } else {
+                                      const rule = productRules.find(
+                                        (r) => r.product_id === product.id,
+                                      );
+                                      setSelectedProducts([
+                                        ...selectedProducts,
+                                        {
+                                          product,
+                                          perDayQtyMin:
+                                            rule?.quantity_min?.toString() ||
+                                            "",
+                                          perDayQtyMax:
+                                            rule?.quantity_max?.toString() ||
+                                            "",
+                                          perDayRateMin:
+                                            rule?.rate_min?.toString() || "",
+                                          perDayRateMax:
+                                            rule?.rate_max?.toString() || "",
+                                        },
+                                      ]);
+                                    }
+                                  }}
+                                >
+                                  <Check
+                                    className={cn(
+                                      "mr-2 h-4 w-4",
+                                      isSelected ? "opacity-100" : "opacity-0",
+                                    )}
+                                  />
+                                  <div className="flex flex-col">
+                                    <span>{product.product_name}</span>
+                                    <span className="text-xs text-slate-500">
+                                      HSN: {product.hsn_code} | Unit:{" "}
+                                      {product.unit_of_measure}
+                                    </span>
+                                  </div>
+                                </CommandItem>
+                              );
+                            })}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+                <Button
+                  variant="secondary"
+                  className="h-10 shrink-0"
+                  onClick={() => {
+                    const configuredProducts = products.filter((p) =>
+                      productRules.some((r) => r.product_id === p.id),
+                    );
+                    const newSelections = configuredProducts.map((product) => {
+                      const rule = productRules.find(
+                        (r) => r.product_id === product.id,
+                      );
+                      return {
+                        product,
+                        perDayQtyMin: rule?.quantity_min?.toString() || "",
+                        perDayQtyMax: rule?.quantity_max?.toString() || "",
+                        perDayRateMin: rule?.rate_min?.toString() || "",
+                        perDayRateMax: rule?.rate_max?.toString() || "",
+                      };
+                    });
+                    setSelectedProducts(newSelections);
+                  }}
+                >
+                  Select All
+                </Button>
+              </div>
+            </div>
+
+            {/* Selected Products Cards */}
+            {selectedProducts.length > 0 && (
+              <div className="space-y-3">
+                <Label className="text-sm font-medium text-slate-700">
+                  Selected Products ({selectedProducts.length})
+                </Label>
+                <div className="flex flex-wrap gap-2">
+                  {selectedProducts.map((item) => (
+                    <div
+                      key={item.product.id}
+                      className="flex items-center gap-2 pl-3 pr-1 py-1 bg-slate-100 border border-slate-200 rounded-full text-sm"
+                    >
+                      <span className="font-medium text-slate-800">
+                        {item.product.product_name}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRemoveProduct(item.product.id)}
+                        className="h-5 w-5 p-0 rounded-full hover:bg-slate-200 text-slate-500 hover:text-slate-700"
+                      >
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Product Occurrence Configuration Card */}
+        {selectedProducts.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Product Occurrence Configuration</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="space-y-4">
+                <p className="text-sm text-slate-500">
+                  Configure the frequency (occurrence percentage) for each
+                  product to appear in the generated invoices. Products without
+                  an occurrence configuration will automatically use the default
+                  random probability (50%).
+                </p>
+
+                {/* Add Occurrence Configuration Form */}
+                <div className="flex flex-col md:flex-row items-end gap-3 p-4 rounded-lg border border-slate-200 bg-slate-50">
+                  <div className="w-full md:flex-1 space-y-1">
+                    <Label className="text-xs">Search Product *</Label>
+                    <Popover
+                      open={occurrenceProductOpen}
+                      onOpenChange={setOccurrenceProductOpen}
+                    >
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          role="combobox"
+                          aria-expanded={occurrenceProductOpen}
+                          className="w-full justify-between h-10 bg-white"
+                        >
+                          {selectedOccurProduct
+                            ? selectedProducts.find(
+                                (c) => c.product.id === selectedOccurProduct,
+                              )?.product.product_name
+                            : "Select product..."}
+                          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        className="w-[300px] md:w-[400px] p-0"
+                        align="start"
+                      >
+                        <Command>
+                          <CommandInput placeholder="Search selected products..." />
+                          <CommandList>
+                            <CommandEmpty>No product found.</CommandEmpty>
+                            <CommandGroup>
+                              {selectedProducts
+                                .filter(
+                                  (item) =>
+                                    item.product.id !== selectedOccurProduct &&
+                                    !item.occurrencePercentage,
+                                )
+                                .map((item) => (
+                                  <CommandItem
+                                    key={item.product.id}
+                                    value={`${item.product.product_name} ${item.product.hsn_code}`}
+                                    onSelect={() => {
+                                      setSelectedOccurProduct(item.product.id);
+                                      setOccurrenceProductOpen(false);
+                                    }}
+                                  >
+                                    <Check
+                                      className={cn(
+                                        "mr-2 h-4 w-4",
+                                        selectedOccurProduct === item.product.id
+                                          ? "opacity-100"
+                                          : "opacity-0",
+                                      )}
+                                    />
+                                    <div className="flex flex-col">
+                                      <span>{item.product.product_name}</span>
+                                      <span className="text-xs text-slate-500">
+                                        HSN: {item.product.hsn_code}
+                                      </span>
+                                    </div>
+                                  </CommandItem>
+                                ))}
+                            </CommandGroup>
+                          </CommandList>
+                        </Command>
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+
+                  <div className="w-full md:w-32 space-y-1">
+                    <Label className="text-xs">Occurrence % *</Label>
+                    <div className="relative">
+                      <Input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="1"
+                        placeholder="e.g. 80"
+                        value={occurPercent}
+                        onChange={(e) => setOccurPercent(e.target.value)}
+                        className="h-10 bg-white pr-8"
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
+                        %
+                      </span>
+                    </div>
+                  </div>
+
+                  <Button
+                    type="button"
+                    onClick={() => {
+                      if (!selectedOccurProduct) {
+                        setErrorPopup("Please select a product first.");
+                        return;
+                      }
+                      const pct = parseFloat(occurPercent);
+                      if (isNaN(pct) || pct < 0 || pct > 100) {
+                        setErrorPopup(
+                          "Occurrence percentage must be between 0 and 100.",
+                        );
+                        return;
+                      }
+                      setSelectedProducts(
+                        selectedProducts.map((item) =>
+                          item.product.id === selectedOccurProduct
+                            ? { ...item, occurrencePercentage: occurPercent }
+                            : item,
+                        ),
+                      );
+                      setSelectedOccurProduct("");
+                      setOccurPercent("");
+                    }}
+                    className="w-full md:w-auto h-10 px-6 gap-2"
+                  >
+                    <Plus className="h-4 w-4" /> Add Configuration
+                  </Button>
+                </div>
+
+                {/* Configured Occurrences List */}
+                <div className="space-y-3">
+                  {selectedProducts.filter(
+                    (item) =>
+                      item.occurrencePercentage !== undefined &&
+                      item.occurrencePercentage !== null &&
+                      item.occurrencePercentage !== "",
+                  ).length > 0 ? (
+                    <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white">
+                      {selectedProducts
+                        .filter(
+                          (item) =>
+                            item.occurrencePercentage !== undefined &&
+                            item.occurrencePercentage !== null &&
+                            item.occurrencePercentage !== "",
+                        )
+                        .map((item) => (
+                          <div
+                            key={item.product.id}
+                            className="flex items-center justify-between p-3"
+                          >
+                            <div>
+                              <p className="font-semibold text-slate-900">
+                                {item.product.product_name}
+                              </p>
+                              <p className="text-sm text-indigo-600 font-medium">
+                                {item.occurrencePercentage}% Occurrence
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  setSelectedOccurProduct(item.product.id);
+                                  setOccurPercent(
+                                    item.occurrencePercentage || "",
+                                  );
+                                  setSelectedProducts(
+                                    selectedProducts.map((p) =>
+                                      p.product.id === item.product.id
+                                        ? {
+                                            ...p,
+                                            occurrencePercentage: undefined,
+                                          }
+                                        : p,
+                                    ),
+                                  );
+                                }}
+                                className="text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  setSelectedProducts(
+                                    selectedProducts.map((p) =>
+                                      p.product.id === item.product.id
+                                        ? {
+                                            ...p,
+                                            occurrencePercentage: undefined,
+                                          }
+                                        : p,
+                                    ),
+                                  );
+                                }}
+                                className="text-red-500 hover:text-red-700 hover:bg-red-50"
+                              >
+                                Remove
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-6 text-slate-500 text-sm border border-dashed rounded-lg border-slate-200 bg-slate-50/50">
+                      No custom product occurrences configured. All products
+                      will default to random probability (50%).
+                    </div>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Other Details */}
         <Card>
@@ -1580,6 +1243,262 @@ export default function GeneratePurchaseInvoice() {
             </div>
           </CardContent>
         </Card>
+
+        {/* Purchase Value Calculator Card */}
+        <Card
+          className={cn(
+            "border shadow-sm transition-colors duration-200",
+            status === "valid" &&
+              "bg-green-50/70 border-green-200 text-green-950",
+            status === "incomplete" &&
+              "bg-amber-50/70 border-amber-200 text-amber-900",
+            status === "invalid" && "bg-red-50/70 border-red-200 text-red-950",
+          )}
+        >
+          <CardHeader className="pb-3 border-b border-slate-100">
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              Purchase Planning Assistant - Summary
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="pt-4 space-y-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-6 text-sm">
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Target Purchase Amount
+                </span>
+                <span className="text-lg font-mono font-semibold text-slate-900">
+                  ₹
+                  {totalAmount.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Estimated Invoice Count
+                </span>
+                <span className="text-lg font-semibold text-slate-900">
+                  {estimatedInvoices} Invoices
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Selected Products
+                </span>
+                <span className="text-lg font-semibold text-slate-900">
+                  {selectedCount} Products
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Est. Minimum Purchase Value
+                </span>
+                <span className="text-lg font-mono font-semibold text-slate-900">
+                  ₹
+                  {batchMin.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Est. Maximum Purchase Value
+                </span>
+                <span className="text-lg font-mono font-semibold text-slate-900">
+                  ₹
+                  {batchMax.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block mb-1">
+                  Validation Status
+                </span>
+                <span
+                  className={cn(
+                    "font-semibold text-xs px-2.5 py-1 rounded-full inline-block uppercase tracking-wider",
+                    status === "valid" && "bg-green-100 text-green-800",
+                    status === "incomplete" && "bg-amber-100 text-amber-800",
+                    status === "invalid" && "bg-red-100 text-red-800",
+                  )}
+                >
+                  {status === "valid" && "✅ Ready to Generate"}
+                  {status === "incomplete" && "⚠️ Incomplete Details"}
+                  {status === "invalid" && "❌ Invalid Budget Range"}
+                </span>
+              </div>
+            </div>
+
+            {status === "invalid" && (
+              <div className="p-3 bg-red-100/80 rounded-lg border border-red-200 text-xs text-red-800 font-medium mt-4">
+                The requested Target Purchase Amount cannot be achieved using
+                the configured Product Rules. Please adjust either the Target
+                Purchase Amount or the Min/Max Invoice limits.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Product Contribution Breakdown Card */}
+        {selectedProducts.length > 0 && (
+          <Card className="border shadow-sm">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base font-semibold">
+                Product Constraints & Occurrence
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Desktop Table View */}
+              <div className="hidden sm:block overflow-x-auto border rounded-lg border-slate-200">
+                <table className="w-full text-xs text-left text-slate-600 border-collapse">
+                  <thead className="bg-slate-50 font-medium text-slate-500 border-b border-slate-200">
+                    <tr>
+                      <th className="px-4 py-2.5">Product Name</th>
+                      <th className="px-4 py-2.5 text-right">Occurrence %</th>
+                      <th className="px-4 py-2.5 text-right">Min Qty / Day</th>
+                      <th className="px-4 py-2.5 text-right">Max Qty / Day</th>
+                      <th className="px-4 py-2.5 text-right">Min Rate</th>
+                      <th className="px-4 py-2.5 text-right">Max Rate</th>
+                      <th className="px-4 py-2.5 text-right font-medium text-slate-800">
+                        Min Val / Day
+                      </th>
+                      <th className="px-4 py-2.5 text-right font-medium text-slate-800">
+                        Max Val / Day
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {productBreakdown.map((item) => (
+                      <tr
+                        key={item.product_id}
+                        onClick={() => handleProductRowClick(item.product_id)}
+                        className="hover:bg-slate-50/80 cursor-pointer transition-colors"
+                      >
+                        <td className="px-4 py-2.5 font-medium text-slate-800 flex items-center gap-1.5">
+                          <span>{item.product_name}</span>
+                          <span className="text-[10px] text-slate-400 font-normal">
+                            ({item.unit})
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono">
+                          {item.occurrence_percentage
+                            ? `${item.occurrence_percentage}%`
+                            : "Default (50%)"}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono">
+                          {item.min_qty.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono">
+                          {item.max_qty.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono">
+                          ₹{item.min_rate.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono">
+                          ₹{item.max_rate.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono font-medium text-slate-900 bg-slate-50/30">
+                          ₹
+                          {item.min_val.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono font-medium text-slate-900 bg-slate-50/30">
+                          ₹
+                          {item.max_val.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile Card-based View */}
+              <div className="block sm:hidden space-y-3">
+                {productBreakdown.map((item) => (
+                  <div
+                    key={item.product_id}
+                    onClick={() => handleProductRowClick(item.product_id)}
+                    className="p-3 border rounded-lg bg-slate-50/50 hover:bg-slate-50 cursor-pointer transition-colors space-y-2"
+                  >
+                    <div className="flex justify-between items-center">
+                      <span className="font-semibold text-slate-800">
+                        {item.product_name}
+                      </span>
+                      <span className="text-[11px] text-slate-500 font-mono">
+                        Occurrence:{" "}
+                        {item.occurrence_percentage
+                          ? `${item.occurrence_percentage}%`
+                          : "Default (50%)"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      <div>
+                        <span className="text-slate-400 block">
+                          Min Val/Day ({item.min_qty} {item.unit})
+                        </span>
+                        <span className="font-bold font-mono text-slate-800">
+                          ₹
+                          {item.min_val.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block">
+                          Max Val/Day ({item.max_qty} {item.unit})
+                        </span>
+                        <span className="font-bold font-mono text-slate-800">
+                          ₹
+                          {item.max_val.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Contribution Totals Section */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-3 border-t border-slate-200 text-sm">
+                <span className="text-slate-500 font-medium">
+                  Batch Possible Range
+                </span>
+                <div className="flex flex-col sm:flex-row gap-4 sm:text-right">
+                  <div>
+                    <span className="text-xs text-slate-400 block">
+                      Total Minimum Achievable Value
+                    </span>
+                    <span className="font-semibold font-mono text-slate-800">
+                      ₹
+                      {batchMin.toLocaleString("en-IN", {
+                        minimumFractionDigits: 2,
+                      })}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-xs text-slate-400 block">
+                      Total Maximum Achievable Value
+                    </span>
+                    <span className="font-semibold font-mono text-slate-800">
+                      ₹
+                      {batchMax.toLocaleString("en-IN", {
+                        minimumFractionDigits: 2,
+                      })}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       {/* Submit Button */}

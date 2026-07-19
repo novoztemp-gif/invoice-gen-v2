@@ -46,6 +46,7 @@ export type SelectedProductItem = {
   perDayRateMin: string;
   perDayRateMax: string;
   monthlyQty?: string;
+  occurrencePercentage?: string;
 };
 
 export interface UseInvoiceFormParams {
@@ -91,15 +92,6 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
   const [tempProduct, setTempProduct] = useState<Product | null>(null);
   const [issuingCompanyOpen, setIssuingCompanyOpen] = useState(false);
   const [productOpen, setProductOpen] = useState(false);
-
-  const [recurringProducts, setRecurringProducts] = useState<
-    { product_id: string; percentage: string }[]
-  >([]);
-  const [recurringProductOpen, setRecurringProductOpen] = useState(false);
-  const [tempRecurringProduct, setTempRecurringProduct] = useState({
-    product_id: "",
-    percentage: "",
-  });
 
   const [isValidating, setIsValidating] = useState(false);
   const [isReviewOpen, setIsReviewOpen] = useState(false);
@@ -248,6 +240,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         perDayRateMin: rule.rate_min.toString(),
         perDayRateMax: rule.rate_max.toString(),
         monthlyQty: "",
+        occurrencePercentage: "",
       },
     ]);
     setTempProduct(null);
@@ -256,52 +249,6 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
   const handleRemoveProduct = (productId: string) => {
     setSelectedProducts(
       selectedProducts.filter((p) => p.product.id !== productId),
-    );
-  };
-
-  const handleAddRecurringProduct = () => {
-    if (!tempRecurringProduct.product_id) return;
-    const percentage = parseFloat(tempRecurringProduct.percentage);
-    if (isNaN(percentage) || percentage < 1 || percentage > 100) {
-      setErrorPopup("Percentage must be between 1 and 100");
-      return;
-    }
-    const exists = recurringProducts.some(
-      (p) => p.product_id === tempRecurringProduct.product_id,
-    );
-    if (exists) {
-      setErrorPopup("This product is already in the recurring list.");
-      return;
-    }
-
-    const isSelected = selectedProducts.some(
-      (p) => p.product.id === tempRecurringProduct.product_id,
-    );
-    if (!isSelected) {
-      setErrorPopup(
-        "Recurring products must be selected in the main Products list first.",
-      );
-      return;
-    }
-
-    const currentTotal = recurringProducts.reduce(
-      (sum, p) => sum + parseFloat(p.percentage),
-      0,
-    );
-    if (currentTotal + percentage > 100) {
-      setErrorPopup(
-        `Total percentage cannot exceed 100%. Current total is ${currentTotal}%.`,
-      );
-      return;
-    }
-
-    setRecurringProducts([...recurringProducts, { ...tempRecurringProduct }]);
-    setTempRecurringProduct({ product_id: "", percentage: "" });
-  };
-
-  const handleRemoveRecurringProduct = (productId: string) => {
-    setRecurringProducts(
-      recurringProducts.filter((p) => p.product_id !== productId),
     );
   };
 
@@ -327,6 +274,11 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
   };
 
   const validateInvoiceBatch = async () => {
+    if (batchType === "SALES") {
+      await createInvoiceBatch();
+      return;
+    }
+
     setIsValidating(true);
     try {
       const response = await fetch("/api/validate-invoice-batch", {
@@ -430,10 +382,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
               perDayRateMin: item.perDayRateMin,
               perDayRateMax: item.perDayRateMax,
             })),
-            recurringProducts: recurringProducts.map((rp) => ({
-              product_id: rp.product_id,
-              percentage: parseFloat(rp.percentage),
-            })),
+            recurringProducts: [],
             stockSourceBatchId: formData.stockSourceBatchId,
             userId: user.id,
           }),
@@ -493,11 +442,11 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             perDayQtyMax: item.perDayQtyMax,
             perDayRateMin: item.perDayRateMin,
             perDayRateMax: item.perDayRateMax,
+            occurrencePercentage: item.occurrencePercentage
+              ? parseFloat(item.occurrencePercentage)
+              : null,
           })),
-          recurring_products: recurringProducts.map((rp) => ({
-            product_id: rp.product_id,
-            percentage: parseFloat(rp.percentage),
-          })),
+          recurring_products: [],
           status: "pending",
           created_by: user.id,
         })
@@ -508,30 +457,6 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         console.error("Error creating invoice batch:", error);
         setErrorPopup(`Failed to create invoice batch: ${error.message}`);
         return;
-      }
-
-      // If PURCHASE batch, insert actual quantities into purchase_batch_products table
-      if (batchType === "PURCHASE" && data) {
-        const purchaseProductsToInsert = selectedProducts.map((item) => ({
-          batch_id: data.id,
-          product_id: item.product.id,
-          monthly_quantity: parseFloat(item.monthlyQty || "0"),
-        }));
-
-        const { error: purchaseProductsError } = await supabase
-          .from("purchase_batch_products")
-          .insert(purchaseProductsToInsert);
-
-        if (purchaseProductsError) {
-          console.error(
-            "Error saving purchase batch products:",
-            purchaseProductsError,
-          );
-          setErrorPopup(
-            `Batch created, but failed to save monthly quantities: ${purchaseProductsError.message}`,
-          );
-          return;
-        }
       }
 
       console.log("Invoice batch created:", data);
@@ -573,16 +498,6 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     for (let i = 0; i < selectedProducts.length; i++) {
       const product = selectedProducts[i];
 
-      if (batchType === "PURCHASE") {
-        const monthlyQty = parseFloat(product.monthlyQty || "");
-        if (isNaN(monthlyQty) || monthlyQty <= 0) {
-          setErrorPopup(
-            `Product "${product.product.product_name}": Please enter a valid Monthly Purchase Quantity greater than 0!`,
-          );
-          return;
-        }
-      }
-
       const minQty = parseFloat(product.perDayQtyMin);
       const maxQty = parseFloat(product.perDayQtyMax);
       const minRate = parseFloat(product.perDayRateMin);
@@ -614,6 +529,15 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           `Product "${product.product.product_name}": Minimum rate (${minRate}) cannot be greater than maximum rate (${maxRate})!`,
         );
         return;
+      }
+      if (product.occurrencePercentage) {
+        const occPct = parseFloat(product.occurrencePercentage);
+        if (isNaN(occPct) || occPct < 0 || occPct > 100) {
+          setErrorPopup(
+            `Product "${product.product.product_name}": Occurrence percentage must be a number between 0 and 100!`,
+          );
+          return;
+        }
       }
     }
 
@@ -753,10 +677,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             perDayRateMin: item.perDayRateMin,
             perDayRateMax: item.perDayRateMax,
           })),
-          recurringProducts: recurringProducts.map((rp) => ({
-            product_id: rp.product_id,
-            percentage: parseFloat(rp.percentage),
-          })),
+          recurringProducts: [],
           stockSourceBatchId: formData.stockSourceBatchId,
           userId: user.id,
           invoicesOverride: adjustedInvoices,
@@ -808,11 +729,6 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     setIssuingCompanyOpen,
     productOpen,
     setProductOpen,
-    recurringProducts,
-    recurringProductOpen,
-    setRecurringProductOpen,
-    tempRecurringProduct,
-    setTempRecurringProduct,
     isValidating,
     formData,
     setFormData,
@@ -824,8 +740,6 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     handleSelectAllCustomers,
     handleAddProduct,
     handleRemoveProduct,
-    handleAddRecurringProduct,
-    handleRemoveRecurringProduct,
     handleSubmit,
     resetForm,
     isReviewOpen,

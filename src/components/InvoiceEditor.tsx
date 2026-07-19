@@ -115,8 +115,13 @@ export default function InvoiceEditor({
           transport_mode: transportMode,
           vehicle_number: vehicleNumber,
           date_of_supply: dateOfSupply,
-          products: productRows,
-          total_amount: totalAmountBeforeTax,
+          products: productRows.map((pr) => ({
+            ...pr,
+            quantity: Number(pr.quantity) || 0,
+            rate: Number(pr.rate) || 0,
+            amount: Number(pr.amount) || 0,
+          })),
+          total_amount: Number(totalAmountBeforeTax) || 0,
         },
         setSavingStatus,
       );

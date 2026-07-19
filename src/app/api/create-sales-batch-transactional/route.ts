@@ -159,7 +159,10 @@ export async function POST(request: NextRequest) {
       invoice_date_to: invoiceDateTo,
       minimum_invoice_amount: Number(minimumInvoiceAmount),
       maximum_invoice_amount: Number(maximumInvoiceAmount),
-      total_amount: Number(totalAmount),
+      total_amount: invoices.reduce(
+        (sum: number, inv: any) => sum + Number(inv.total_amount || 0),
+        0,
+      ),
       financial_year: `FY${financialYearStart}-${String(financialYearEnd).slice(2)}`,
       products: products,
       recurring_products: recurringProducts,

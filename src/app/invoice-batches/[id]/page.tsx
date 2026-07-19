@@ -67,6 +67,7 @@ type InvoiceBatch = {
     perDayQtyMax: string;
     perDayRateMin: string;
     perDayRateMax: string;
+    occurrencePercentage?: number | null;
   }>;
   issuing_companies?: {
     company_name: string;
@@ -155,9 +156,47 @@ export default function BatchDetail() {
   // Calculate statistics
   const totalInvoices = invoices.length;
   const totalInvoiceAmount = invoices.reduce(
-    (sum, inv) => sum + inv.total_amount,
+    (sum, inv) => sum + Number(inv.total_amount || 0),
     0,
   );
+
+  // If batch_type === "PURCHASE" and invoices are generated, calculate summary stats:
+  let purchaseSummary = null;
+  if (batch?.batch_type === "PURCHASE" && invoices.length > 0) {
+    const productValueMap = new Map<string, number>();
+    let totalQty = 0;
+    const uniqueProducts = new Set<string>();
+
+    for (const inv of invoices) {
+      for (const p of inv.products) {
+        uniqueProducts.add(p.product_id);
+        const qty = Number(p.quantity || 0);
+        const amt = Number(p.amount || 0);
+        totalQty += qty;
+        productValueMap.set(
+          p.product_id,
+          (productValueMap.get(p.product_id) || 0) + amt,
+        );
+      }
+    }
+
+    const productValues = Array.from(productValueMap.values());
+    const highestProductVal =
+      productValues.length > 0 ? Math.max(...productValues) : 0;
+    const lowestProductVal =
+      productValues.length > 0 ? Math.min(...productValues) : 0;
+    const avgRate = totalQty > 0 ? totalInvoiceAmount / totalQty : 0;
+
+    purchaseSummary = {
+      totalValue: totalInvoiceAmount,
+      totalProducts: uniqueProducts.size,
+      totalQuantity: totalQty,
+      avgRate: avgRate,
+      highestVal: highestProductVal,
+      lowestVal: lowestProductVal,
+      invoicesCount: invoices.length,
+    };
+  }
 
   // Group invoices by date
   const invoicesByDate = invoices.reduce(
@@ -500,6 +539,9 @@ export default function BatchDetail() {
                     <TableHead>Product Name</TableHead>
                     <TableHead>HSN Code</TableHead>
                     <TableHead>Unit</TableHead>
+                    <TableHead className="text-right font-medium">
+                      Occurrence %
+                    </TableHead>
                     <TableHead className="text-right">Qty Min</TableHead>
                     <TableHead className="text-right">Qty Max</TableHead>
                     <TableHead className="text-right">Rate Min</TableHead>
@@ -514,6 +556,12 @@ export default function BatchDetail() {
                       </TableCell>
                       <TableCell>{product.hsn_code}</TableCell>
                       <TableCell>{product.unit_of_measure}</TableCell>
+                      <TableCell className="text-right font-mono text-xs">
+                        {product.occurrencePercentage !== undefined &&
+                        product.occurrencePercentage !== null
+                          ? `${product.occurrencePercentage}%`
+                          : "Default (50%)"}
+                      </TableCell>
                       <TableCell className="text-right">
                         {parseFloat(product.perDayQtyMin).toFixed(2)}
                       </TableCell>
@@ -530,6 +578,96 @@ export default function BatchDetail() {
                   ))}
                 </TableBody>
               </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Purchase Planning Assistant - Summary Card */}
+      {purchaseSummary && (
+        <Card className="border border-indigo-200 bg-indigo-50/20 shadow-sm">
+          <CardHeader className="pb-3 border-b border-indigo-100">
+            <CardTitle className="text-base font-semibold text-indigo-900 flex items-center gap-2">
+              Purchase Planning Assistant - Summary
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="pt-6 space-y-6">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-6 text-sm">
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Total Purchase Value
+                </span>
+                <span className="text-lg font-mono font-bold text-slate-900">
+                  ₹
+                  {purchaseSummary.totalValue.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Total Quantity Purchased
+                </span>
+                <span className="text-lg font-mono font-bold text-slate-900">
+                  {purchaseSummary.totalQuantity.toLocaleString()} units
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Average Purchase Rate
+                </span>
+                <span className="text-lg font-mono font-bold text-slate-900">
+                  ₹
+                  {purchaseSummary.avgRate.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-slate-500 font-medium block">
+                  Invoices Generated
+                </span>
+                <span className="text-lg font-bold text-slate-900">
+                  {purchaseSummary.invoicesCount} Invoices
+                </span>
+              </div>
+            </div>
+
+            <hr className="border-indigo-100" />
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 text-xs">
+              <div>
+                <span className="text-slate-400 block uppercase tracking-wider font-semibold">
+                  Total Distinct Products
+                </span>
+                <span className="font-bold text-sm text-slate-700 mt-1 block">
+                  {purchaseSummary.totalProducts} Products
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-400 block uppercase tracking-wider font-semibold">
+                  Highest Product Value Contribution
+                </span>
+                <span className="font-mono font-bold text-sm text-slate-700 mt-1 block">
+                  ₹
+                  {purchaseSummary.highestVal.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-400 block uppercase tracking-wider font-semibold">
+                  Lowest Product Value Contribution
+                </span>
+                <span className="font-mono font-bold text-sm text-slate-700 mt-1 block">
+                  ₹
+                  {purchaseSummary.lowestVal.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
             </div>
           </CardContent>
         </Card>

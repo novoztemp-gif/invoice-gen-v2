@@ -44,6 +44,7 @@ export type InvoiceBatch = {
     perDayQtyMax: string;
     perDayRateMin: string;
     perDayRateMax: string;
+    occurrencePercentage?: number | null;
   }>;
   issuing_companies?: {
     company_name: string;
