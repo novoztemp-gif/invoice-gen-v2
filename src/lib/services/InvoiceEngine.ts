@@ -583,7 +583,7 @@ export class InvoiceEngine {
   }
 
   /**
-   * Dynamically calculate carry-forward stock from the previous finalized Purchase Batch
+   * Dynamically calculate continuous carry-forward stock from all past daily stock ledger records
    */
   public static async getCarryForwardStock(
     supabase: SupabaseClient,
@@ -591,57 +591,75 @@ export class InvoiceEngine {
   ): Promise<Map<string, number>> {
     const carryForwardMap = new Map<string, number>();
 
-    // 1. Find the latest finalized purchase batch before currentBatchFromDate
-    const { data: prevBatch } = await supabase
-      .from("invoice_batch")
-      .select("id")
-      .eq("batch_type", "PURCHASE")
-      .eq("batch_status", "FINALIZED")
-      .lt("invoice_date_to", currentBatchFromDate)
-      .order("invoice_date_to", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (!prevBatch) {
-      return carryForwardMap;
-    }
-
-    // 2. Load the daily stock ledger rows for this previous batch
+    // Load all ledger rows before currentBatchFromDate
     const { data: ledgerRows } = await supabase
       .from("daily_stock_ledger")
-      .select(
-        "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
-      )
-      .eq("purchase_batch_id", prevBatch.id)
-      .order("ledger_date", { ascending: true });
+      .select("product_id, purchased_quantity, sold_quantity, ledger_date")
+      .lt("ledger_date", currentBatchFromDate);
 
     if (!ledgerRows || ledgerRows.length === 0) {
       return carryForwardMap;
     }
 
-    // 3. Compute dynamic carry forward for the previous batch
-    const productGroups = new Map<string, any[]>();
+    const netStockMap = new Map<string, { purchased: number; sold: number }>();
+
     for (const row of ledgerRows) {
-      if (!productGroups.has(row.product_id)) {
-        productGroups.set(row.product_id, []);
-      }
-      productGroups.get(row.product_id)!.push(row);
+      const pId = row.product_id;
+      const current = netStockMap.get(pId) || { purchased: 0, sold: 0 };
+      current.purchased += Number(row.purchased_quantity || 0);
+      current.sold += Number(row.sold_quantity || 0);
+      netStockMap.set(pId, current);
     }
 
-    for (const [productId, rows] of productGroups.entries()) {
-      let carryForward = Number(rows[0].opening_stock) || 0;
-
-      for (const row of rows) {
-        const opening = carryForward;
-        const purchased = Number(row.purchased_quantity) || 0;
-        const sold = Number(row.sold_quantity) || 0;
-        carryForward = Math.max(0, opening + purchased - sold);
-      }
-
-      carryForwardMap.set(productId, carryForward);
+    for (const [pId, totals] of netStockMap.entries()) {
+      const netRemaining = Math.max(0, totals.purchased - totals.sold);
+      carryForwardMap.set(pId, Math.round(netRemaining * 100) / 100);
     }
 
     return carryForwardMap;
+  }
+
+  /**
+   * Validate that proposed invoice quantities do not exceed total available stock per product
+   */
+  public static validateStockLimits(
+    proposedInvoices: any[],
+    availableStockMap: Map<string, number>,
+  ): { isValid: boolean; message?: string; exceedDetails?: any[] } {
+    const proposedSums = new Map<string, number>();
+
+    for (const inv of proposedInvoices || []) {
+      for (const p of inv.products || []) {
+        proposedSums.set(
+          p.product_id,
+          (proposedSums.get(p.product_id) || 0) + Number(p.quantity || 0),
+        );
+      }
+    }
+
+    const exceeds: any[] = [];
+    for (const [pId, proposedQty] of proposedSums.entries()) {
+      const available = availableStockMap.get(pId) || 0;
+      if (proposedQty > available + 0.001) {
+        exceeds.push({
+          productId: pId,
+          proposed: proposedQty,
+          available: available,
+          deficit: Math.round((proposedQty - available) * 100) / 100,
+        });
+      }
+    }
+
+    if (exceeds.length > 0) {
+      return {
+        isValid: false,
+        message:
+          "Stock allocation exceeds available inventory for one or more products.",
+        exceedDetails: exceeds,
+      };
+    }
+
+    return { isValid: true };
   }
 
   /**

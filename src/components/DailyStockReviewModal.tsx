@@ -42,12 +42,74 @@ export function DailyStockReviewModal({
   onRowsChange,
 }: DailyStockReviewModalProps) {
   const [rows, setRows] = useState<StockReviewRow[]>([]);
+  const [autoAllocate, setAutoAllocate] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setRows(JSON.parse(JSON.stringify(initialRows)));
+      setAutoAllocate(false);
     }
   }, [isOpen, initialRows]);
+
+  // Execute Auto Allocation across dates per product
+  const performAutoAllocation = (currentRows: StockReviewRow[]) => {
+    const updatedRows = JSON.parse(JSON.stringify(currentRows));
+    const productIds = [...new Set(updatedRows.map((r: any) => r.product_id))];
+
+    for (const pId of productIds) {
+      const pRows = updatedRows
+        .filter((r: any) => r.product_id === pId)
+        .sort((a: any, b: any) => a.date.localeCompare(b.date));
+
+      if (pRows.length === 0) continue;
+
+      // Total available stock for this product across the date range
+      const initialOpening = Number(pRows[0].opening_stock) || 0;
+      const totalPurchased = pRows.reduce(
+        (sum: number, r: any) => sum + (Number(r.purchased_quantity) || 0),
+        0,
+      );
+      const totalAvailable = initialOpening + totalPurchased;
+      const dailyTarget = roundToQuarterIncrement(
+        totalAvailable / pRows.length,
+      );
+
+      let runningCarryForward = initialOpening;
+
+      for (const row of pRows) {
+        row.opening_stock = runningCarryForward;
+        const available =
+          Math.round(
+            (row.opening_stock + Number(row.purchased_quantity)) * 100,
+          ) / 100;
+        let proposed = Math.min(dailyTarget, available);
+        proposed = roundToQuarterIncrement(Math.max(0, proposed));
+
+        row.proposed_sold = proposed;
+        row.remaining_stock =
+          Math.round((available - row.proposed_sold) * 100) / 100;
+
+        runningCarryForward = row.remaining_stock;
+      }
+    }
+
+    return updatedRows;
+  };
+
+  const handleToggleAutoAllocate = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const checked = e.target.checked;
+    setAutoAllocate(checked);
+
+    if (checked) {
+      const allocated = performAutoAllocation(rows);
+      setRows(allocated);
+      onRowsChange?.(allocated);
+    } else {
+      const reset = JSON.parse(JSON.stringify(initialRows));
+      setRows(reset);
+      onRowsChange?.(reset);
+    }
+  };
 
   // Helper to get a random target remaining stock between 0 and 15 (0.25 increments)
   const getRandomTargetRemaining = () => {
@@ -117,10 +179,29 @@ export function DailyStockReviewModal({
   };
 
   const checkRowInvalid = (row: StockReviewRow) => {
-    return row.remaining_stock < 0 || row.remaining_stock > 15;
+    return row.remaining_stock < 0;
   };
 
   const isInvalid = rows.some((row) => checkRowInvalid(row));
+
+  // Compute live per-product final remaining stock summary
+  const finalProductSummaries = React.useMemo(() => {
+    const productMap = new Map<
+      string,
+      { name: string; remaining: number; unit: string }
+    >();
+    const sorted = [...rows].sort((a, b) => a.date.localeCompare(b.date));
+
+    for (const r of sorted) {
+      productMap.set(r.product_id, {
+        name: r.product_name,
+        remaining: r.remaining_stock,
+        unit: r.unit,
+      });
+    }
+
+    return Array.from(productMap.values());
+  }, [rows]);
 
   const handleSaveClick = () => {
     if (isInvalid) return;
@@ -197,13 +278,73 @@ export function DailyStockReviewModal({
           </p>
         </DialogHeader>
 
+        {/* Top Controls: Auto Allocate Toggle & Live Stock Summary */}
+        <div className="space-y-3 my-2">
+          {/* Auto Allocate Available Stock Checkbox Toggle */}
+          <div className="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-lg p-3">
+            <div className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                id="autoAllocateToggle"
+                checked={autoAllocate}
+                onChange={handleToggleAutoAllocate}
+                className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-950 cursor-pointer"
+              />
+              <label
+                htmlFor="autoAllocateToggle"
+                className="text-sm font-semibold text-slate-900 cursor-pointer select-none"
+              >
+                Auto Allocate Available Stock
+              </label>
+            </div>
+            <span className="text-xs text-slate-500 font-medium">
+              (Default: OFF) — Evenly distributes available inventory across
+              sales dates
+            </span>
+          </div>
+
+          {/* Live Remaining Stock Summary Panel */}
+          <div className="bg-slate-900 text-white p-3.5 rounded-lg border border-slate-800 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Remaining Stock After Current Batch
+              </span>
+              <span className="text-xs text-slate-400 font-mono">
+                Updates Live
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2 pt-1">
+              {finalProductSummaries.map((p) => (
+                <div
+                  key={p.name}
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-semibold border ${
+                    p.remaining < 0
+                      ? "bg-red-500/20 text-red-300 border-red-500/30"
+                      : "bg-slate-800 text-slate-100 border-slate-700"
+                  }`}
+                >
+                  <span className="text-slate-300">{p.name}:</span>
+                  <span
+                    className={`font-mono text-sm ${
+                      p.remaining < 0
+                        ? "text-red-400 font-bold"
+                        : "text-emerald-400 font-bold"
+                    }`}
+                  >
+                    {p.remaining.toFixed(2)} {p.unit}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
         {isInvalid && (
           <div className="my-2 bg-red-50 text-red-950 border border-red-200 rounded-lg p-3 flex items-center gap-2">
             <AlertCircle className="h-5 w-5 text-red-600 shrink-0" />
             <p className="text-sm text-red-800">
-              One or more days have invalid remaining stock. Remaining Stock
-              must be between 0 and 15 units (inclusive). Please correct them to
-              continue.
+              One or more items exceed available stock (Remaining Stock cannot
+              be negative). Please reduce proposed sold quantities to continue.
             </p>
           </div>
         )}
