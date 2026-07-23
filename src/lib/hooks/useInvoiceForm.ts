@@ -714,37 +714,23 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       }
     }
 
-    // ── Category Party Availability Validation ──
-    const meatAlloc =
-      categorySplits.find((s) => s.category_name === "Meat")?.amount || 0;
-    const fruitAlloc =
-      categorySplits.find((s) => s.category_name === "Fruits")?.amount || 0;
-
-    const partyTerm = batchType === "PURCHASE" ? "Supplier" : "Customer";
+    // ── General Party & Product Availability Validation ──
+    const partyTerm =
+      batchType === "PURCHASE" ? "Supplier" : "Receiving Customer";
     const availableParties = receivingCompanies;
 
-    if (meatAlloc > 0) {
-      const hasMeatParty = availableParties.some(
-        (p: any) => (p.category || "Meat") === "Meat",
+    if (!availableParties || availableParties.length === 0) {
+      setErrorPopup(
+        `No ${partyTerm}s are available. Please create at least one ${partyTerm} before generating invoices.`,
       );
-      if (!hasMeatParty) {
-        setErrorPopup(
-          `No Meat ${partyTerm}s are available. Please create at least one Meat ${partyTerm}.`,
-        );
-        return;
-      }
+      return;
     }
 
-    if (fruitAlloc > 0) {
-      const hasFruitParty = availableParties.some(
-        (p: any) => (p.category || "Meat") === "Fruits",
+    if (!products || products.length === 0) {
+      setErrorPopup(
+        "No products are available in the selected category. Please create products before generating invoices.",
       );
-      if (!hasFruitParty) {
-        setErrorPopup(
-          `No Fruit ${partyTerm}s are available. Please create at least one Fruit ${partyTerm}.`,
-        );
-        return;
-      }
+      return;
     }
 
     // ── Intelligent Pre-Generation Capacity Check (Daily Billing Rule) ──
