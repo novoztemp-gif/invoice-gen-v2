@@ -302,16 +302,19 @@ export class InvoiceEngine {
       batchType,
     } = params;
 
-    const receivingCompanyIdResolved =
+    const resolvedPartyId =
       receivingCompanyId ||
       selectedCustomers[0] ||
       (majorCustomers[0] ? majorCustomers[0].customer_id : null);
+
+    const isPurchase = batchType.toUpperCase() === "PURCHASE";
 
     const { data, error } = await supabase
       .from("invoice_batch")
       .insert({
         issuing_company_id: issuingCompanyId,
-        receiving_company_id: receivingCompanyIdResolved,
+        supplier_id: isPurchase ? resolvedPartyId : null,
+        receiving_company_id: isPurchase ? null : resolvedPartyId,
         selected_customers: selectedCustomers,
         major_customers: majorCustomers.map((m) => ({
           customer_id: m.customer_id,

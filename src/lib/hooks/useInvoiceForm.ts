@@ -494,15 +494,18 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         return;
       }
 
-      // PURCHASE path (unchanged)
+      // PURCHASE path
+      const selectedSupplierId =
+        selectedCustomers[0] ||
+        (majorCustomers[0] ? majorCustomers[0].customer_id : null);
+
       const { data, error } = await supabase
         .from("invoice_batch")
         .insert({
           issuing_company_id: selectedIssuingCompany?.id,
           stock_source_batch_id: null,
-          receiving_company_id:
-            selectedCustomers[0] ||
-            (majorCustomers[0] ? majorCustomers[0].customer_id : null),
+          supplier_id: selectedSupplierId,
+          receiving_company_id: null,
           selected_customers: selectedCustomers,
           major_customers: majorCustomers.map((m) => ({
             customer_id: m.customer_id,

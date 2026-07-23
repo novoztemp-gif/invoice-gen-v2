@@ -64,7 +64,8 @@ export default function PurchaseInvoiceBatches() {
             `
             *,
             issuing_companies:issuing_company_id(company_name),
-            receiving_companies:receiving_company_id(company_name)
+            receiving_companies:receiving_company_id(company_name),
+            suppliers:supplier_id(company_name)
           `,
           )
           .eq("batch_type", "PURCHASE")
@@ -181,7 +182,7 @@ export default function PurchaseInvoiceBatches() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {batches.map((batch) => (
+                  {batches.map((batch: any) => (
                     <TableRow
                       key={batch.id}
                       className="cursor-pointer hover:bg-slate-50 transition-colors"
@@ -211,7 +212,11 @@ export default function PurchaseInvoiceBatches() {
                               </Badge>
                             );
                           }
-                          return batch.receiving_companies?.company_name || "—";
+                          return (
+                            batch.suppliers?.company_name ||
+                            batch.receiving_companies?.company_name ||
+                            "—"
+                          );
                         })()}
                       </TableCell>
                       <TableCell>

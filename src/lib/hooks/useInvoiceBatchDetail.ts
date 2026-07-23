@@ -126,7 +126,8 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
           issuing_companies:issuing_company_id(
             id, company_name, address, gstin, phone, bank_account_name, bank_name, account_number, ifsc_code, pan, branch
           ),
-          receiving_companies:receiving_company_id(company_name)
+          receiving_companies:receiving_company_id(company_name),
+          suppliers:supplier_id(company_name)
         `,
         )
         .eq("id", batchId)
