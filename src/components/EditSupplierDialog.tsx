@@ -22,7 +22,6 @@ type Supplier = {
   pan?: string | null;
   state: string;
   state_code?: string;
-  category?: string;
 };
 
 export function EditSupplierDialog({
@@ -75,7 +74,6 @@ export function EditSupplierDialog({
           pan: pan ? pan.toUpperCase() : null,
           state: formData.state,
           state_code: formData.state_code,
-          category: formData.category || "Meat",
           updated_at: new Date().toISOString(),
         })
         .eq("id", supplier.id);
@@ -173,22 +171,6 @@ export function EditSupplierDialog({
                   setFormData({ ...formData, state_code: e.target.value })
                 }
               />
-            </div>
-
-            <div className="col-span-2">
-              <Label htmlFor="edit_category">Supplier Category *</Label>
-              <select
-                id="edit_category"
-                value={formData.category || "Meat"}
-                onChange={(e) =>
-                  setFormData({ ...formData, category: e.target.value })
-                }
-                required
-                className="w-full h-9 rounded-md border border-slate-200 bg-white px-3 py-1 text-xs shadow-2xs focus:outline-hidden focus:ring-1 focus:ring-slate-950"
-              >
-                <option value="Meat">Meat</option>
-                <option value="Fruits">Fruits</option>
-              </select>
             </div>
           </div>
 

@@ -34,7 +34,6 @@ export function AddReceivingCompanyDialog() {
       pan: formData.get("pan") as string,
       state: formData.get("state") as string,
       state_code: formData.get("state_code") as string,
-      category: (formData.get("category") as string) || "Meat",
     };
 
     const { error: insertError } = await supabase
@@ -92,20 +91,6 @@ export function AddReceivingCompanyDialog() {
             <div className="space-y-2">
               <Label htmlFor="state_code">State Code</Label>
               <Input id="state_code" name="state_code" />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="category">Customer Category *</Label>
-              <select
-                id="category"
-                name="category"
-                defaultValue="Meat"
-                required
-                className="w-full h-9 rounded-md border border-slate-200 bg-white px-3 py-1 text-xs shadow-2xs focus:outline-hidden focus:ring-1 focus:ring-slate-950"
-              >
-                <option value="Meat">Meat</option>
-                <option value="Fruits">Fruits</option>
-              </select>
             </div>
 
             <div className="space-y-2 md:col-span-2">

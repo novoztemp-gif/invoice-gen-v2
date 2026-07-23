@@ -23,7 +23,6 @@ type Supplier = {
   pan?: string | null;
   state: string;
   state_code?: string;
-  category?: string;
   created_at: string;
   updated_at: string;
 };
@@ -160,7 +159,6 @@ export function SuppliersTable({ suppliers }: { suppliers: Supplier[] }) {
                     {getSortIcon("state")}
                   </Button>
                 </TableHead>
-                <TableHead className="min-w-[100px]">Category</TableHead>
                 <TableHead className="min-w-[100px]">State Code</TableHead>
                 <TableHead className="min-w-[80px]">Actions</TableHead>
               </TableRow>
@@ -185,18 +183,6 @@ export function SuppliersTable({ suppliers }: { suppliers: Supplier[] }) {
                   <TableCell>
                     <span className="inline-flex items-center whitespace-nowrap">
                       {supplier.state}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <span
-                      className={cn(
-                        "px-2 py-0.5 rounded text-xs font-semibold border",
-                        (supplier.category || "Meat") === "Meat"
-                          ? "bg-rose-50 text-rose-700 border-rose-200"
-                          : "bg-amber-50 text-amber-700 border-amber-200",
-                      )}
-                    >
-                      {supplier.category || "Meat"}
                     </span>
                   </TableCell>
                   <TableCell className="font-mono text-sm whitespace-nowrap">
