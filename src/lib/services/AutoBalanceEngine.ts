@@ -1,4 +1,5 @@
 import { SupabaseClient } from "@supabase/supabase-js";
+import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
 
 interface Product {
   product_id: string;
@@ -71,13 +72,15 @@ export class AutoBalanceEngine {
       }
 
       // 2. Fetch all other invoices
-      const { data: allOtherInvoices, error: fetchError } = await this.supabase
-        .from("invoice")
-        .select("*")
-        .eq("invoice_batch_id", batchId)
-        .neq("id", editedInvoiceId);
+      const batchInvoices = await fetchAllInvoicesForBatch(
+        this.supabase,
+        batchId,
+      );
+      const allOtherInvoices = batchInvoices.filter(
+        (inv) => inv.id !== editedInvoiceId,
+      );
 
-      if (fetchError || !allOtherInvoices || allOtherInvoices.length === 0) {
+      if (!allOtherInvoices || allOtherInvoices.length === 0) {
         throw new Error("Could not fetch remaining invoices to balance.");
       }
 
@@ -245,12 +248,13 @@ export class AutoBalanceEngine {
       }));
 
       // 6.5. Pre-validate batch total invariant in-memory before submitting database updates
-      const { data: allInvoices, error: allFetchError } = await this.supabase
-        .from("invoice")
-        .select("id, total_amount")
-        .eq("invoice_batch_id", batchId);
+      const allInvoices = await fetchAllInvoicesForBatch(
+        this.supabase,
+        batchId,
+        "id, total_amount",
+      );
 
-      if (allFetchError || !allInvoices) {
+      if (!allInvoices || allInvoices.length === 0) {
         throw new Error(
           "Validation failed: Could not fetch invoices to verify batch total.",
         );

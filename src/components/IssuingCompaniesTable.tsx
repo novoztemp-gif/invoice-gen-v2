@@ -17,6 +17,7 @@ import { EditIssuingCompanyDialog } from "./EditIssuingCompanyDialog";
 type IssuingCompany = {
   id: string;
   company_name: string;
+  abbreviation?: string;
   address: string;
   gstin: string;
   pan: string;
@@ -139,6 +140,7 @@ export function IssuingCompaniesTable({
                     {getSortIcon("company_name")}
                   </Button>
                 </TableHead>
+                <TableHead className="min-w-[100px]">Abbr</TableHead>
                 <TableHead className="min-w-[300px]">Address</TableHead>
                 <TableHead className="min-w-[140px]">
                   GSTIN
@@ -176,6 +178,11 @@ export function IssuingCompaniesTable({
                 <TableRow key={company.id}>
                   <TableCell className="font-medium">
                     {company.company_name}
+                  </TableCell>
+                  <TableCell>
+                    <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-800 border border-slate-200">
+                      {company.abbreviation || "—"}
+                    </span>
                   </TableCell>
                   <TableCell className="text-sm">
                     <div className="max-w-[300px] text-wrap">

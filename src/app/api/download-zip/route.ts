@@ -3,6 +3,7 @@ import JSZip from "jszip";
 import { NextRequest, NextResponse } from "next/server";
 import { generatePurchasePDFBuffer } from "@/lib/services/PdfExportService";
 import { createClient } from "@/lib/supabase/server";
+import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -36,14 +37,12 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // 2. Fetch all invoices for this batch
-  const { data: invoices, error: invoicesError } = await supabase
-    .from("invoice")
-    .select("*")
-    .eq("invoice_batch_id", batchId)
-    .order("invoice_number", { ascending: true });
-
-  if (invoicesError || !invoices) {
+  // 2. Fetch all invoices for this batch without 1000-row PostgREST truncation
+  let invoices: any[] = [];
+  try {
+    invoices = await fetchAllInvoicesForBatch(supabase, batchId);
+  } catch (invoicesError: any) {
+    console.error("Failed to fetch invoices for ZIP:", invoicesError);
     return NextResponse.json(
       { message: "Failed to fetch invoices" },
       { status: 500 },
@@ -473,7 +472,7 @@ export async function GET(request: NextRequest) {
     // Bottom section: Goods Despatched
     ws.mergeCells(`A${currentRow}:C${currentRow}`);
     const cellGoodsTitle = ws.getCell(`A${currentRow}`);
-    cellGoodsTitle.value = "Goods Despatched";
+    cellGoodsTitle.value = "✅ GOODS DISPATCHED";
     cellGoodsTitle.font = { bold: true, color: { argb: "FF000080" } };
     cellGoodsTitle.alignment = { horizontal: "center" };
 

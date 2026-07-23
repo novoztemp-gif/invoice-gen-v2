@@ -3,6 +3,14 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { MAX_INVOICES_PER_BATCH } from "@/lib/constants/invoice";
+import type { ValidationGuidanceData } from "@/components/ValidationGuidanceModal";
+import type { CategorySplitItem } from "@/components/CategorySplitSection";
+import {
+  InvoiceNumberingService,
+  type InvoiceSequencePreview,
+  type InvoiceType,
+} from "@/lib/services/InvoiceNumberingService";
 
 function formatDateForStorage(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -37,6 +45,7 @@ export type Product = {
   product_name: string;
   hsn_code: string;
   unit_of_measure: string;
+  category_id?: string | null;
 };
 
 export type SelectedProductItem = {
@@ -65,16 +74,25 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
   >([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [productRules, setProductRules] = useState<any[]>([]);
+  const [categorySplits, setCategorySplits] = useState<CategorySplitItem[]>([
+    { category_name: "Meat", percentage: 70, amount: 0 },
+    { category_name: "Fruits", percentage: 30, amount: 0 },
+  ]);
   const [errorPopup, setErrorPopup] = useState<string | null>(null);
+  const [validationGuidance, setValidationGuidance] =
+    useState<ValidationGuidanceData | null>(null);
 
   const [selectedIssuingCompany, setSelectedIssuingCompany] =
     useState<IssuingCompany | null>(null);
+  const [sequencePreview, setSequencePreview] =
+    useState<InvoiceSequencePreview | null>(null);
   const [selectedCustomers, setSelectedCustomers] = useState<string[]>([]);
   const [majorCustomers, setMajorCustomers] = useState<
     Array<{
       customer_id: string;
       amount: string;
       invoice_count: string;
+      max_invoice_amount: string;
     }>
   >([]);
 
@@ -84,6 +102,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     customer_id: "",
     amount: "",
     invoice_count: "1",
+    max_invoice_amount: "",
   });
 
   const [selectedProducts, setSelectedProducts] = useState<
@@ -131,6 +150,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
 
   useEffect(() => {
     const fetchData = async () => {
+      const partyTable =
+        batchType === "PURCHASE" ? "suppliers" : "receiving_companies";
+
       const [issuingRes, receivingRes, productsRes, rulesRes] =
         await Promise.all([
           supabase
@@ -138,7 +160,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             .select("*")
             .order("company_name", { ascending: true }),
           supabase
-            .from("receiving_companies")
+            .from(partyTable)
             .select("*")
             .order("company_name", { ascending: true }),
           supabase
@@ -155,7 +177,31 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     };
 
     fetchData();
-  }, []);
+  }, [batchType]);
+
+  useEffect(() => {
+    if (
+      !selectedIssuingCompany?.id ||
+      !formData.financialYearStart ||
+      !formData.financialYearEnd
+    ) {
+      setSequencePreview(null);
+      return;
+    }
+    const fyString = `${formData.financialYearStart}-${String(formData.financialYearEnd).slice(-2)}`;
+    const invType: InvoiceType = batchType === "PURCHASE" ? "P" : "S";
+    InvoiceNumberingService.fetchSequencePreview(
+      supabase,
+      selectedIssuingCompany.id,
+      fyString,
+      invType,
+    ).then((res) => setSequencePreview(res));
+  }, [
+    selectedIssuingCompany?.id,
+    formData.financialYearStart,
+    formData.financialYearEnd,
+    batchType,
+  ]);
 
   const handleIssuingCompanyChange = (companyId: string) => {
     const company = issuingCompanies.find((c) => c.id === companyId);
@@ -171,25 +217,41 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
 
   const handleAddMajorCustomer = () => {
     if (!tempMajorCustomer.customer_id) return;
-    if (
-      !tempMajorCustomer.amount ||
-      parseFloat(tempMajorCustomer.amount) <= 0
-    ) {
+    const amt = parseFloat(tempMajorCustomer.amount);
+    if (!tempMajorCustomer.amount || isNaN(amt) || amt <= 0) {
       setErrorPopup("Amount must be greater than 0");
       return;
     }
-    if (
-      !tempMajorCustomer.invoice_count ||
-      parseInt(tempMajorCustomer.invoice_count, 10) < 1
-    ) {
+    const invCount = parseInt(tempMajorCustomer.invoice_count, 10);
+    if (!tempMajorCustomer.invoice_count || isNaN(invCount) || invCount < 1) {
       setErrorPopup("Invoices must be at least 1");
       return;
     }
+    const maxAmt = parseFloat(tempMajorCustomer.max_invoice_amount);
+    if (!tempMajorCustomer.max_invoice_amount || isNaN(maxAmt) || maxAmt <= 0) {
+      setErrorPopup(
+        "Maximum amount per invoice is required and must be greater than 0",
+      );
+      return;
+    }
+
+    if (maxAmt * invCount < amt) {
+      setErrorPopup(
+        "The specified maximum invoice amount is too low to distribute the total amount across the selected number of invoices. Please increase the invoice limit or the number of invoices.",
+      );
+      return;
+    }
+
     setMajorCustomers([...majorCustomers, { ...tempMajorCustomer }]);
     setSelectedCustomers(
       selectedCustomers.filter((id) => id !== tempMajorCustomer.customer_id),
     );
-    setTempMajorCustomer({ customer_id: "", amount: "", invoice_count: "1" });
+    setTempMajorCustomer({
+      customer_id: "",
+      amount: "",
+      invoice_count: "1",
+      max_invoice_amount: "",
+    });
   };
 
   const handleRemoveMajorCustomer = (index: number) => {
@@ -355,6 +417,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
               customer_id: m.customer_id,
               amount: parseFloat(m.amount) || 0,
               invoice_count: parseInt(m.invoice_count, 10) || 1,
+              max_invoice_amount: m.max_invoice_amount
+                ? parseFloat(m.max_invoice_amount)
+                : undefined,
             })),
             transportMode: formData.transportMode,
             vehicleNumber: formData.vehicleNumber || "",
@@ -443,6 +508,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             customer_id: m.customer_id,
             amount: parseFloat(m.amount) || 0,
             invoice_count: parseInt(m.invoice_count, 10) || 1,
+            max_invoice_amount: m.max_invoice_amount
+              ? parseFloat(m.max_invoice_amount)
+              : undefined,
           })),
           batch_type: formData.invoiceType,
           transport_mode: formData.transportMode,
@@ -646,7 +714,121 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       }
     }
 
+    // ── Category Party Availability Validation ──
+    const meatAlloc =
+      categorySplits.find((s) => s.category_name === "Meat")?.amount || 0;
+    const fruitAlloc =
+      categorySplits.find((s) => s.category_name === "Fruits")?.amount || 0;
+
+    const partyTerm = batchType === "PURCHASE" ? "Supplier" : "Customer";
+    const availableParties = receivingCompanies;
+
+    if (meatAlloc > 0) {
+      const hasMeatParty = availableParties.some(
+        (p: any) => (p.category || "Meat") === "Meat",
+      );
+      if (!hasMeatParty) {
+        setErrorPopup(
+          `No Meat ${partyTerm}s are available. Please create at least one Meat ${partyTerm}.`,
+        );
+        return;
+      }
+    }
+
+    if (fruitAlloc > 0) {
+      const hasFruitParty = availableParties.some(
+        (p: any) => (p.category || "Meat") === "Fruits",
+      );
+      if (!hasFruitParty) {
+        setErrorPopup(
+          `No Fruit ${partyTerm}s are available. Please create at least one Fruit ${partyTerm}.`,
+        );
+        return;
+      }
+    }
+
+    // ── Intelligent Pre-Generation Capacity Check (Daily Billing Rule) ──
+    const fromDate = new Date(formData.invoiceDateFrom);
+    const toDate = new Date(formData.invoiceDateTo);
+    const timeDiff = Math.abs(toDate.getTime() - fromDate.getTime());
+    const numberOfDays = Math.ceil(timeDiff / (1000 * 3600 * 24)) + 1;
+
+    const remainingAmount = totalAmount - totalMajor;
+    const regCustomerCount = selectedCustomers.length;
+
+    if (remainingAmount > 0.01 && regCustomerCount > 0) {
+      const avgInvoiceAmount =
+        (minimumInvoiceAmount + maximumInvoiceAmount) / 2;
+      const estimatedRequiredInvoices = Math.round(
+        remainingAmount / Math.max(1, avgInvoiceAmount),
+      );
+
+      if (estimatedRequiredInvoices > MAX_INVOICES_PER_BATCH) {
+        setErrorPopup(
+          `Estimated batch size (${estimatedRequiredInvoices.toLocaleString()} invoices) exceeds maximum capacity of ${MAX_INVOICES_PER_BATCH.toLocaleString()} invoices per batch. Please adjust total amount, invoice thresholds, or date range.`,
+        );
+        return;
+      }
+
+      // Under daily billing rule: max capacity = regCustomerCount * numberOfDays
+      const maxCapacity = regCustomerCount * numberOfDays;
+
+      if (estimatedRequiredInvoices > maxCapacity) {
+        const partyTerm =
+          batchType === "PURCHASE" ? "Suppliers" : "Receiving Customers";
+        const singlePartyTerm =
+          batchType === "PURCHASE" ? "Supplier" : "Receiving Customer";
+
+        const requiredCustomersCount = Math.ceil(
+          estimatedRequiredInvoices / numberOfDays,
+        );
+        const deficitCustomers = Math.max(
+          0,
+          requiredCustomersCount - regCustomerCount,
+        );
+
+        const targetAvgAmount = remainingAmount / Math.max(1, maxCapacity);
+        const rawMin = targetAvgAmount * 0.8;
+        const rawMax = targetAvgAmount * 1.2;
+        const suggestedMin =
+          Math.round(rawMin / 100) * 100 || Math.round(rawMin);
+        const suggestedMax =
+          Math.round(rawMax / 100) * 100 || Math.round(rawMax);
+
+        setValidationGuidance({
+          title: "Invoice Generation Cannot Proceed",
+          reason: `Under the Daily Billing Rule, each ${singlePartyTerm} can be billed at most once per day on any specific date.`,
+          partyTerm,
+          singlePartyTerm,
+          numberOfDays,
+          totalAmount: remainingAmount,
+          minAmount: minimumInvoiceAmount,
+          maxAmount: maximumInvoiceAmount,
+          avgAmount: avgInvoiceAmount,
+          estimatedRequiredInvoices,
+          availableCustomers: regCustomerCount,
+          maxCapacity,
+          deficitCustomers,
+          requiredCustomersCount,
+          suggestedMin,
+          suggestedMax,
+        });
+        return;
+      }
+    }
+
     validateInvoiceBatch();
+  };
+
+  const handleApplySuggestedLimits = (
+    suggestedMin: number,
+    suggestedMax: number,
+  ) => {
+    setFormData((prev) => ({
+      ...prev,
+      minimumInvoiceAmount: String(suggestedMin),
+      maximumInvoiceAmount: String(suggestedMax),
+    }));
   };
 
   const handleSaveSalesBatch = async (
@@ -690,6 +872,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             customer_id: m.customer_id,
             amount: parseFloat(m.amount) || 0,
             invoice_count: parseInt(m.invoice_count, 10) || 1,
+            max_invoice_amount: m.max_invoice_amount
+              ? parseFloat(m.max_invoice_amount)
+              : undefined,
           })),
           transportMode: formData.transportMode,
           vehicleNumber: formData.vehicleNumber || "",
@@ -785,8 +970,15 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     isReviewOpen,
     setIsReviewOpen,
     reviewRows,
+    setReviewRows,
     proposedInvoices,
     isSavingSales,
     handleSaveSalesBatch,
+    validationGuidance,
+    setValidationGuidance,
+    handleApplySuggestedLimits,
+    categorySplits,
+    setCategorySplits,
+    sequencePreview,
   };
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import { createClient } from "@/lib/supabase/server";
+import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
 
 export async function POST(request: NextRequest) {
   try {
@@ -27,12 +28,17 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === "FINALIZE") {
-      const { data: invoices, error: fetchError } = await supabase
-        .from("invoice")
-        .select("*")
-        .eq("invoice_batch_id", batchId);
+      let invoices: any[] = [];
+      try {
+        invoices = await fetchAllInvoicesForBatch(supabase, batchId);
+      } catch (fetchError: any) {
+        return NextResponse.json(
+          { message: "Failed to fetch invoices for finalization check." },
+          { status: 500 },
+        );
+      }
 
-      if (fetchError || !invoices || invoices.length === 0) {
+      if (!invoices || invoices.length === 0) {
         return NextResponse.json(
           { message: "Cannot finalize a batch with no invoices." },
           { status: 400 },

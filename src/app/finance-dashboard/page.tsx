@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 
 interface MappedInvoice {
   id: string;
@@ -123,12 +124,15 @@ export default function FinanceDashboardPage() {
 
         const batchIds = batches.map((b) => b.id);
 
-        // 3. Fetch all invoices for these batches
-        const { data: invoicesData, error: invoicesError } = await supabase
-          .from("invoice")
-          .select("id, invoice_batch_id, total_amount, invoice_date, products");
-
-        if (invoicesError) throw invoicesError;
+        // 3. Fetch all invoices for these batches without 1000-row PostgREST truncation
+        const invoicesData = await fetchAllQueryRows((from, to) =>
+          supabase
+            .from("invoice")
+            .select(
+              "id, invoice_batch_id, total_amount, invoice_date, products",
+            )
+            .range(from, to),
+        );
 
         // 4. Map batches and invoices in-memory
         const mapped = (invoicesData || []).map((inv) => {

@@ -126,6 +126,8 @@ export default function BatchDetail() {
     toggleDate,
   } = useInvoiceBatchDetail({ batchId });
 
+  const [isPreviewChallan, setIsPreviewChallan] = useState(false);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -805,56 +807,143 @@ export default function BatchDetail() {
                                     </p>
                                   </div>
                                 </div>
-                                <div className="mt-4 flex gap-2 w-full">
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    className="flex-1 text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-200"
-                                    onClick={() => {
-                                      setPreviewIndex(
-                                        invoices.findIndex(
-                                          (inv) => inv.id === invoice.id,
-                                        ),
-                                      );
-                                      setIsEditingMode(false);
-                                    }}
-                                  >
-                                    <Eye className="h-4 w-4 mr-2" />
-                                    Preview
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    className="flex-1 text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
-                                    onClick={() => {
-                                      setPreviewIndex(
-                                        invoices.findIndex(
-                                          (inv) => inv.id === invoice.id,
-                                        ),
-                                      );
-                                      setIsEditingMode(true);
-                                    }}
-                                  >
-                                    <Edit3 className="h-4 w-4 mr-2" />
-                                    Edit
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    className="flex-1 text-slate-600 hover:text-slate-900"
-                                    onClick={() => handleDownloadExcel(invoice)}
-                                    disabled={
-                                      !batch?.issuing_companies ||
-                                      Object.keys(receivingCustomers).length ===
-                                        0
-                                    }
-                                  >
-                                    <Download className="h-4 w-4 mr-2" />
-                                    {batch?.batch_type === "PURCHASE"
-                                      ? "Download PDF"
-                                      : "Download"}
-                                  </Button>
-                                </div>
+                                {batch?.batch_type === "PURCHASE" ? (
+                                  <div className="mt-4 flex flex-wrap gap-2 w-full">
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="flex-1 text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-200"
+                                      onClick={() => {
+                                        setPreviewIndex(
+                                          invoices.findIndex(
+                                            (inv) => inv.id === invoice.id,
+                                          ),
+                                        );
+                                        setIsEditingMode(false);
+                                        setIsPreviewChallan(false);
+                                      }}
+                                    >
+                                      <Eye className="h-4 w-4 mr-2" />
+                                      Preview
+                                    </Button>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="flex-1 text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
+                                      onClick={() => {
+                                        setPreviewIndex(
+                                          invoices.findIndex(
+                                            (inv) => inv.id === invoice.id,
+                                          ),
+                                        );
+                                        setIsEditingMode(true);
+                                        setIsPreviewChallan(false);
+                                      }}
+                                    >
+                                      <Edit3 className="h-4 w-4 mr-2" />
+                                      Edit
+                                    </Button>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="flex-1 text-slate-600 hover:text-slate-900"
+                                      onClick={() =>
+                                        handleDownloadExcel(invoice)
+                                      }
+                                    >
+                                      <Download className="h-4 w-4 mr-2" />
+                                      Download PDF
+                                    </Button>
+                                  </div>
+                                ) : (
+                                  <div className="mt-4 flex flex-wrap gap-2 w-full text-xs">
+                                    {/* 1. Preview Invoice */}
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="flex-1 min-w-[130px] text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-200"
+                                      onClick={() => {
+                                        setPreviewIndex(
+                                          invoices.findIndex(
+                                            (inv) => inv.id === invoice.id,
+                                          ),
+                                        );
+                                        setIsEditingMode(false);
+                                        setIsPreviewChallan(false);
+                                      }}
+                                    >
+                                      <Eye className="h-3.5 w-3.5 mr-1.5" />
+                                      Preview Invoice
+                                    </Button>
+
+                                    {/* 2. Edit */}
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="flex-1 min-w-[90px] text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
+                                      onClick={() => {
+                                        setPreviewIndex(
+                                          invoices.findIndex(
+                                            (inv) => inv.id === invoice.id,
+                                          ),
+                                        );
+                                        setIsEditingMode(true);
+                                        setIsPreviewChallan(false);
+                                      }}
+                                    >
+                                      <Edit3 className="h-3.5 w-3.5 mr-1.5" />
+                                      Edit
+                                    </Button>
+
+                                    {/* 3. Download Invoice */}
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="flex-1 min-w-[140px] text-slate-700 hover:text-slate-900"
+                                      onClick={() =>
+                                        handleDownloadExcel(invoice)
+                                      }
+                                    >
+                                      <Download className="h-3.5 w-3.5 mr-1.5" />
+                                      Download Invoice
+                                    </Button>
+
+                                    {/* 4. Preview Delivery Challan */}
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="flex-1 min-w-[160px] text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 border-emerald-200"
+                                      onClick={() => {
+                                        setPreviewIndex(
+                                          invoices.findIndex(
+                                            (inv) => inv.id === invoice.id,
+                                          ),
+                                        );
+                                        setIsEditingMode(false);
+                                        setIsPreviewChallan(true);
+                                      }}
+                                    >
+                                      <Eye className="h-3.5 w-3.5 mr-1.5" />
+                                      Preview Delivery Challan
+                                    </Button>
+
+                                    {/* 5. Download Delivery Challan */}
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="flex-1 min-w-[170px] text-teal-700 hover:text-teal-900 hover:bg-teal-50 border-teal-200"
+                                      onClick={() =>
+                                        triggerDownload(
+                                          `/api/download-invoice?invoiceId=${invoice.id}&isChallan=true`,
+                                          `Delivery_Challan_${invoice.invoice_number}.xlsx`,
+                                        )
+                                      }
+                                    >
+                                      <Download className="h-3.5 w-3.5 mr-1.5" />
+                                      Download Delivery Challan
+                                    </Button>
+                                  </div>
+                                )}
 
                                 <Table>
                                   <TableHeader>
@@ -1061,6 +1150,7 @@ export default function BatchDetail() {
         onPrev={() =>
           setPreviewIndex((p) => (p !== null ? Math.max(0, p - 1) : null))
         }
+        isDeliveryChallan={isPreviewChallan}
       />
 
       <InvoiceEditor

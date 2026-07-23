@@ -127,7 +127,8 @@ export async function POST(request: NextRequest) {
     const { data: allInvoices } = await supabase
       .from("invoice")
       .select("invoice_number")
-      .order("invoice_number", { ascending: false });
+      .order("invoice_number", { ascending: false })
+      .limit(1);
 
     let startingCounter = 1;
     if (allInvoices && allInvoices.length > 0) {

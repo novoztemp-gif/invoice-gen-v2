@@ -37,14 +37,29 @@ export async function POST(request: NextRequest) {
 
     const supabase = await createClient();
 
-    // 1. Fetch daily stock ledger for the selected stock source purchase batch
-    const { data: ledgerData, error: ledgerError } = await supabase
+    // Support single or comma-separated batch IDs
+    const batchIds = stockSourceBatchId
+      .split(",")
+      .map((id: string) => id.trim())
+      .filter((id: string) => Boolean(id) && !id.startsWith("CARRY_FORWARD_"));
+
+    const primaryBatchId = batchIds[0] || stockSourceBatchId.split(",")[0];
+
+    // 1. Fetch daily stock ledger for the selected stock source purchase batch(es)
+    let ledgerQuery = supabase
       .from("daily_stock_ledger")
       .select(
         "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
       )
-      .eq("purchase_batch_id", stockSourceBatchId)
       .order("ledger_date", { ascending: true });
+
+    if (batchIds.length > 0) {
+      ledgerQuery = ledgerQuery.in("purchase_batch_id", batchIds);
+    } else {
+      ledgerQuery = ledgerQuery.eq("purchase_batch_id", primaryBatchId);
+    }
+
+    const { data: ledgerData, error: ledgerError } = await ledgerQuery;
 
     if (ledgerError) {
       return NextResponse.json(
@@ -84,7 +99,6 @@ export async function POST(request: NextRequest) {
     }
 
     // 2. Prepare the Batch Configuration object to pass to the engine
-    // Convert date parameters
     const fromDate = new Date(invoiceDateFrom);
     const toDate = new Date(invoiceDateTo);
     const timeDiff = toDate.getTime() - fromDate.getTime();
@@ -94,120 +108,57 @@ export async function POST(request: NextRequest) {
     const { data: allInvoices } = await supabase
       .from("invoice")
       .select("invoice_number")
-      .order("invoice_number", { ascending: false });
+      .order("invoice_number", { ascending: false })
+      .limit(1);
 
     let startingCounter = 1;
     if (allInvoices && allInvoices.length > 0) {
-      const counters = allInvoices
-        .map((inv) => {
-          const match = inv.invoice_number.match(/-(\d+)$/);
-          return match ? parseInt(match[1], 10) : 0;
-        })
-        .filter((num) => !isNaN(num));
-
-      if (counters.length > 0) {
-        startingCounter = Math.max(...counters) + 1;
+      for (const inv of allInvoices) {
+        const match = inv.invoice_number.match(/(\d+)$/);
+        if (match) {
+          startingCounter = parseInt(match[1], 10) + 1;
+          break;
+        }
       }
     }
 
-    // Mock batch config for engine processing
-    const mockBatch: any = {
-      id: "placeholder",
-      batch_type: "SALES",
-      invoice_date_from: invoiceDateFrom,
-      invoice_date_to: invoiceDateTo,
-      minimum_invoice_amount: Number(minimumInvoiceAmount),
-      maximum_invoice_amount: Number(maximumInvoiceAmount),
-      total_amount: Number(totalAmount),
-      products: products,
-      recurring_products: recurringProducts,
-      selected_customers: selectedCustomers,
-      major_customers: majorCustomers,
-      receiving_company_id: receivingCompanyId,
+    const batchConfig = {
+      issuingCompanyId,
+      receivingCompanyId,
+      selectedCustomers,
+      majorCustomers,
+      transportMode,
+      vehicleNumber,
+      dateOfSupply,
+      invoiceDateFrom,
+      invoiceDateTo,
+      minimumInvoiceAmount: parseFloat(minimumInvoiceAmount),
+      maximumInvoiceAmount: parseFloat(maximumInvoiceAmount),
+      totalAmount: parseFloat(totalAmount),
+      financialYearStart: parseInt(financialYearStart),
+      financialYearEnd: parseInt(financialYearEnd),
+      products,
+      recurringProducts: recurringProducts || [],
+      stockSourceBatchId: primaryBatchId,
+      availableStockMap,
+      numberOfDays,
+      startingCounter,
     };
 
-    // 3. Generate proposed invoices in-memory or use override
-    let invoices = body.invoicesOverride;
-    if (!invoices) {
-      invoices = (InvoiceEngine as any).generateInvoiceSplitupsInternal(
-        mockBatch,
-        numberOfDays,
-        fromDate,
-        startingCounter,
-        availableStockMap,
-      );
-    }
-
-    // Validate invoices data structure in memory
-    for (const inv of invoices) {
-      const validation = (InvoiceEngine as any).validateInvoiceData(inv);
-      if (!validation.isValid) {
-        return NextResponse.json(
-          { message: `Invoices validation failed: ${validation.message}` },
-          { status: 400 },
-        );
-      }
-      // Remove placeholders that are generated server-side or handled by the RPC
-      delete inv.invoice_batch_id;
-    }
-
-    // 4. Construct payload for RPC
-    const batchPayload = {
-      issuing_company_id: issuingCompanyId,
-      receiving_company_id: receivingCompanyId,
-      selected_customers: selectedCustomers,
-      major_customers: majorCustomers,
-      batch_type: "SALES",
-      transport_mode: transportMode,
-      vehicle_number: vehicleNumber || "",
-      date_of_supply: invoiceDateTo,
-      invoice_date_from: invoiceDateFrom,
-      invoice_date_to: invoiceDateTo,
-      minimum_invoice_amount: Number(minimumInvoiceAmount),
-      maximum_invoice_amount: Number(maximumInvoiceAmount),
-      total_amount: invoices.reduce(
-        (sum: number, inv: any) => sum + Number(inv.total_amount || 0),
-        0,
-      ),
-      financial_year: `FY${financialYearStart}-${String(financialYearEnd).slice(2)}`,
-      products: products,
-      recurring_products: recurringProducts,
-      status: "generated",
-      created_by: userId,
-    };
-
-    // 5. Invoke the atomic transactional PL/pgSQL function in Supabase
-    const { data: newBatchId, error: rpcError } = await supabase.rpc(
-      "create_sales_batch_transactional",
-      {
-        batch_payload: batchPayload,
-        invoices_payload: invoices,
-        stock_source_id: stockSourceBatchId,
-      },
+    // 3. Generate Proposed Sales Invoices using InvoiceEngine
+    const proposedInvoices = await InvoiceEngine.generateAndSaveInvoices(
+      supabase,
+      batchConfig as any,
     );
-
-    if (rpcError) {
-      console.error("RPC transaction error:", rpcError);
-      return NextResponse.json(
-        {
-          message: rpcError.message || "Atomic transaction failed to complete",
-        },
-        { status: 400 },
-      );
-    }
 
     return NextResponse.json({
       success: true,
-      batchId: newBatchId,
-      message: "Sales batch, invoices, and stock ledger updated atomically!",
+      proposedInvoices,
     });
   } catch (error: any) {
-    console.error("Error creating transactional Sales batch:", error);
+    console.error("Error generating proposed sales batch:", error);
     return NextResponse.json(
-      {
-        message:
-          error?.message || "An unexpected error occurred during creation",
-      },
+      { message: error?.message || "An unexpected error occurred" },
       { status: 500 },
     );
   }

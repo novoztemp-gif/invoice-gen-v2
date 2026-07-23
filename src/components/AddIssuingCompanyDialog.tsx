@@ -27,8 +27,28 @@ export function AddIssuingCompanyDialog() {
     setError(null);
 
     const formData = new FormData(e.currentTarget);
+    const company_name = (formData.get("company_name") as string)?.trim();
+    const abbreviation = (formData.get("abbreviation") as string)
+      ?.trim()
+      .toUpperCase();
+
+    if (!abbreviation) {
+      setError("Company Abbreviation is required.");
+      setLoading(false);
+      return;
+    }
+
+    if (!/^[A-Z0-9]{1,10}$/.test(abbreviation)) {
+      setError(
+        "Company Abbreviation must be 1 to 10 characters long and contain only uppercase letters and numbers (e.g. A1, AT, NOVOZ).",
+      );
+      setLoading(false);
+      return;
+    }
+
     const data = {
-      company_name: formData.get("company_name") as string,
+      company_name,
+      abbreviation,
       address: formData.get("address") as string,
       gstin: formData.get("gstin") as string,
       phone: formData.get("phone") as string,
@@ -85,6 +105,22 @@ export function AddIssuingCompanyDialog() {
             <div className="space-y-2">
               <Label htmlFor="company_name">Company Name *</Label>
               <Input id="company_name" name="company_name" required />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="abbreviation">Company Abbreviation *</Label>
+              <Input
+                id="abbreviation"
+                name="abbreviation"
+                placeholder="e.g. A1, AT, NOVOZ"
+                maxLength={10}
+                onChange={(e) => {
+                  e.target.value = e.target.value
+                    .toUpperCase()
+                    .replace(/[^A-Z0-9]/g, "");
+                }}
+                required
+              />
             </div>
 
             <div className="space-y-2">

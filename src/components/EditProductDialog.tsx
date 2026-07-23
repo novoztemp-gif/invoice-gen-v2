@@ -19,6 +19,7 @@ type Product = {
   product_name: string;
   hsn_code: string;
   unit_of_measure: string;
+  category?: string;
 };
 
 export function EditProductDialog({
@@ -46,6 +47,7 @@ export function EditProductDialog({
           product_name: formData.product_name,
           hsn_code: formData.hsn_code,
           unit_of_measure: formData.unit_of_measure,
+          category: formData.category || "Meat",
           updated_at: new Date().toISOString(),
         })
         .eq("id", product.id);
@@ -108,6 +110,22 @@ export function EditProductDialog({
               placeholder="e.g., kg, litre, piece"
               required
             />
+          </div>
+
+          <div>
+            <Label htmlFor="category">Category *</Label>
+            <select
+              id="category"
+              value={formData.category || "Meat"}
+              onChange={(e) =>
+                setFormData({ ...formData, category: e.target.value })
+              }
+              required
+              className="w-full h-9 rounded-md border border-slate-200 bg-white px-3 py-1 text-xs shadow-2xs focus:outline-hidden focus:ring-1 focus:ring-slate-950"
+            >
+              <option value="Meat">Meat</option>
+              <option value="Fruits">Fruits</option>
+            </select>
           </div>
 
           <div className="flex justify-end gap-2">

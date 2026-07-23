@@ -13,6 +13,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { EditReceivingCompanyDialog } from "./EditReceivingCompanyDialog";
+import { cn } from "@/lib/utils";
 
 type ReceivingCompany = {
   id: string;
@@ -22,6 +23,7 @@ type ReceivingCompany = {
   pan?: string | null;
   state: string;
   state_code?: string;
+  category?: string;
   created_at: string;
   updated_at: string;
 };
@@ -164,6 +166,7 @@ export function ReceivingCompaniesTable({
                     {getSortIcon("state")}
                   </Button>
                 </TableHead>
+                <TableHead className="min-w-[100px]">Category</TableHead>
                 <TableHead className="min-w-[100px]">State Code</TableHead>
                 <TableHead className="min-w-[80px]">Actions</TableHead>
               </TableRow>
@@ -188,6 +191,18 @@ export function ReceivingCompaniesTable({
                   <TableCell>
                     <span className="inline-flex items-center whitespace-nowrap">
                       {company.state}
+                    </span>
+                  </TableCell>
+                  <TableCell>
+                    <span
+                      className={cn(
+                        "px-2 py-0.5 rounded text-xs font-semibold border",
+                        (company.category || "Meat") === "Meat"
+                          ? "bg-rose-50 text-rose-700 border-rose-200"
+                          : "bg-amber-50 text-amber-700 border-amber-200",
+                      )}
+                    >
+                      {company.category || "Meat"}
                     </span>
                   </TableCell>
                   <TableCell className="font-mono text-sm whitespace-nowrap">

@@ -1,610 +1,581 @@
 "use client";
 
-import {
-  ArrowRight,
-  Building2,
-  FileText,
-  IndianRupee,
-  Loader2,
-  Package,
-} from "lucide-react";
+import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { createClient } from "@/lib/supabase/client";
+import {
+  AnalyticsEngine,
+  PurchaseMetrics,
+  SalesMetrics,
+} from "@/lib/services/AnalyticsEngine";
+import {
+  GlobalFilterHeader,
+  GlobalFilterState,
+} from "@/components/analytics/GlobalFilterHeader";
+import { VisualBarChart } from "@/components/analytics/VisualBarChart";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { Package, FileText, Loader2, PlusCircle } from "lucide-react";
 
-type DashboardStats = {
-  totalBatches: number;
-  pendingBatches: number;
-  generatedBatches: number;
-  totalInvoices: number;
-  totalInvoiceAmount: number;
-  avgInvoiceAmount: number;
-  batchTotalAmount: number;
-  issuingCompanies: number;
-  receivingCompanies: number;
-  totalProducts: number;
-  recentBatches: Array<{
-    id: string;
-    status: string;
-    total_amount: number;
-    created_at: string;
-    batch_type: string;
-  }>;
-};
-
-type InvoiceTypeStats = {
-  totalBatches: number;
-  pendingBatches: number;
-  generatedBatches: number;
-  totalInvoices: number;
-  totalInvoiceAmount: number;
-  avgInvoiceAmount: number;
-  batchTotalAmount: number;
-  recentBatches: Array<{
-    id: string;
-    status: string;
-    total_amount: number;
-    created_at: string;
-    batch_type: string;
-  }>;
-};
-
-export default function Home() {
+export default function MainDashboardPage() {
   const router = useRouter();
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [salesStats, setSalesStats] = useState<InvoiceTypeStats | null>(null);
-  const [purchaseStats, setPurchaseStats] = useState<InvoiceTypeStats | null>(
-    null,
-  );
+  const supabase = createClient();
   const [loading, setLoading] = useState(true);
 
+  const [filterOptions, setFilterOptions] = useState<any>({
+    financialYears: [],
+    purchaseBatches: [],
+    salesBatches: [],
+    products: [],
+    customers: [],
+  });
+
+  const [filter, setFilter] = useState<GlobalFilterState>({
+    financialYear: "All",
+    startDate: "",
+    endDate: "",
+    purchaseBatchId: "All",
+    salesBatchId: "All",
+    productId: "All",
+    customerId: "All",
+  });
+
+  const [purchaseMetrics, setPurchaseMetrics] =
+    useState<PurchaseMetrics | null>(null);
+  const [salesMetrics, setSalesMetrics] = useState<SalesMetrics | null>(null);
+
   useEffect(() => {
-    fetchDashboardStats();
+    async function initOptions() {
+      const opts = await AnalyticsEngine.getFilterOptions(supabase);
+      setFilterOptions(opts);
+    }
+    initOptions();
   }, []);
 
-  const fetchDashboardStats = async () => {
-    try {
-      const supabase = createClient();
-
-      // Fetch batches with batch_type
-      const { data: batches } = await supabase
-        .from("invoice_batch")
-        .select("id, status, total_amount, created_at, batch_type")
-        .order("created_at", { ascending: false });
-
-      // Fetch invoices
-      const { data: invoices } = await supabase
-        .from("invoice")
-        .select("id, total_amount");
-
-      // Fetch companies
-      const { data: issuingCompanies } = await supabase
-        .from("issuing_companies")
-        .select("id");
-
-      const { data: receivingCompanies } = await supabase
-        .from("receiving_companies")
-        .select("id");
-
-      // Fetch products
-      const { data: products } = await supabase.from("products").select("id");
-
-      // Calculate overall stats
-      const totalBatches = batches?.length || 0;
-      const pendingBatches =
-        batches?.filter((b) => b.status === "pending").length || 0;
-      const generatedBatches =
-        batches?.filter((b) => b.status === "generated").length || 0;
-      const totalInvoices = invoices?.length || 0;
-      const totalInvoiceAmount =
-        invoices?.reduce((sum, inv) => sum + inv.total_amount, 0) || 0;
-      const avgInvoiceAmount =
-        totalInvoices > 0 ? totalInvoiceAmount / totalInvoices : 0;
-      const batchTotalAmount =
-        batches?.reduce((sum, b) => sum + b.total_amount, 0) || 0;
-      const totalProducts = products?.length || 0;
-      const recentBatches = batches?.slice(0, 5) || [];
-
-      setStats({
-        totalBatches,
-        pendingBatches,
-        generatedBatches,
-        totalInvoices,
-        totalInvoiceAmount,
-        avgInvoiceAmount,
-        batchTotalAmount,
-        issuingCompanies: issuingCompanies?.length || 0,
-        receivingCompanies: receivingCompanies?.length || 0,
-        totalProducts,
-        recentBatches,
-      });
-
-      // Calculate sales stats
-      const salesBatches =
-        batches?.filter((b) => b.batch_type === "SALES" || !b.batch_type) || [];
-      const salesTotalBatches = salesBatches.length;
-      const salesPendingBatches = salesBatches.filter(
-        (b) => b.status === "pending",
-      ).length;
-      const salesGeneratedBatches = salesBatches.filter(
-        (b) => b.status === "generated",
-      ).length;
-      const salesBatchTotalAmount = salesBatches.reduce(
-        (sum, b) => sum + b.total_amount,
-        0,
-      );
-      const salesRecentBatches = salesBatches.slice(0, 5);
-
-      setSalesStats({
-        totalBatches: salesTotalBatches,
-        pendingBatches: salesPendingBatches,
-        generatedBatches: salesGeneratedBatches,
-        totalInvoices: 0, // Will be calculated per-batch in real scenario
-        totalInvoiceAmount: 0,
-        avgInvoiceAmount: 0,
-        batchTotalAmount: salesBatchTotalAmount,
-        recentBatches: salesRecentBatches,
-      });
-
-      // Calculate purchase stats
-      const purchaseBatches =
-        batches?.filter((b) => b.batch_type === "PURCHASE") || [];
-      const purchaseTotalBatches = purchaseBatches.length;
-      const purchasePendingBatches = purchaseBatches.filter(
-        (b) => b.status === "pending",
-      ).length;
-      const purchaseGeneratedBatches = purchaseBatches.filter(
-        (b) => b.status === "generated",
-      ).length;
-      const purchaseBatchTotalAmount = purchaseBatches.reduce(
-        (sum, b) => sum + b.total_amount,
-        0,
-      );
-      const purchaseRecentBatches = purchaseBatches.slice(0, 5);
-
-      setPurchaseStats({
-        totalBatches: purchaseTotalBatches,
-        pendingBatches: purchasePendingBatches,
-        generatedBatches: purchaseGeneratedBatches,
-        totalInvoices: 0,
-        totalInvoiceAmount: 0,
-        avgInvoiceAmount: 0,
-        batchTotalAmount: purchaseBatchTotalAmount,
-        recentBatches: purchaseRecentBatches,
-      });
-    } catch (error) {
-      console.error("Error fetching dashboard stats:", error);
-    } finally {
-      setLoading(false);
+  useEffect(() => {
+    async function loadMetrics() {
+      setLoading(true);
+      try {
+        const [pData, sData] = await Promise.all([
+          AnalyticsEngine.getPurchaseMetrics(supabase, filter),
+          AnalyticsEngine.getSalesMetrics(supabase, filter),
+        ]);
+        setPurchaseMetrics(pData);
+        setSalesMetrics(sData);
+      } catch (err) {
+        console.error("Error loading Main Dashboard analytics:", err);
+      } finally {
+        setLoading(false);
+      }
     }
+    loadMetrics();
+  }, [filter]);
+
+  const handleResetFilter = () => {
+    setFilter({
+      financialYear: "All",
+      startDate: "",
+      endDate: "",
+      purchaseBatchId: "All",
+      salesBatchId: "All",
+      productId: "All",
+      customerId: "All",
+    });
+  };
+
+  const formatCurrency = (val: number) => {
+    return `₹${val.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="space-y-4 pb-10">
+      {/* Page Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Dashboard</h1>
-          <p className="text-sm text-slate-600 mt-1">
-            Invoice generation system overview
+          <h1 className="text-xl font-bold text-slate-900 tracking-tight">
+            Main Dashboard
+          </h1>
+          <p className="text-slate-500 text-xs mt-0.5">
+            Central ERP analytics hub for Purchase & Sales performance
           </p>
         </div>
-        <Button
-          onClick={() => router.push("/generate-invoice")}
-          variant="default"
-        >
-          <FileText className="mr-2 h-4 w-4" />
-          New Batch
-        </Button>
+
+        <div className="flex gap-2">
+          <Button
+            onClick={() => router.push("/generate-purchase-invoice")}
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs border-slate-200"
+          >
+            <PlusCircle className="w-3.5 h-3.5 mr-1.5 stroke-[1.5]" />
+            Purchase Invoice
+          </Button>
+          <Button
+            onClick={() => router.push("/generate-invoice")}
+            size="sm"
+            className="h-8 text-xs bg-slate-800 hover:bg-slate-900"
+          >
+            <FileText className="w-3.5 h-3.5 mr-1.5 stroke-[1.5]" />
+            Sales Invoice
+          </Button>
+        </div>
       </div>
 
-      {/* Overall Statistics */}
-      <Card className="bg-gradient-to-br from-slate-50 to-slate-100 border-slate-200">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-slate-600 uppercase tracking-wide">
-            Overall Statistics
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div>
-              <p className="text-xs text-slate-600 font-medium">
-                Total Batches
-              </p>
-              <p className="text-2xl font-bold text-slate-900">
-                {stats?.totalBatches || 0}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-slate-600 font-medium">Total Amount</p>
-              <p className="text-2xl font-bold text-slate-900">
-                ₹
-                {(stats?.batchTotalAmount || 0).toLocaleString("en-IN", {
-                  minimumFractionDigits: 0,
-                  maximumFractionDigits: 0,
-                })}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-slate-600 font-medium">
-                Generated Batches
-              </p>
-              <p className="text-2xl font-bold text-green-600">
-                {stats?.generatedBatches || 0}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-slate-600 font-medium">
-                Pending Batches
-              </p>
-              <p className="text-2xl font-bold text-amber-600">
-                {stats?.pendingBatches || 0}
-              </p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      {/* Global Filter Bar */}
+      <GlobalFilterHeader
+        filterOptions={filterOptions}
+        filter={filter}
+        onFilterChange={setFilter}
+        onReset={handleResetFilter}
+      />
 
-      {/* Tabs for Sales and Purchase */}
       {loading ? (
-        <div className="flex items-center justify-center min-h-[400px]">
-          <Loader2 className="h-8 w-8 animate-spin text-slate-400" />
+        <div className="flex items-center justify-center min-h-[300px]">
+          <Loader2 className="w-6 h-6 animate-spin text-slate-600" />
         </div>
       ) : (
-        <Tabs defaultValue="sales" className="space-y-4">
-          <TabsList className="grid w-full max-w-md grid-cols-2">
-            <TabsTrigger value="sales" className="flex items-center gap-2">
-              <FileText className="h-4 w-4" />
-              Sales Invoices
+        <Tabs defaultValue="purchase" className="space-y-4">
+          <TabsList className="bg-slate-100 border border-slate-200 p-1 rounded-md grid grid-cols-2 max-w-xs h-9">
+            <TabsTrigger
+              value="purchase"
+              className="gap-1.5 font-medium text-xs rounded-xs"
+            >
+              <Package className="w-3.5 h-3.5 text-slate-600 stroke-[1.5]" />
+              Purchase Analytics
             </TabsTrigger>
-            <TabsTrigger value="purchase" className="flex items-center gap-2">
-              <FileText className="h-4 w-4" />
-              Purchase Invoices
+            <TabsTrigger
+              value="sales"
+              className="gap-1.5 font-medium text-xs rounded-xs"
+            >
+              <FileText className="w-3.5 h-3.5 text-slate-600 stroke-[1.5]" />
+              Sales Analytics
             </TabsTrigger>
           </TabsList>
 
-          {/* Sales Tab */}
-          <TabsContent value="sales" className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-xs font-medium text-slate-600 uppercase tracking-wide">
-                    Batches
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-1">
-                    <p className="text-3xl font-semibold text-slate-900">
-                      {salesStats?.totalBatches || 0}
-                    </p>
-                    <div className="flex gap-3 text-xs text-slate-600">
-                      <span>{salesStats?.generatedBatches || 0} generated</span>
-                      <span>•</span>
-                      <span>{salesStats?.pendingBatches || 0} pending</span>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-xs font-medium text-slate-600 uppercase tracking-wide">
-                    Total Amount
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-1">
-                    <p className="text-3xl font-semibold text-slate-900">
-                      ₹
-                      {(salesStats?.batchTotalAmount || 0).toLocaleString(
-                        "en-IN",
-                        {
-                          minimumFractionDigits: 0,
-                          maximumFractionDigits: 0,
-                        },
-                      )}
-                    </p>
-                    <p className="text-xs text-slate-600">
-                      Combined batch amounts
-                    </p>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-xs font-medium text-slate-600 uppercase tracking-wide">
-                    Status Distribution
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <div className="h-2 w-8 bg-green-500 rounded"></div>
-                      <span className="text-xs text-slate-600">
-                        {Math.round(
-                          ((salesStats?.generatedBatches || 0) /
-                            (salesStats?.totalBatches || 1)) *
-                            100,
-                        )}
-                        % Generated
+          {/* TAB 1: PURCHASE ANALYTICS */}
+          <TabsContent value="purchase" className="space-y-4">
+            {purchaseMetrics && (
+              <>
+                {/* Purchase KPI Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardContent className="p-3.5 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">
+                        Total Purchase Value
                       </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="h-2 w-8 bg-amber-500 rounded"></div>
-                      <span className="text-xs text-slate-600">
-                        {Math.round(
-                          ((salesStats?.pendingBatches || 0) /
-                            (salesStats?.totalBatches || 1)) *
-                            100,
-                        )}
-                        % Pending
-                      </span>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm font-medium">
-                  Recent Sales Batches
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {salesStats?.recentBatches &&
-                salesStats.recentBatches.length > 0 ? (
-                  <div className="space-y-3">
-                    {salesStats.recentBatches.map((batch) => (
-                      <div
-                        key={batch.id}
-                        className="flex items-center justify-between py-2 border-b border-slate-100 last:border-0 cursor-pointer hover:bg-slate-50 -mx-2 px-2 rounded"
-                        onClick={() =>
-                          router.push(`/invoice-batches/${batch.id}`)
-                        }
-                      >
-                        <div className="flex items-center gap-3">
-                          <FileText className="h-4 w-4 text-slate-400" />
-                          <div>
-                            <p className="text-sm font-medium text-slate-900">
-                              {new Date(batch.created_at).toLocaleDateString(
-                                "en-IN",
-                                {
-                                  day: "2-digit",
-                                  month: "short",
-                                  year: "numeric",
-                                },
-                              )}
-                            </p>
-                            <p className="text-xs text-slate-500 capitalize">
-                              {batch.status}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-sm font-medium text-slate-900">
-                            ₹{batch.total_amount.toLocaleString("en-IN")}
-                          </p>
-                        </div>
+                      <div className="text-lg font-bold font-mono text-slate-900">
+                        {formatCurrency(purchaseMetrics.totalPurchaseValue)}
                       </div>
-                    ))}
-                    <div className="pt-2">
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardContent className="p-3.5 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">
+                        Purchase Batches
+                      </span>
+                      <div className="text-lg font-bold text-slate-900">
+                        {purchaseMetrics.purchaseBatchCount}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardContent className="p-3.5 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">
+                        Purchased Quantity
+                      </span>
+                      <div className="text-lg font-bold font-mono text-slate-900">
+                        {purchaseMetrics.totalProductsPurchasedQty.toLocaleString(
+                          "en-IN",
+                        )}{" "}
+                        KG
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardContent className="p-3.5 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">
+                        Avg Batch Value
+                      </span>
+                      <div className="text-lg font-bold font-mono text-slate-900">
+                        {formatCurrency(purchaseMetrics.avgBatchValue)}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardContent className="p-3.5 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">
+                        Avg Invoice Value
+                      </span>
+                      <div className="text-lg font-bold font-mono text-slate-900">
+                        {formatCurrency(purchaseMetrics.avgInvoiceValue)}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {/* Purchase Charts */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <VisualBarChart
+                    title="Monthly Procurement Expenditure"
+                    subtitle="Monthly purchase total amount"
+                    data={purchaseMetrics.monthlyPurchases.map((m) => ({
+                      label: m.month,
+                      value: m.amount,
+                      color: "bg-slate-700",
+                    }))}
+                  />
+
+                  <VisualBarChart
+                    title="Product-wise Purchase Value"
+                    subtitle="Total purchase spending per product"
+                    data={purchaseMetrics.productPurchases.map((p) => ({
+                      label: p.product_name,
+                      value: p.amount,
+                      color: "bg-slate-800",
+                    }))}
+                  />
+                </div>
+
+                {/* Purchase Tables */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardHeader className="p-3 pb-2 border-b border-slate-100 flex flex-row items-center justify-between">
+                      <CardTitle className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                        Recent Purchase Batches
+                      </CardTitle>
                       <Button
-                        variant="outline"
                         size="sm"
-                        className="w-full"
-                        onClick={() => router.push("/invoice-batches")}
+                        variant="ghost"
+                        onClick={() => router.push("/purchase-invoice-batches")}
+                        className="h-6 text-xs px-2"
                       >
-                        View All Batches
+                        View All
                       </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-sm text-slate-500 text-center py-8">
-                    No sales batches created yet
-                  </p>
-                )}
-              </CardContent>
-            </Card>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      <div className="overflow-x-auto">
+                        <Table className="text-xs">
+                          <TableHeader className="bg-slate-50/70">
+                            <TableRow className="border-b border-slate-200">
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600">
+                                Batch ID
+                              </TableHead>
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600">
+                                Date Range
+                              </TableHead>
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600 text-right">
+                                Batch Amount
+                              </TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {purchaseMetrics.recentBatches.map((b) => (
+                              <TableRow
+                                key={b.id}
+                                className="cursor-pointer hover:bg-slate-50/80 border-b border-slate-100"
+                                onClick={() =>
+                                  router.push(`/invoice-batches/${b.id}`)
+                                }
+                              >
+                                <TableCell className="py-2 px-3 font-mono font-medium text-slate-900">
+                                  Batch ({b.id.slice(0, 8)})
+                                </TableCell>
+                                <TableCell className="py-2 px-3 text-slate-500">
+                                  {b.invoice_date_from} to {b.invoice_date_to}
+                                </TableCell>
+                                <TableCell className="py-2 px-3 font-mono text-right font-semibold text-slate-900">
+                                  {formatCurrency(Number(b.total_amount || 0))}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardHeader className="p-3 pb-2 border-b border-slate-100 flex flex-row items-center justify-between">
+                      <CardTitle className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                        Highest Value Purchase Batches
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      <div className="overflow-x-auto">
+                        <Table className="text-xs">
+                          <TableHeader className="bg-slate-50/70">
+                            <TableRow className="border-b border-slate-200">
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600">
+                                Batch ID
+                              </TableHead>
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600">
+                                Financial Year
+                              </TableHead>
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600 text-right">
+                                Batch Amount
+                              </TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {purchaseMetrics.largestBatches.map((b) => (
+                              <TableRow
+                                key={b.id}
+                                className="cursor-pointer hover:bg-slate-50/80 border-b border-slate-100"
+                                onClick={() =>
+                                  router.push(`/invoice-batches/${b.id}`)
+                                }
+                              >
+                                <TableCell className="py-2 px-3 font-mono font-medium text-slate-900">
+                                  Batch ({b.id.slice(0, 8)})
+                                </TableCell>
+                                <TableCell className="py-2 px-3 text-slate-500">
+                                  {b.financial_year}
+                                </TableCell>
+                                <TableCell className="py-2 px-3 font-mono text-right font-semibold text-slate-900">
+                                  {formatCurrency(Number(b.total_amount || 0))}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              </>
+            )}
           </TabsContent>
 
-          {/* Purchase Tab */}
-          <TabsContent value="purchase" className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-xs font-medium text-slate-600 uppercase tracking-wide">
-                    Batches
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-1">
-                    <p className="text-3xl font-semibold text-slate-900">
-                      {purchaseStats?.totalBatches || 0}
-                    </p>
-                    <div className="flex gap-3 text-xs text-slate-600">
-                      <span>
-                        {purchaseStats?.generatedBatches || 0} generated
+          {/* TAB 2: SALES ANALYTICS */}
+          <TabsContent value="sales" className="space-y-4">
+            {salesMetrics && (
+              <>
+                {/* Sales KPI Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardContent className="p-3.5 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">
+                        Total Revenue
                       </span>
-                      <span>•</span>
-                      <span>{purchaseStats?.pendingBatches || 0} pending</span>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-xs font-medium text-slate-600 uppercase tracking-wide">
-                    Total Amount
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-1">
-                    <p className="text-3xl font-semibold text-slate-900">
-                      ₹
-                      {(purchaseStats?.batchTotalAmount || 0).toLocaleString(
-                        "en-IN",
-                        {
-                          minimumFractionDigits: 0,
-                          maximumFractionDigits: 0,
-                        },
-                      )}
-                    </p>
-                    <p className="text-xs text-slate-600">
-                      Combined batch amounts
-                    </p>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-xs font-medium text-slate-600 uppercase tracking-wide">
-                    Status Distribution
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <div className="h-2 w-8 bg-green-500 rounded"></div>
-                      <span className="text-xs text-slate-600">
-                        {Math.round(
-                          ((purchaseStats?.generatedBatches || 0) /
-                            (purchaseStats?.totalBatches || 1)) *
-                            100,
-                        )}
-                        % Generated
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="h-2 w-8 bg-amber-500 rounded"></div>
-                      <span className="text-xs text-slate-600">
-                        {Math.round(
-                          ((purchaseStats?.pendingBatches || 0) /
-                            (purchaseStats?.totalBatches || 1)) *
-                            100,
-                        )}
-                        % Pending
-                      </span>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm font-medium">
-                  Recent Purchase Batches
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {purchaseStats?.recentBatches &&
-                purchaseStats.recentBatches.length > 0 ? (
-                  <div className="space-y-3">
-                    {purchaseStats.recentBatches.map((batch) => (
-                      <div
-                        key={batch.id}
-                        className="flex items-center justify-between py-2 border-b border-slate-100 last:border-0 cursor-pointer hover:bg-slate-50 -mx-2 px-2 rounded"
-                        onClick={() =>
-                          router.push(`/invoice-batches/${batch.id}`)
-                        }
-                      >
-                        <div className="flex items-center gap-3">
-                          <FileText className="h-4 w-4 text-slate-400" />
-                          <div>
-                            <p className="text-sm font-medium text-slate-900">
-                              {new Date(batch.created_at).toLocaleDateString(
-                                "en-IN",
-                                {
-                                  day: "2-digit",
-                                  month: "short",
-                                  year: "numeric",
-                                },
-                              )}
-                            </p>
-                            <p className="text-xs text-slate-500 capitalize">
-                              {batch.status}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-sm font-medium text-slate-900">
-                            ₹{batch.total_amount.toLocaleString("en-IN")}
-                          </p>
-                        </div>
+                      <div className="text-lg font-bold font-mono text-slate-900">
+                        {formatCurrency(salesMetrics.totalSalesValue)}
                       </div>
-                    ))}
-                    <div className="pt-2">
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardContent className="p-3.5 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">
+                        Sales Batches
+                      </span>
+                      <div className="text-lg font-bold text-slate-900">
+                        {salesMetrics.salesBatchCount}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardContent className="p-3.5 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">
+                        Total Invoices
+                      </span>
+                      <div className="text-lg font-bold text-slate-900">
+                        {salesMetrics.totalInvoicesCount}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardContent className="p-3.5 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">
+                        Avg Invoice Value
+                      </span>
+                      <div className="text-lg font-bold font-mono text-slate-900">
+                        {formatCurrency(salesMetrics.avgInvoiceValue)}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardContent className="p-3.5 space-y-1">
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">
+                        Customers Served
+                      </span>
+                      <div className="text-lg font-bold text-slate-900">
+                        {salesMetrics.customersServedCount}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {/* Sales Charts */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <VisualBarChart
+                    title="Monthly Sales Revenue Trend"
+                    subtitle="Monthly total revenue generated"
+                    data={salesMetrics.monthlySales.map((m) => ({
+                      label: m.month,
+                      value: m.amount,
+                      color: "bg-slate-800",
+                    }))}
+                  />
+
+                  <VisualBarChart
+                    title="Customer-wise Sales Breakdown"
+                    subtitle="Revenue generated per customer"
+                    data={salesMetrics.customerSales.map((c) => ({
+                      label: c.customer_name,
+                      value: c.amount,
+                      color: "bg-slate-700",
+                    }))}
+                  />
+
+                  <VisualBarChart
+                    title="Product-wise Sales Revenue"
+                    subtitle="Sales amount by product"
+                    data={salesMetrics.productSales.map((p) => ({
+                      label: p.product_name,
+                      value: p.amount,
+                      color: "bg-slate-800",
+                    }))}
+                  />
+
+                  <VisualBarChart
+                    title="Product-wise Sales Volume (KG)"
+                    subtitle="Quantity sold by product"
+                    valuePrefix=""
+                    valueSuffix=" KG"
+                    data={salesMetrics.productSales.map((p) => ({
+                      label: p.product_name,
+                      value: p.qty,
+                      color: "bg-slate-600",
+                    }))}
+                  />
+                </div>
+
+                {/* Sales Tables */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardHeader className="p-3 pb-2 border-b border-slate-100 flex flex-row items-center justify-between">
+                      <CardTitle className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                        Recent Sales Batches
+                      </CardTitle>
                       <Button
-                        variant="outline"
                         size="sm"
-                        className="w-full"
+                        variant="ghost"
                         onClick={() => router.push("/invoice-batches")}
+                        className="h-6 text-xs px-2"
                       >
-                        View All Batches
+                        View All
                       </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-sm text-slate-500 text-center py-8">
-                    No purchase batches created yet
-                  </p>
-                )}
-              </CardContent>
-            </Card>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      <div className="overflow-x-auto">
+                        <Table className="text-xs">
+                          <TableHeader className="bg-slate-50/70">
+                            <TableRow className="border-b border-slate-200">
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600">
+                                Batch ID
+                              </TableHead>
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600">
+                                Financial Year
+                              </TableHead>
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600 text-right">
+                                Batch Amount
+                              </TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {salesMetrics.recentSalesBatches.map((b) => (
+                              <TableRow
+                                key={b.id}
+                                className="cursor-pointer hover:bg-slate-50/80 border-b border-slate-100"
+                                onClick={() =>
+                                  router.push(`/invoice-batches/${b.id}`)
+                                }
+                              >
+                                <TableCell className="py-2 px-3 font-mono font-medium text-slate-900">
+                                  Batch ({b.id.slice(0, 8)})
+                                </TableCell>
+                                <TableCell className="py-2 px-3 text-slate-500">
+                                  {b.financial_year || "FY 2025-26"}
+                                </TableCell>
+                                <TableCell className="py-2 px-3 font-mono text-right font-semibold text-slate-900">
+                                  {formatCurrency(Number(b.total_amount || 0))}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+                    <CardHeader className="p-3 pb-2 border-b border-slate-100 flex flex-row items-center justify-between">
+                      <CardTitle className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                        Highest Value Customers
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      <div className="overflow-x-auto">
+                        <Table className="text-xs">
+                          <TableHeader className="bg-slate-50/70">
+                            <TableRow className="border-b border-slate-200">
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600">
+                                Customer Name
+                              </TableHead>
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600 text-center">
+                                Invoices
+                              </TableHead>
+                              <TableHead className="py-2 px-3 font-semibold text-slate-600 text-right">
+                                Total Revenue
+                              </TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {salesMetrics.highestValueCustomers.map(
+                              (c, idx) => (
+                                <TableRow
+                                  key={idx}
+                                  className="border-b border-slate-100"
+                                >
+                                  <TableCell className="py-2 px-3 font-medium text-slate-900">
+                                    {c.customer_name}
+                                  </TableCell>
+                                  <TableCell className="py-2 px-3 text-center font-semibold text-slate-700">
+                                    {c.invoices_count}
+                                  </TableCell>
+                                  <TableCell className="py-2 px-3 font-mono text-right font-semibold text-slate-900">
+                                    {formatCurrency(c.amount)}
+                                  </TableCell>
+                                </TableRow>
+                              ),
+                            )}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              </>
+            )}
           </TabsContent>
         </Tabs>
       )}
-
-      {/* Master Data (Always Visible) */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-medium text-slate-900">
-            Master Data
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-3">
-            <div className="flex items-center justify-between py-2 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <Building2 className="h-4 w-4 text-slate-400" />
-                <span className="text-sm text-slate-700">
-                  Issuing Companies
-                </span>
-              </div>
-              <span className="text-sm font-medium text-slate-900">
-                {stats?.issuingCompanies || 0}
-              </span>
-            </div>
-            <div className="flex items-center justify-between py-2 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <Building2 className="h-4 w-4 text-slate-400" />
-                <span className="text-sm text-slate-700">
-                  Receiving Customers
-                </span>
-              </div>
-              <span className="text-sm font-medium text-slate-900">
-                {stats?.receivingCompanies || 0}
-              </span>
-            </div>
-            <div className="flex items-center justify-between py-2">
-              <div className="flex items-center gap-2">
-                <Package className="h-4 w-4 text-slate-400" />
-                <span className="text-sm text-slate-700">Products</span>
-              </div>
-              <span className="text-sm font-medium text-slate-900">
-                {stats?.totalProducts || 0}
-              </span>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   );
 }

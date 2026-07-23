@@ -31,6 +31,7 @@ export function AddProductDialog() {
       product_name: formData.get("product_name") as string,
       hsn_code: formData.get("hsn_code") as string,
       unit_of_measure: formData.get("unit_of_measure") as string,
+      category: (formData.get("category") as string) || "Meat",
     };
 
     const { error: insertError } = await supabase.from("products").insert(data);
@@ -90,6 +91,20 @@ export function AddProductDialog() {
               placeholder="e.g., kg, pcs, MT, bags"
               required
             />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="category">Category *</Label>
+            <select
+              id="category"
+              name="category"
+              defaultValue="Meat"
+              required
+              className="w-full h-9 rounded-md border border-slate-200 bg-white px-3 py-1 text-xs shadow-2xs focus:outline-hidden focus:ring-1 focus:ring-slate-950"
+            >
+              <option value="Meat">Meat</option>
+              <option value="Fruits">Fruits</option>
+            </select>
           </div>
 
           {error && (

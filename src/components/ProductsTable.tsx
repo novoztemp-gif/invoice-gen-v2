@@ -21,12 +21,14 @@ import {
 } from "@/components/ui/table";
 import { DeleteProductDialog } from "./DeleteProductDialog";
 import { EditProductDialog } from "./EditProductDialog";
+import { cn } from "@/lib/utils";
 
 type Product = {
   id: string;
   product_name: string;
   hsn_code: string;
   unit_of_measure: string;
+  category?: string;
   created_at: string;
   updated_at: string;
 };
@@ -79,8 +81,8 @@ export function ProductsTable({ products }: { products: Product[] }) {
 
     if (sortField && sortOrder) {
       filtered = [...filtered].sort((a, b) => {
-        const aValue = a[sortField];
-        const bValue = b[sortField];
+        const aValue = a[sortField] || "";
+        const bValue = b[sortField] || "";
 
         if (aValue < bValue) return sortOrder === "asc" ? -1 : 1;
         if (aValue > bValue) return sortOrder === "asc" ? 1 : -1;
@@ -141,6 +143,16 @@ export function ProductsTable({ products }: { products: Product[] }) {
                   </Button>
                 </TableHead>
                 <TableHead>
+                  Category
+                  <Button
+                    variant="ghost"
+                    onClick={() => handleSort("category" as any)}
+                    className="h-auto p-0 font-semibold hover:bg-transparent"
+                  >
+                    {getSortIcon("category" as any)}
+                  </Button>
+                </TableHead>
+                <TableHead>
                   Unit of Measure
                   <Button
                     variant="ghost"
@@ -173,6 +185,18 @@ export function ProductsTable({ products }: { products: Product[] }) {
                     <code className="relative font-mono text-sm font-semibold">
                       {product.hsn_code}
                     </code>
+                  </TableCell>
+                  <TableCell>
+                    <span
+                      className={cn(
+                        "px-2 py-0.5 rounded text-xs font-semibold border",
+                        (product.category || "Meat") === "Meat"
+                          ? "bg-rose-50 text-rose-700 border-rose-200"
+                          : "bg-amber-50 text-amber-700 border-amber-200",
+                      )}
+                    >
+                      {product.category || "Meat"}
+                    </span>
                   </TableCell>
                   <TableCell>
                     <span className="font-mono text-sm">

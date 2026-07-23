@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import fetchJobStats from "@/app/invoice-batches/[id]/actions";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
 import { triggerDownload } from "@/lib/utils";
 
 export type InvoiceBatch = {
@@ -148,16 +149,7 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
   const fetchInvoices = async () => {
     try {
       const supabase = createClient();
-      const { data, error } = await supabase
-        .from("invoice")
-        .select("*")
-        .eq("invoice_batch_id", batchId)
-        .order("invoice_date", { ascending: true });
-
-      if (error) {
-        console.error("Error fetching invoices:", error);
-        return;
-      }
+      const data = await fetchAllInvoicesForBatch(supabase, batchId);
 
       setInvoices(data || []);
 
@@ -170,7 +162,7 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
         setExpandedDates(expanded);
       }
     } catch (error) {
-      console.error("Error:", error);
+      console.error("Error fetching invoices:", error);
     }
   };
 

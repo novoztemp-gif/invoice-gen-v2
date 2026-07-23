@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
 
 // Function to convert number to words in Indian format
 function numberToWords(num: number): string {
@@ -150,13 +151,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: "Batch not found" }, { status: 404 });
     }
 
-    const { data: invoices, error: invoicesError } = await supabase
-      .from("invoice")
-      .select("*")
-      .eq("invoice_batch_id", batchId)
-      .order("invoice_date", { ascending: true });
-
-    if (invoicesError) {
+    let invoices: any[] = [];
+    try {
+      invoices = await fetchAllInvoicesForBatch(supabase, batchId);
+    } catch (invoicesError: any) {
       console.error("Error fetching invoices:", invoicesError);
       return NextResponse.json(
         { message: "Failed to fetch invoices" },

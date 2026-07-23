@@ -12,6 +12,10 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { numberToWords } from "@/lib/numberToWords";
+import {
+  isValidQuarterIncrement,
+  isValidWholeNumber,
+} from "@/lib/utils/quantity-rate-utils";
 
 type InvoiceEditorProps = {
   isOpen: boolean;
@@ -99,8 +103,20 @@ export default function InvoiceEditor({
   const handleSave = async () => {
     if (!products.length) return alert("At least one product is required.");
     for (const p of products) {
-      if (Number(p.quantity) <= 0) return alert("All quantities must be > 0");
-      if (Number(p.rate) <= 0) return alert("All rates must be > 0");
+      const qty = Number(p.quantity);
+      const rate = Number(p.rate);
+      if (isNaN(qty) || qty <= 0) return alert("All quantities must be > 0");
+      if (!isValidQuarterIncrement(qty)) {
+        return alert(
+          "Quantity must be in increments of 0.25.\n\nAllowed values:\n.00\n.25\n.50\n.75",
+        );
+      }
+      if (isNaN(rate) || rate <= 0) return alert("All rates must be > 0");
+      if (!isValidWholeNumber(rate)) {
+        return alert(
+          "Rate must be a whole number.\n\nDecimal rates are not permitted.",
+        );
+      }
     }
     if (totalAmountBeforeTax <= 0) return alert("Invoice total must be > 0");
     if (!transportMode) return alert("Transportation mode is required.");
@@ -242,6 +258,7 @@ export default function InvoiceEditor({
                         <Input
                           type="number"
                           min="0"
+                          step="0.25"
                           value={p.quantity}
                           onChange={(e) =>
                             handleProductChange(idx, "quantity", e.target.value)
@@ -253,7 +270,7 @@ export default function InvoiceEditor({
                         <Input
                           type="number"
                           min="0"
-                          step="0.01"
+                          step="1"
                           value={p.rate}
                           onChange={(e) =>
                             handleProductChange(idx, "rate", e.target.value)

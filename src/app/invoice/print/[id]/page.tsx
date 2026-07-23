@@ -11,6 +11,9 @@ export default function PrintInvoicePage() {
   const params = useParams();
   const router = useRouter();
   const invoiceId = params.id as string;
+  const isChallan =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("isChallan") === "true";
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -391,9 +394,9 @@ export default function PrintInvoicePage() {
               <tr>
                 <td
                   colSpan={8}
-                  className="text-center font-bold underline bg-gray-200 py-1 border-b border-black"
+                  className="text-center font-bold underline bg-gray-200 py-1 border-b border-black uppercase"
                 >
-                  INVOICE
+                  {isChallan ? "DELIVERY CHALLAN" : "INVOICE"}
                 </td>
               </tr>
 
@@ -591,7 +594,7 @@ export default function PrintInvoicePage() {
                       colSpan={2}
                       className="border border-black text-right px-1"
                     >
-                      {p.rate ? Number(p.rate).toFixed(2) : ""}
+                      {p.rate ? Math.round(Number(p.rate)) : ""}
                     </td>
                     <td className="border border-black text-right px-1 font-medium bg-slate-50/50">
                       {p.amount ? Number(p.amount).toFixed(2) : ""}
@@ -615,9 +618,9 @@ export default function PrintInvoicePage() {
               <tr>
                 <td
                   colSpan={3}
-                  className="border border-black font-bold text-center text-blue-900 py-1"
+                  className="border border-black font-bold text-center text-emerald-700 py-1 uppercase"
                 >
-                  Goods Despatched
+                  ✅ GOODS DISPATCHED
                 </td>
                 <td colSpan={2} className="border border-black px-1 py-1">
                   Total Amount Before Tax

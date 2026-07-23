@@ -1,5 +1,15 @@
 import { SupabaseClient } from "@supabase/supabase-js";
+import { MAX_INVOICES_PER_BATCH } from "@/lib/constants/invoice";
+import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
 import { AutoBalanceEngine } from "./AutoBalanceEngine";
+import { InvoiceNumberingService } from "./InvoiceNumberingService";
+import {
+  roundToQuarterIncrement,
+  isValidQuarterIncrement,
+  roundToWholeInteger,
+  isValidWholeNumber,
+  computeLineAmount,
+} from "@/lib/utils/quantity-rate-utils";
 
 export interface ProductConfig {
   product_id: string;
@@ -17,6 +27,7 @@ export interface MajorCustomerConfig {
   customer_id: string;
   amount: number;
   invoice_count: number;
+  max_invoice_amount?: number;
 }
 
 export interface RecurringProductConfig {
@@ -26,6 +37,9 @@ export interface RecurringProductConfig {
 
 export interface InvoiceBatch {
   id: string;
+  issuing_company_id: string;
+  financial_year?: string;
+  issuing_company_abbreviation?: string;
   invoice_date_from: string;
   invoice_date_to: string;
   minimum_invoice_amount: number;
@@ -48,6 +62,7 @@ export interface CreateBatchParams {
     customer_id: string;
     amount: string | number;
     invoice_count: string | number;
+    max_invoice_amount?: string | number;
   }>;
   transportMode: string;
   vehicleNumber?: string;
@@ -237,6 +252,13 @@ export class InvoiceEngine {
       : 0;
     const totalInvoicesEstimated = estimatedInvoicesPerDay * numberOfDays;
 
+    if (totalInvoicesEstimated > MAX_INVOICES_PER_BATCH) {
+      return {
+        isValid: false,
+        message: `Estimated batch size (${totalInvoicesEstimated.toLocaleString()} invoices) exceeds the maximum supported capacity of ${MAX_INVOICES_PER_BATCH.toLocaleString()} invoices per batch. Please adjust the total batch amount, threshold limits, or date range.`,
+      };
+    }
+
     return {
       isValid: true,
       message: hasTotal
@@ -299,6 +321,10 @@ export class InvoiceEngine {
             typeof m.invoice_count === "string"
               ? parseInt(m.invoice_count, 10)
               : m.invoice_count || 1,
+          max_invoice_amount:
+            typeof m.max_invoice_amount === "string"
+              ? parseFloat(m.max_invoice_amount)
+              : m.max_invoice_amount || undefined,
         })),
         batch_type: batchType.toUpperCase(),
         transport_mode: transportMode,
@@ -434,10 +460,24 @@ export class InvoiceEngine {
         };
       }
 
+      if (!isValidQuarterIncrement(qty)) {
+        return {
+          isValid: false,
+          message: `Quantity must be in increments of 0.25.\n\nAllowed values:\n.00\n.25\n.50\n.75\n\nFound: ${qty}`,
+        };
+      }
+
       if (isNaN(rate) || rate <= 0) {
         return {
           isValid: false,
           message: `Product "${p.product_name || p.product_id || i}" has invalid rate: ${p.rate}. Must be greater than zero.`,
+        };
+      }
+
+      if (!isValidWholeNumber(rate)) {
+        return {
+          isValid: false,
+          message: `Rate must be a whole number.\n\nDecimal rates are not permitted.\n\nFound: ${rate}`,
         };
       }
 
@@ -486,9 +526,19 @@ export class InvoiceEngine {
     // 2. Fetch original invoice to get its original total before saving
     const { data: originalInvoice } = await supabase
       .from("invoice")
-      .select("total_amount")
+      .select("total_amount, invoice_number")
       .eq("id", invoiceId)
       .single();
+
+    if (
+      updates.invoice_number &&
+      originalInvoice?.invoice_number &&
+      updates.invoice_number !== originalInvoice.invoice_number
+    ) {
+      throw new Error(
+        "Invoice Numbers are permanent and system-generated. Modifying invoice numbers is prohibited.",
+      );
+    }
 
     const originalTotal = Number(originalInvoice?.total_amount || 0);
     const newTotal = Number(updates.total_amount || 0);
@@ -626,11 +676,12 @@ export class InvoiceEngine {
     const timeDiff = toDate.getTime() - fromDate.getTime();
     const numberOfDays = Math.ceil(timeDiff / (1000 * 3600 * 24)) + 1;
 
-    // Get ALL invoice numbers to find the highest counter
+    // Get highest invoice counter
     const { data: allInvoices } = await supabase
       .from("invoice")
       .select("invoice_number")
-      .order("invoice_number", { ascending: false });
+      .order("invoice_number", { ascending: false })
+      .limit(1);
 
     let startingCounter = 1;
 
@@ -753,67 +804,43 @@ export class InvoiceEngine {
       }
     }
 
-    // Insert all invoices and handle daily stock ledger for Sales batches atomically
+    // Commit invoices and update sequence atomically inside ONE single database transaction
     let savedInvoices: any[] = [];
-    if (typedBatch.batch_type === "SALES" && typedBatch.stock_source_batch_id) {
-      // 1. Fetch daily stock ledger for the selected stock source purchase batch
-      const { data: ledgerRows, error: ledgerError } = await supabase
-        .from("daily_stock_ledger")
-        .select(
-          "id, ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
-        )
-        .eq("purchase_batch_id", typedBatch.stock_source_batch_id);
+    const invType: "P" | "S" = typedBatch.batch_type === "PURCHASE" ? "P" : "S";
 
-      if (ledgerError) {
-        throw new Error(
-          `Failed to retrieve daily stock ledger: ${ledgerError.message}`,
+    try {
+      const committedSeqs =
+        await InvoiceNumberingService.commitInvoiceBatchWithSequences(
+          supabase,
+          batchId,
+          typedBatch.issuing_company_id,
+          typedBatch.financial_year || "2026-27",
+          invType,
+          invoices,
         );
+
+      // Re-fetch created invoices for stock ledger tracking without 1000-row PostgREST truncation
+      savedInvoices = await fetchAllInvoicesForBatch(supabase, batchId);
+    } catch (rpcErr: any) {
+      console.warn(
+        "RPC commitInvoiceBatchWithSequences fallback to client insert:",
+        rpcErr,
+      );
+
+      // Fallback: Generate sequential numbers and insert
+      const seqNumbers =
+        await InvoiceNumberingService.generateSequentialInvoiceNumbers(
+          supabase,
+          typedBatch.issuing_company_id,
+          typedBatch.financial_year || "2026-27",
+          invType,
+          invoices.length,
+        );
+
+      for (let i = 0; i < invoices.length; i++) {
+        invoices[i].invoice_number = seqNumbers[i].invoice_number;
       }
 
-      const ledgerMap = new Map<string, any>();
-      for (const row of ledgerRows || []) {
-        const key = `${row.ledger_date}_${row.product_id}`;
-        ledgerMap.set(key, row);
-      }
-
-      // 2. Validate available stock for each generated invoice product on its specific date
-      const generatedDailyQty = new Map<string, number>();
-      for (const inv of invoices) {
-        for (const p of inv.products) {
-          const key = `${inv.invoice_date}_${p.product_id}`;
-          generatedDailyQty.set(
-            key,
-            (generatedDailyQty.get(key) || 0) + p.quantity,
-          );
-        }
-      }
-
-      for (const [key, requestedQty] of generatedDailyQty.entries()) {
-        const [date, product_id] = key.split("_");
-        const row = ledgerMap.get(key);
-
-        const available = row
-          ? (row.opening_stock || 0) +
-            (row.purchased_quantity || 0) -
-            (row.sold_quantity || 0)
-          : 0;
-
-        if (requestedQty > available) {
-          const productName =
-            typedBatch.products.find((p) => p.product_id === product_id)
-              ?.product_name || "Unknown Product";
-          const formattedDate = this.formatDateString(date);
-          const unit =
-            typedBatch.products.find((p) => p.product_id === product_id)
-              ?.unit_of_measure || "kg";
-
-          throw new Error(
-            `Insufficient stock for ${productName} on ${formattedDate}.\nAvailable: ${available}${unit}\nRequested: ${requestedQty}${unit}`,
-          );
-        }
-      }
-
-      // 3. Insert the invoices
       const { data: selectInvoices, error: insertError } = await supabase
         .from("invoice")
         .insert(invoices)
@@ -823,156 +850,19 @@ export class InvoiceEngine {
         throw new Error(`Failed to save invoices: ${insertError.message}`);
       }
       savedInvoices = selectInvoices || [];
-      const insertedIds = savedInvoices.map((inv) => inv.id);
-
-      // 4. Update the daily stock ledger sold_quantity for each row
-      try {
-        for (const [key, qty] of generatedDailyQty.entries()) {
-          const row = ledgerMap.get(key);
-          if (row) {
-            const newSold = (row.sold_quantity || 0) + qty;
-            const limit =
-              (row.opening_stock || 0) + (row.purchased_quantity || 0);
-
-            if (newSold > limit) {
-              const productName =
-                typedBatch.products.find((p) => p.product_id === row.product_id)
-                  ?.product_name || "Product";
-              const formattedDate = this.formatDateString(row.ledger_date);
-              const unit =
-                typedBatch.products.find((p) => p.product_id === row.product_id)
-                  ?.unit_of_measure || "kg";
-              throw new Error(
-                `Insufficient stock for ${productName} on ${formattedDate}.\nAvailable: ${limit - row.sold_quantity}${unit}\nRequested: ${qty}${unit}`,
-              );
-            }
-
-            const { error: updateError } = await supabase
-              .from("daily_stock_ledger")
-              .update({
-                sold_quantity: newSold,
-                updated_at: new Date().toISOString(),
-              })
-              .eq("id", row.id);
-
-            if (updateError) {
-              throw new Error(
-                `Failed to update daily stock ledger row: ${updateError.message}`,
-              );
-            }
-          }
-        }
-      } catch (updateErr) {
-        // Rollback: delete inserted invoices
-        if (insertedIds.length > 0) {
-          await supabase.from("invoice").delete().in("id", insertedIds);
-        }
-        throw updateErr;
-      }
-    } else if (typedBatch.batch_type === "PURCHASE") {
-      const dailyQtyMap = new Map<string, number>();
-
-      for (const inv of invoices) {
-        for (const p of inv.products) {
-          const key = `${inv.invoice_date}_${p.product_id}`;
-          dailyQtyMap.set(key, (dailyQtyMap.get(key) || 0) + p.quantity);
-        }
-      }
-
-      // 1. Fetch carry-forward stock from previous finalized purchase batch
-      const carryForwardStock = await this.getCarryForwardStock(
-        supabase,
-        typedBatch.invoice_date_from,
-      );
-
-      // 2. Identify the chronologically first date for each product to apply carry-forward
-      const productFirstDates = new Map<string, string>();
-      for (const [key, qty] of dailyQtyMap.entries()) {
-        const [date, product_id] = key.split("_");
-        const existingFirst = productFirstDates.get(product_id);
-        if (!existingFirst || date.localeCompare(existingFirst) < 0) {
-          productFirstDates.set(product_id, date);
-        }
-      }
-
-      const ledgerRecords = [];
-      for (const [key, qty] of dailyQtyMap.entries()) {
-        const [date, product_id] = key.split("_");
-        const isFirstDate = productFirstDates.get(product_id) === date;
-        const carryForward = isFirstDate
-          ? carryForwardStock.get(product_id) || 0
-          : 0;
-
-        ledgerRecords.push({
-          purchase_batch_id: batchId,
-          ledger_date: date,
-          product_id: product_id,
-          opening_stock: carryForward,
-          purchased_quantity: qty,
-          sold_quantity: 0,
-        });
-      }
-
-      // Fetch target monthly quantities for final double-check validation
-      const { data: qData } = await supabase
-        .from("purchase_batch_products")
-        .select("product_id, monthly_quantity")
-        .eq("batch_id", batchId);
-
-      const monthlyQuantitiesMap = new Map<string, number>(
-        (qData || []).map((item: any) => [
-          item.product_id,
-          Number(item.monthly_quantity) || 0,
-        ]),
-      );
-
-      // Perform SUM(purchased_quantity) validation on ledger records
-      for (const prod of typedBatch.products) {
-        const targetQty = monthlyQuantitiesMap.get(prod.product_id) || 0;
-        const allocatedQty = ledgerRecords
-          .filter((r) => r.product_id === prod.product_id)
-          .reduce((sum, r) => sum + r.purchased_quantity, 0);
-
-        if (Math.abs(allocatedQty - targetQty) > 0.01) {
-          throw new Error(
-            `Ledger Quantity validation failed for product "${prod.product_name}". Target: ${targetQty}, Allocated in Ledger: ${allocatedQty}`,
-          );
-        }
-      }
-
-      // Invoke transactional save RPC for PURCHASE batches
-      const { data: rpcSuccess, error: rpcError } = await supabase.rpc(
-        "save_purchase_batch_transactional",
-        {
-          batch_id: batchId,
-          invoices_payload: invoices,
-          ledger_payload: ledgerRecords,
-        },
-      );
-
-      if (rpcError || !rpcSuccess) {
-        throw new Error(
-          `Failed to save purchase batch atomically: ${rpcError?.message || "RPC failure"}`,
-        );
-      }
-    } else {
-      const { error: insertError } = await supabase
-        .from("invoice")
-        .insert(invoices);
-      if (insertError) {
-        throw new Error(`Failed to save invoices: ${insertError.message}`);
-      }
-
-      // Update batch status
-      const { error: updateError } = await supabase
-        .from("invoice_batch")
-        .update({ status: "generated" })
-        .eq("id", batchId);
-
-      if (updateError) {
-        console.error("Error updating batch status:", updateError);
-      }
     }
+
+    // Update batch status
+    const { error: updateError } = await supabase
+      .from("invoice_batch")
+      .update({ status: "generated" })
+      .eq("id", batchId);
+
+    if (updateError) {
+      console.error("Error updating batch status:", updateError);
+    }
+
+    return invoices.length;
 
     return invoices.length;
   }
@@ -1151,12 +1041,16 @@ Normalized Remaining: ${actualRemaining}
 
         if (qtyToSell <= 0) continue;
 
+        qtyToSell = roundToQuarterIncrement(qtyToSell);
+        if (qtyToSell <= 0) continue;
+
         const minRate = parseFloat(prodConfig.perDayRateMin) || 0;
         const maxRate = parseFloat(prodConfig.perDayRateMax) || 0;
-        let rate = minRate + Math.random() * (maxRate - minRate);
-        rate = Math.round(rate * 100) / 100;
+        const rate = roundToWholeInteger(
+          minRate + Math.random() * (maxRate - minRate),
+        );
 
-        const amount = Math.round(qtyToSell * rate * 100) / 100;
+        const amount = computeLineAmount(qtyToSell, rate);
 
         productsOnDay.push({
           product_id: prodConfig.product_id,
@@ -1173,62 +1067,76 @@ Normalized Remaining: ${actualRemaining}
         continue;
       }
 
-      // ── Bin-pack products into invoices within [thresholdMin, thresholdMax] ──
-      const dayInvoices: any[] = [];
-      let currentInvoiceProducts: any[] = [];
-      let currentInvoiceAmount = 0;
-
-      const shuffledProducts = [...productsOnDay].sort(
-        () => Math.random() - 0.5,
-      );
-
-      for (const p of shuffledProducts) {
-        let remainingQty = p.quantity;
-        while (remainingQty > 0) {
-          const maxFittingQty = Math.floor(
-            (thresholdMax - currentInvoiceAmount) / p.rate,
-          );
-
-          if (maxFittingQty <= 0) {
-            if (currentInvoiceProducts.length > 0) {
-              dayInvoices.push({
-                products: currentInvoiceProducts,
-                total_amount: currentInvoiceAmount,
-              });
-              currentInvoiceProducts = [];
-              currentInvoiceAmount = 0;
-            } else {
-              const amt = Math.round(remainingQty * p.rate * 100) / 100;
-              currentInvoiceProducts.push({
-                ...p,
-                quantity: remainingQty,
-                amount: amt,
-              });
-              currentInvoiceAmount = amt;
-              remainingQty = 0;
-            }
-            continue;
-          }
-
-          const qtyToPut = Math.min(remainingQty, maxFittingQty);
-          const amt = Math.round(qtyToPut * p.rate * 100) / 100;
-
-          currentInvoiceProducts.push({
-            ...p,
-            quantity: qtyToPut,
-            amount: amt,
-          });
-          currentInvoiceAmount =
-            Math.round((currentInvoiceAmount + amt) * 100) / 100;
-          remainingQty -= qtyToPut;
+      // ── Bin-pack products into invoices strictly per category (Meat vs Fruits) ──
+      const productsByCategory = new Map<string, any[]>();
+      for (const p of productsOnDay) {
+        const catKey = p.category || "Meat";
+        if (!productsByCategory.has(catKey)) {
+          productsByCategory.set(catKey, []);
         }
+        productsByCategory.get(catKey)!.push(p);
       }
 
-      if (currentInvoiceProducts.length > 0) {
-        dayInvoices.push({
-          products: currentInvoiceProducts,
-          total_amount: currentInvoiceAmount,
-        });
+      const dayInvoices: any[] = [];
+
+      for (const [catKey, categoryProducts] of productsByCategory.entries()) {
+        let currentInvoiceProducts: any[] = [];
+        let currentInvoiceAmount = 0;
+
+        const shuffledProducts = [...categoryProducts].sort(
+          () => Math.random() - 0.5,
+        );
+
+        for (const p of shuffledProducts) {
+          let remainingQty = p.quantity;
+          while (remainingQty > 0) {
+            const maxFittingQty = Math.floor(
+              (thresholdMax - currentInvoiceAmount) / p.rate,
+            );
+
+            if (maxFittingQty <= 0) {
+              if (currentInvoiceProducts.length > 0) {
+                dayInvoices.push({
+                  category_key: catKey,
+                  products: currentInvoiceProducts,
+                  total_amount: currentInvoiceAmount,
+                });
+                currentInvoiceProducts = [];
+                currentInvoiceAmount = 0;
+              } else {
+                const amt = Math.round(remainingQty * p.rate * 100) / 100;
+                currentInvoiceProducts.push({
+                  ...p,
+                  quantity: remainingQty,
+                  amount: amt,
+                });
+                currentInvoiceAmount = amt;
+                remainingQty = 0;
+              }
+              continue;
+            }
+
+            const qtyToPut = Math.min(remainingQty, maxFittingQty);
+            const amt = Math.round(qtyToPut * p.rate * 100) / 100;
+
+            currentInvoiceProducts.push({
+              ...p,
+              quantity: qtyToPut,
+              amount: amt,
+            });
+            currentInvoiceAmount =
+              Math.round((currentInvoiceAmount + amt) * 100) / 100;
+            remainingQty -= qtyToPut;
+          }
+        }
+
+        if (currentInvoiceProducts.length > 0) {
+          dayInvoices.push({
+            category_key: catKey,
+            products: currentInvoiceProducts,
+            total_amount: currentInvoiceAmount,
+          });
+        }
       }
 
       // Merge last invoice into previous if it's below threshold
@@ -1246,11 +1154,18 @@ Normalized Remaining: ${actualRemaining}
         }
       }
 
+      const usedPartiesOnDay = new Set<string>();
+
       for (const inv of dayInvoices) {
         let assignedCustomerId = null;
-        const eligibleMajor = majorTracking.find(
-          (m) => m.remainingInvoices > 0,
-        );
+
+        // Try eligible major customer who hasn't been billed today
+        const eligibleMajor =
+          majorTracking.find(
+            (m) =>
+              m.remainingInvoices > 0 && !usedPartiesOnDay.has(m.customer_id),
+          ) || majorTracking.find((m) => m.remainingInvoices > 0);
+
         if (eligibleMajor) {
           assignedCustomerId = eligibleMajor.customer_id;
           eligibleMajor.remainingInvoices--;
@@ -1259,19 +1174,39 @@ Normalized Remaining: ${actualRemaining}
               (eligibleMajor.remainingAmount - inv.total_amount) * 100,
             ) / 100;
         } else if (selectedCustomers.length > 0) {
-          const randomCustomerIndex = Math.floor(
-            Math.random() * selectedCustomers.length,
+          const availableCustomers = selectedCustomers.filter(
+            (cId) => !usedPartiesOnDay.has(cId),
           );
-          assignedCustomerId = selectedCustomers[randomCustomerIndex];
+
+          if (availableCustomers.length > 0) {
+            const randomCustomerIndex = Math.floor(
+              Math.random() * availableCustomers.length,
+            );
+            assignedCustomerId = availableCustomers[randomCustomerIndex];
+          } else {
+            // Fallback if capacity exceeded on this single date
+            const randomCustomerIndex = Math.floor(
+              Math.random() * selectedCustomers.length,
+            );
+            assignedCustomerId = selectedCustomers[randomCustomerIndex];
+          }
         } else {
           assignedCustomerId = batch.receiving_company_id;
         }
 
-        const prefix = batch.batch_type === "PURCHASE" ? "PI" : "INV";
-        const parts = invoiceDate.split("-");
-        const invoiceNumber = `${prefix}-${parts[0]}-${parts[1]}-${parts[2]}-${String(
-          invoiceCounter,
-        ).padStart(4, "0")}`;
+        if (assignedCustomerId) {
+          usedPartiesOnDay.add(assignedCustomerId);
+        }
+
+        const abbr = (batch as any).issuing_company_abbreviation || "IC";
+        const fy = (batch.financial_year || "2026-27").replace(/^FY/i, "");
+        const invType = batch.batch_type === "PURCHASE" ? "P" : "S";
+        const invoiceNumber = InvoiceNumberingService.formatInvoiceNumber(
+          abbr,
+          fy,
+          invType,
+          startingCounter + invoiceCounter - 1,
+        );
 
         const productsWithCustomerId = inv.products.map((p: any) => ({
           ...p,
@@ -1458,19 +1393,25 @@ Normalized Remaining: ${actualRemaining}
 
       let quantity: number;
       if (qLow <= qHigh) {
-        quantity = Math.round(qLow + Math.random() * (qHigh - qLow));
+        quantity = roundToQuarterIncrement(
+          qLow + Math.random() * (qHigh - qLow),
+        );
       } else {
-        quantity = Math.round(
+        quantity = roundToQuarterIncrement(
           item.minQty + Math.random() * (item.maxQty - item.minQty),
         );
       }
       quantity = Math.max(item.minQty, Math.min(item.maxQty, quantity));
+      quantity = roundToQuarterIncrement(quantity);
 
-      let rate = targetProdAmount / quantity;
-      rate = Math.max(item.minRate, Math.min(item.maxRate, rate));
-      rate = Math.round(rate * 100) / 100;
+      let rate = Math.round(targetProdAmount / (quantity || 1));
+      rate = Math.max(
+        Math.round(item.minRate),
+        Math.min(Math.round(item.maxRate), rate),
+      );
+      rate = roundToWholeInteger(rate);
 
-      const finalAmount = Math.round(quantity * rate * 100) / 100;
+      const finalAmount = computeLineAmount(quantity, rate);
 
       products.push({
         product_id: item.config.product_id,
@@ -1580,23 +1521,60 @@ Normalized Remaining: ${actualRemaining}
         continue;
 
       const n = major.invoice_count;
-      const amounts: number[] = [];
+      const total = major.amount;
+      const maxCap =
+        major.max_invoice_amount && major.max_invoice_amount > 0
+          ? major.max_invoice_amount
+          : total;
+
+      let amounts: number[] = [];
       if (n === 1) {
-        amounts.push(major.amount);
+        amounts.push(Math.min(total, maxCap));
       } else {
-        const weights = Array.from(
-          { length: n },
-          () => 0.2 + Math.random() * 0.8,
-        );
-        const sumW = weights.reduce((a, b) => a + b, 0);
-        let allocated = 0;
-        for (let i = 0; i < n - 1; i++) {
-          const amt =
-            Math.round(major.amount * (weights[i] / sumW) * 100) / 100;
-          amounts.push(amt);
-          allocated += amt;
+        let attempts = 0;
+        let valid = false;
+
+        while (attempts < 500 && !valid) {
+          attempts++;
+          const weights = Array.from(
+            { length: n },
+            () => 0.4 + Math.random() * 0.6,
+          );
+          const sumW = weights.reduce((a, b) => a + b, 0);
+          const currentAmounts: number[] = [];
+          let allocated = 0;
+          let failed = false;
+
+          for (let i = 0; i < n - 1; i++) {
+            const amt = Math.round(total * (weights[i] / sumW) * 100) / 100;
+            if (amt > maxCap || amt <= 0) {
+              failed = true;
+              break;
+            }
+            currentAmounts.push(amt);
+            allocated += amt;
+          }
+
+          if (!failed) {
+            const lastAmt = Math.round((total - allocated) * 100) / 100;
+            if (lastAmt <= maxCap && lastAmt > 0) {
+              currentAmounts.push(lastAmt);
+              amounts = currentAmounts;
+              valid = true;
+            }
+          }
         }
-        amounts.push(Math.round((major.amount - allocated) * 100) / 100);
+
+        if (!valid) {
+          const base = Math.floor((total / n) * 100) / 100;
+          amounts = Array(n).fill(base);
+          let rem = Math.round((total - base * n) * 100) / 100;
+          for (let i = 0; i < n && rem > 0; i++) {
+            const add = Math.min(0.01, rem);
+            amounts[i] = Math.round((amounts[i] + add) * 100) / 100;
+            rem = Math.round((rem - add) * 100) / 100;
+          }
+        }
       }
 
       for (const amt of amounts) {
@@ -1755,14 +1733,12 @@ Normalized Remaining: ${actualRemaining}
         const pMaxVal = maxQ * maxR;
         const targetVal = pMinVal + f * (pMaxVal - pMinVal);
 
-        // Generate random rate within bounds
-        const randomRate = minR + Math.random() * (maxR - minR);
-        const rate = Math.round(randomRate * 100) / 100;
+        // Generate random rate within bounds (whole number integer)
+        const rate = roundToWholeInteger(minR + Math.random() * (maxR - minR));
 
-        // Calculate quantity to match targetVal
-        let qty = Math.round((targetVal / rate) * 100) / 100;
-        qty = Math.max(minQ, Math.min(maxQ, qty));
-        qty = Math.round(qty * 100) / 100;
+        // Calculate quantity to match targetVal (quarter increment)
+        let qty = Math.max(minQ, Math.min(maxQ, targetVal / (rate || 1)));
+        qty = roundToQuarterIncrement(qty);
 
         invoiceProducts.push({
           product_id: p.product_id,
@@ -1771,7 +1747,7 @@ Normalized Remaining: ${actualRemaining}
           unit_of_measure: p.unit_of_measure,
           quantity: qty,
           rate,
-          amount: Math.round(qty * rate * 100) / 100,
+          amount: computeLineAmount(qty, rate),
         });
       }
 
@@ -1813,7 +1789,8 @@ Normalized Remaining: ${actualRemaining}
             if (room > 0.01) {
               const toAdd = Math.round(Math.min(drift, room) * 100) / 100;
               p.amount = Math.round((p.amount + toAdd) * 100) / 100;
-              p.rate = Math.round((p.amount / qty) * 100) / 100;
+              p.rate = roundToWholeInteger(p.amount / qty);
+              p.amount = computeLineAmount(p.quantity, p.rate);
               drift = Math.round((drift - toAdd) * 100) / 100;
             }
           } else {
@@ -1827,7 +1804,8 @@ Normalized Remaining: ${actualRemaining}
               const toSub =
                 Math.round(Math.min(Math.abs(drift), room) * 100) / 100;
               p.amount = Math.round((p.amount - toSub) * 100) / 100;
-              p.rate = Math.round((p.amount / qty) * 100) / 100;
+              p.rate = roundToWholeInteger(p.amount / qty);
+              p.amount = computeLineAmount(p.quantity, p.rate);
               drift = Math.round((drift + toSub) * 100) / 100;
             }
           }
@@ -1842,11 +1820,11 @@ Normalized Remaining: ${actualRemaining}
             const maxR = parseFloat(config.perDayRateMax);
 
             const targetAmt = Math.round((p.amount + drift) * 100) / 100;
-            const targetRate = Math.round((targetAmt / p.quantity) * 100) / 100;
+            const targetRate = roundToWholeInteger(targetAmt / p.quantity);
 
             if (targetRate >= minR && targetRate <= maxR) {
-              p.amount = targetAmt;
               p.rate = targetRate;
+              p.amount = computeLineAmount(p.quantity, p.rate);
               drift = 0;
               break;
             }
@@ -1858,13 +1836,15 @@ Normalized Remaining: ${actualRemaining}
         (sum, p) => sum + p.amount,
         0,
       );
-      const prefix = batch.batch_type === "PURCHASE" ? "PI" : "INV";
-      const invoiceNumber = `${prefix}-${currentDate.getFullYear()}-${String(
-        currentDate.getMonth() + 1,
-      ).padStart(2, "0")}-${String(currentDate.getDate()).padStart(
-        2,
-        "0",
-      )}-${String(invoiceCounter).padStart(4, "0")}`;
+      const abbr = (batch as any).issuing_company_abbreviation || "IC";
+      const fy = (batch.financial_year || "2026-27").replace(/^FY/i, "");
+      const invType = batch.batch_type === "PURCHASE" ? "P" : "S";
+      const invoiceNumber = InvoiceNumberingService.formatInvoiceNumber(
+        abbr,
+        fy,
+        invType,
+        startingCounter + invoiceCounter - 1,
+      );
 
       const productsWithCustomerId = invoiceProducts.map((p) => ({
         ...p,

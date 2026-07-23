@@ -30,6 +30,7 @@ type InvoicePreviewProps = {
   totalInvoices: number;
   onNext: () => void;
   onPrev: () => void;
+  isDeliveryChallan?: boolean;
 };
 
 export default function InvoicePreview({
@@ -43,6 +44,7 @@ export default function InvoicePreview({
   totalInvoices,
   onNext,
   onPrev,
+  isDeliveryChallan = false,
 }: InvoicePreviewProps) {
   const [zoom, setZoom] = useState(1.3);
 
@@ -73,6 +75,8 @@ export default function InvoicePreview({
   const vehicleNumber = invoice.vehicle_number || batch?.vehicle_number || "NA";
   const dateOfSupply = invoice.date_of_supply || invoice.invoice_date || "";
 
+  const currentScale = isDeliveryChallan ? zoom * 0.75 : zoom;
+
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <DialogContent
@@ -81,7 +85,11 @@ export default function InvoicePreview({
       >
         <DialogHeader className="p-4 border-b bg-white flex flex-row items-center justify-between shrink-0">
           <div className="flex items-center gap-4">
-            <DialogTitle className="text-xl m-0">Invoice Preview</DialogTitle>
+            <DialogTitle className="text-xl m-0 font-bold">
+              {isDeliveryChallan
+                ? "Delivery Challan Preview"
+                : "Invoice Preview"}
+            </DialogTitle>
             <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-md">
               <Button
                 variant="ghost"
@@ -156,7 +164,7 @@ export default function InvoicePreview({
             <div
               className="bg-white shadow-xl origin-top transition-transform duration-200"
               style={{
-                transform: `scale(${zoom})`,
+                transform: `scale(${currentScale})`,
                 width: "220mm",
                 minHeight: batch?.batch_type === "PURCHASE" ? "155mm" : "311mm",
                 height: batch?.batch_type === "PURCHASE" ? "155mm" : "auto",
@@ -353,9 +361,9 @@ export default function InvoicePreview({
                     <tr>
                       <td
                         colSpan={8}
-                        className="text-center font-bold underline bg-gray-200 py-1 border-b border-black"
+                        className="text-center font-bold underline bg-gray-200 py-1 border-b border-black uppercase"
                       >
-                        INVOICE
+                        {isDeliveryChallan ? "DELIVERY CHALLAN" : "INVOICE"}
                       </td>
                     </tr>
 
@@ -566,7 +574,7 @@ export default function InvoicePreview({
                             colSpan={2}
                             className="border border-black text-right px-1"
                           >
-                            {p.rate ? Number(p.rate).toFixed(2) : ""}
+                            {p.rate ? Math.round(Number(p.rate)) : ""}
                           </td>
                           <td className="border border-black text-right px-1 font-medium bg-slate-50/50">
                             {p.amount ? Number(p.amount).toFixed(2) : ""}
@@ -590,9 +598,9 @@ export default function InvoicePreview({
                     <tr>
                       <td
                         colSpan={3}
-                        className="border border-black font-bold text-center text-blue-900 py-1"
+                        className="border border-black font-bold text-center text-emerald-700 py-1 uppercase"
                       >
-                        Goods Despatched
+                        ✅ GOODS DISPATCHED
                       </td>
                       <td colSpan={2} className="border border-black px-1 py-1">
                         Total Amount Before Tax

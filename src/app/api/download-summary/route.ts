@@ -1,6 +1,7 @@
 import ExcelJS from "exceljs";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
 
 export async function GET(request: NextRequest) {
   try {
@@ -47,15 +48,19 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Fetch all final saved invoice data from this batch
-    const { data: invoices, error: invoicesError } = await supabase
-      .from("invoice")
-      .select("*")
-      .eq("invoice_batch_id", batchId)
-      .order("invoice_date", { ascending: true })
-      .order("invoice_number", { ascending: true });
+    // Fetch all final saved invoice data from this batch without 1000-row PostgREST truncation
+    let invoices: any[] = [];
+    try {
+      invoices = await fetchAllInvoicesForBatch(supabase, batchId);
+    } catch (invoicesError: any) {
+      console.error("Error fetching all invoices for summary:", invoicesError);
+      return NextResponse.json(
+        { message: "Failed to load invoices for summary" },
+        { status: 500 },
+      );
+    }
 
-    if (invoicesError || !invoices || invoices.length === 0) {
+    if (!invoices || invoices.length === 0) {
       return NextResponse.json(
         { message: "No invoices found for this batch" },
         { status: 404 },

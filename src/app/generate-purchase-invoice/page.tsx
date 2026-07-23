@@ -38,6 +38,8 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useInvoiceForm } from "@/lib/hooks/useInvoiceForm";
 import { createClient } from "@/lib/supabase/client";
+import { ValidationGuidanceModal } from "@/components/ValidationGuidanceModal";
+import { CategorySplitSection } from "@/components/CategorySplitSection";
 import { cn } from "@/lib/utils";
 
 export default function GeneratePurchaseInvoice() {
@@ -77,6 +79,12 @@ export default function GeneratePurchaseInvoice() {
     handleAddProduct,
     handleRemoveProduct,
     handleSubmit,
+    validationGuidance,
+    setValidationGuidance,
+    handleApplySuggestedLimits,
+    categorySplits,
+    setCategorySplits,
+    sequencePreview,
   } = useInvoiceForm({ batchType: "PURCHASE" });
 
   const [occurrenceProductOpen, setOccurrenceProductOpen] = useState(false);
@@ -411,6 +419,50 @@ export default function GeneratePurchaseInvoice() {
                       className="bg-slate-50"
                     />
                   </div>
+
+                  {sequencePreview && (
+                    <div className="md:col-span-2 pt-3 border-t border-slate-100 space-y-3">
+                      <Label className="text-sm font-semibold text-slate-900">
+                        Invoice Sequence Preview
+                      </Label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="space-y-2 md:col-span-2">
+                          <Label className="text-xs text-slate-500 font-medium">
+                            Invoice Number
+                          </Label>
+                          <Input
+                            value={sequencePreview.nextInvoiceNumber}
+                            disabled
+                            className="bg-slate-50 font-mono font-semibold text-slate-900"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs text-slate-500 font-medium">
+                            Current Sequence
+                          </Label>
+                          <Input
+                            value={
+                              sequencePreview.currentSequenceNumber > 0
+                                ? sequencePreview.currentSequenceNumber
+                                : "—"
+                            }
+                            disabled
+                            className="bg-slate-50 font-mono text-slate-700"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs text-slate-500 font-medium">
+                            Next Sequence
+                          </Label>
+                          <Input
+                            value={sequencePreview.nextSequenceNumber}
+                            disabled
+                            className="bg-slate-50 font-mono text-slate-700"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
             </div>
@@ -654,6 +706,24 @@ export default function GeneratePurchaseInvoice() {
                 />
               </div>
 
+              <div className="w-full md:w-36 space-y-1">
+                <Label className="text-xs">Max / Invoice *</Label>
+                <Input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  placeholder="₹"
+                  value={tempMajorCustomer.max_invoice_amount}
+                  onChange={(e) =>
+                    setTempMajorCustomer({
+                      ...tempMajorCustomer,
+                      max_invoice_amount: e.target.value,
+                    })
+                  }
+                  className="h-10 bg-white"
+                />
+              </div>
+
               <Button
                 type="button"
                 onClick={handleAddMajorCustomer}
@@ -682,6 +752,16 @@ export default function GeneratePurchaseInvoice() {
                         <p className="text-sm text-slate-500">
                           ₹{parseFloat(major.amount).toLocaleString()} •{" "}
                           {major.invoice_count} Invoices
+                          {major.max_invoice_amount && (
+                            <>
+                              {" "}
+                              • Max: ₹
+                              {parseFloat(
+                                major.max_invoice_amount,
+                              ).toLocaleString()}
+                              /inv
+                            </>
+                          )}
                         </p>
                       </div>
                       <Button
@@ -820,6 +900,13 @@ export default function GeneratePurchaseInvoice() {
             </div>
           </CardContent>
         </Card>
+
+        {/* Category Split Section */}
+        <CategorySplitSection
+          totalAmount={formData.totalAmount}
+          value={categorySplits}
+          onChange={setCategorySplits}
+        />
 
         {/* Products */}
         <Card>
@@ -1578,6 +1665,12 @@ export default function GeneratePurchaseInvoice() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ValidationGuidanceModal
+        data={validationGuidance}
+        onClose={() => setValidationGuidance(null)}
+        onApplySuggestedLimits={handleApplySuggestedLimits}
+      />
     </div>
   );
 }

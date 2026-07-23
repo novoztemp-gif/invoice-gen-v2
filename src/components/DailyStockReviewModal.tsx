@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { roundToQuarterIncrement } from "@/lib/utils/quantity-rate-utils";
 
 export interface StockReviewRow {
   date: string;
@@ -28,6 +29,7 @@ interface DailyStockReviewModalProps {
   originalInvoices: any[];
   onSave: (adjustedInvoices: any[], finalReviewRows: StockReviewRow[]) => void;
   isSaving: boolean;
+  onRowsChange?: (rows: StockReviewRow[]) => void;
 }
 
 export function DailyStockReviewModal({
@@ -37,6 +39,7 @@ export function DailyStockReviewModal({
   originalInvoices,
   onSave,
   isSaving,
+  onRowsChange,
 }: DailyStockReviewModalProps) {
   const [rows, setRows] = useState<StockReviewRow[]>([]);
 
@@ -46,9 +49,9 @@ export function DailyStockReviewModal({
     }
   }, [isOpen, initialRows]);
 
-  // Helper to get a random target remaining stock between 0 and 15 (2 decimal places)
+  // Helper to get a random target remaining stock between 0 and 15 (0.25 increments)
   const getRandomTargetRemaining = () => {
-    return Math.round(Math.random() * 15 * 100) / 100;
+    return roundToQuarterIncrement(Math.random() * 15);
   };
 
   const handleQtyChange = (
@@ -56,7 +59,9 @@ export function DailyStockReviewModal({
     productId: string,
     newValue: string,
   ) => {
-    const newQty = Math.max(0, parseFloat(newValue) || 0);
+    const newQty = roundToQuarterIncrement(
+      Math.max(0, parseFloat(newValue) || 0),
+    );
 
     const updatedRows = [...rows];
     const editedRowIndex = updatedRows.findIndex(
@@ -102,12 +107,13 @@ export function DailyStockReviewModal({
       let proposedSold = Math.max(0, available - targetRemaining);
       proposedSold = Math.min(proposedSold, available);
 
-      currentRow.proposed_sold = Math.round(proposedSold * 100) / 100;
+      currentRow.proposed_sold = roundToQuarterIncrement(proposedSold);
       currentRow.remaining_stock =
         Math.round((available - currentRow.proposed_sold) * 100) / 100;
     }
 
     setRows(updatedRows);
+    onRowsChange?.(updatedRows);
   };
 
   const checkRowInvalid = (row: StockReviewRow) => {
@@ -254,7 +260,7 @@ export function DailyStockReviewModal({
                         <div className="flex items-center justify-center gap-1">
                           <Input
                             type="number"
-                            step="0.01"
+                            step="0.25"
                             min="0"
                             className={`w-28 text-center h-8 font-mono ${
                               isRowInvalid

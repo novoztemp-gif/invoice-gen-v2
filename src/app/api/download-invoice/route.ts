@@ -6,6 +6,7 @@ import { createClient } from "@/lib/supabase/server";
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const invoiceId = searchParams.get("invoiceId");
+  const isChallan = searchParams.get("isChallan") === "true";
 
   if (!invoiceId) {
     return NextResponse.json(
@@ -367,10 +368,10 @@ export async function GET(request: NextRequest) {
     cellA2.alignment = { horizontal: "center", vertical: "middle" };
     cellA2.fill = grayFill;
 
-    // Row 3: INVOICE
+    // Row 3: INVOICE / DELIVERY CHALLAN
     ws.mergeCells("A3:H3");
     const cellA3 = ws.getCell("A3");
-    cellA3.value = "INVOICE";
+    cellA3.value = isChallan ? "DELIVERY CHALLAN" : "INVOICE";
     cellA3.font = { bold: true, underline: true, size: 12 };
     cellA3.alignment = { horizontal: "center", vertical: "middle" };
     cellA3.fill = grayFill;
@@ -604,7 +605,7 @@ export async function GET(request: NextRequest) {
     // Bottom section: Goods Despatched
     ws.mergeCells(`A${currentRow}:C${currentRow}`);
     const cellGoodsTitle = ws.getCell(`A${currentRow}`);
-    cellGoodsTitle.value = "Goods Despatched";
+    cellGoodsTitle.value = "✅ GOODS DISPATCHED";
     cellGoodsTitle.font = { bold: true, color: { argb: "FF000080" } };
     cellGoodsTitle.alignment = { horizontal: "center" };
 
@@ -756,6 +757,8 @@ export async function GET(request: NextRequest) {
     return buffer as any;
   };
 
+  const docPrefix = isChallan ? "Delivery_Challan_" : "";
+
   if (batch.batch_type === "PURCHASE") {
     const pdfBuffer = await generatePurchasePDFBuffer(
       inv,
@@ -765,7 +768,7 @@ export async function GET(request: NextRequest) {
     return new NextResponse(pdfBuffer as any, {
       status: 200,
       headers: {
-        "Content-Disposition": `attachment; filename="${inv.invoice_number}.pdf"`,
+        "Content-Disposition": `attachment; filename="${docPrefix}${inv.invoice_number}.pdf"`,
         "Content-Type": "application/pdf",
       },
     });
@@ -780,7 +783,7 @@ export async function GET(request: NextRequest) {
   return new NextResponse(excelBuffer as any, {
     status: 200,
     headers: {
-      "Content-Disposition": `attachment; filename="${inv.invoice_number}.xlsx"`,
+      "Content-Disposition": `attachment; filename="${docPrefix}${inv.invoice_number}.xlsx"`,
       "Content-Type":
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     },
