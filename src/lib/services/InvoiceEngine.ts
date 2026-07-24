@@ -1154,24 +1154,6 @@ export class InvoiceEngine {
           }
         }
 
-        if (
-          prodConfig.product_name.toUpperCase().includes("CHICKEN") &&
-          invoiceDate === "2026-07-24"
-        ) {
-          console.log(`
-[CHICKEN LOG]
-Product: ${prodConfig.product_name}
-Date: ${invoiceDate}
-Opening Stock: ${dayOpening}
-Purchased: ${dayPurchased}
-Available: ${available}
-Initial Proposed Sold: ${initialProposedSold}
-Initial Remaining: ${initialRemaining}
-Normalized Proposed Sold: ${qtyToSell}
-Normalized Remaining: ${actualRemaining}
-`);
-        }
-
         runningRemaining.set(prodConfig.product_id, actualRemaining);
 
         if (qtyToSell <= 0) continue;
