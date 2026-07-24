@@ -42,6 +42,16 @@ export async function fetchAllInvoicesForBatch<T = any>(
     }
   }
 
+  allInvoices.sort((a: any, b: any) => {
+    if (a.invoice_number && b.invoice_number) {
+      return a.invoice_number.localeCompare(b.invoice_number, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+    }
+    return 0;
+  });
+
   return allInvoices;
 }
 

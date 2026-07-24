@@ -52,8 +52,11 @@ export function AddSupplierDialog() {
       return;
     }
 
+    const category = (formData.get("category") as string) || "Meat";
+
     const data = {
       company_name,
+      category,
       address,
       state,
       state_code,
@@ -90,9 +93,23 @@ export function AddSupplierDialog() {
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2 col-span-2">
+            <div className="space-y-2">
               <Label htmlFor="company_name">Company / Supplier Name *</Label>
               <Input id="company_name" name="company_name" required />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="category">Product Category Supplied *</Label>
+              <select
+                id="category"
+                name="category"
+                defaultValue="Meat"
+                className="w-full h-10 px-3 border border-slate-200 rounded-md bg-white text-sm focus:outline-none focus:ring-2 focus:ring-slate-950"
+                required
+              >
+                <option value="Meat">🥩 Meat</option>
+                <option value="Fruits">🍎 Fruits</option>
+              </select>
             </div>
 
             <div className="space-y-2 md:col-span-2">

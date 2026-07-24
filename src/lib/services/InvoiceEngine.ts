@@ -9,6 +9,7 @@ import {
   roundToWholeInteger,
   isValidWholeNumber,
   computeLineAmount,
+  generateCommercialQuantity,
 } from "@/lib/utils/quantity-rate-utils";
 
 export interface ProductConfig {
@@ -959,16 +960,41 @@ export class InvoiceEngine {
 
     // Seed with the opening stock from the ledger for each product on the first date
     for (const prodConfig of batch.products) {
-      if (availableStockMap) {
-        // Find the earliest ledger entry for this product to get day-1 opening
-        const firstKey = `${dateList[0]}_${prodConfig.product_id}`;
-        // The ledger key stores "available after previous sales" – we treat it
-        // as the opening of day 0 here; the loop below will re-derive it properly.
-        runningRemaining.set(prodConfig.product_id, 0);
-      } else {
-        runningRemaining.set(prodConfig.product_id, 0);
-      }
+      runningRemaining.set(prodConfig.product_id, 0);
     }
+
+    // Compute proportional category totals across batch products
+    const categoryTotals = new Map<string, number>();
+    for (const p of batch.products) {
+      const cat = (p as any).category_name || (p as any).category || "Meat";
+      const avgRate =
+        (parseFloat(p.perDayRateMin) + parseFloat(p.perDayRateMax)) / 2;
+      const avgQty =
+        (parseFloat(p.perDayQtyMin) + parseFloat(p.perDayQtyMax)) / 2;
+      const estAmt =
+        (isNaN(avgRate) ? 100 : avgRate) * (isNaN(avgQty) ? 10 : avgQty);
+      categoryTotals.set(cat, (categoryTotals.get(cat) || 0) + estAmt);
+    }
+    const grandTotalEst =
+      Array.from(categoryTotals.values()).reduce((a, b) => a + b, 0) || 1;
+
+    // Natural Active Subset Sampling for Sales Batch Customers
+    let activeSelectedCustomers = [...selectedCustomers];
+    if (activeSelectedCustomers.length > 10) {
+      const poolRatio = 0.3 + Math.random() * 0.2; // 30% to 50%
+      const targetSubCount = Math.max(
+        5,
+        Math.min(
+          activeSelectedCustomers.length,
+          Math.ceil(activeSelectedCustomers.length * poolRatio),
+        ),
+      );
+      activeSelectedCustomers = [...activeSelectedCustomers]
+        .sort(() => Math.random() - 0.5)
+        .slice(0, targetSubCount);
+    }
+
+    const customerBatchCategoryMap = new Map<string, string>();
 
     for (const invoiceDate of dateList) {
       const productsOnDay: any[] = [];
@@ -1076,6 +1102,10 @@ Normalized Remaining: ${actualRemaining}
         productsOnDay.push({
           product_id: prodConfig.product_id,
           product_name: prodConfig.product_name,
+          category:
+            (prodConfig as any).category_name ||
+            (prodConfig as any).category ||
+            "Meat",
           hsn_code: prodConfig.hsn_code,
           unit_of_measure: prodConfig.unit_of_measure,
           quantity: qtyToSell,
@@ -1088,10 +1118,13 @@ Normalized Remaining: ${actualRemaining}
         continue;
       }
 
-      // ── Bin-pack products into invoices strictly per category (Meat vs Fruits) ──
+      // ── Redesigned Invoice Composition Algorithm (3-8 Products, Commercial Quantities First) ──
       const productsByCategory = new Map<string, any[]>();
       for (const p of productsOnDay) {
-        const catKey = p.category || "Meat";
+        const rawCat = String(p.category || "Meat").toUpperCase();
+        const catKey = rawCat.includes("FRUIT") ? "Fruits" : "Meat";
+        p.category = catKey;
+
         if (!productsByCategory.has(catKey)) {
           productsByCategory.set(catKey, []);
         }
@@ -1101,75 +1134,125 @@ Normalized Remaining: ${actualRemaining}
       const dayInvoices: any[] = [];
 
       for (const [catKey, categoryProducts] of productsByCategory.entries()) {
-        let currentInvoiceProducts: any[] = [];
-        let currentInvoiceAmount = 0;
+        let pool = [...categoryProducts];
 
-        const shuffledProducts = [...categoryProducts].sort(
-          () => Math.random() - 0.5,
-        );
+        while (pool.length > 0) {
+          // 1. Natural product subset count (3 to 8 distinct products)
+          const targetSubsetCount = Math.min(
+            pool.length,
+            Math.floor(Math.random() * 6) + 3,
+          );
 
-        for (const p of shuffledProducts) {
-          let remainingQty = p.quantity;
-          while (remainingQty > 0) {
-            const maxFittingQty = Math.floor(
-              (thresholdMax - currentInvoiceAmount) / p.rate,
+          // Shuffle pool and select targetSubsetCount products
+          pool.sort(() => Math.random() - 0.5);
+          const chosenProducts = pool.slice(0, targetSubsetCount);
+          const remainingPool: any[] = [];
+
+          let currentInvoiceProducts: any[] = [];
+          let currentInvoiceAmount = 0;
+          const usedQuantities = new Set<number>();
+
+          for (const p of chosenProducts) {
+            const minRate = parseFloat(p.perDayRateMin) || 10;
+            const maxRate = parseFloat(p.perDayRateMax) || 500;
+            const rate = roundToWholeInteger(
+              minRate + Math.random() * (maxRate - minRate),
             );
+            p.rate = rate;
 
-            if (maxFittingQty <= 0) {
-              if (currentInvoiceProducts.length > 0) {
-                dayInvoices.push({
-                  category_key: catKey,
-                  products: currentInvoiceProducts,
-                  total_amount: currentInvoiceAmount,
-                });
-                currentInvoiceProducts = [];
-                currentInvoiceAmount = 0;
-              } else {
-                const amt = Math.round(remainingQty * p.rate * 100) / 100;
-                currentInvoiceProducts.push({
-                  ...p,
-                  quantity: remainingQty,
-                  amount: amt,
-                });
-                currentInvoiceAmount = amt;
-                remainingQty = 0;
-              }
+            const prodMinQty = parseFloat(p.perDayQtyMin) || 2;
+            const prodMaxQty = parseFloat(p.perDayQtyMax) || 100;
+
+            const maxQtyFitting =
+              (thresholdMax - currentInvoiceAmount) / (rate || 1);
+
+            if (
+              maxQtyFitting < prodMinQty &&
+              currentInvoiceProducts.length > 0
+            ) {
+              remainingPool.push(p);
               continue;
             }
 
-            const qtyToPut = Math.min(remainingQty, maxFittingQty);
-            const amt = Math.round(qtyToPut * p.rate * 100) / 100;
+            const upperLimit = Math.min(
+              p.quantity,
+              prodMaxQty,
+              Math.max(prodMinQty, maxQtyFitting),
+            );
 
+            const qtyToPut = generateCommercialQuantity(
+              prodMinQty,
+              upperLimit,
+              {
+                productName: p.product_name,
+                existingQuantities: usedQuantities,
+              },
+            );
+
+            if (qtyToPut <= 0) {
+              remainingPool.push(p);
+              continue;
+            }
+
+            const amt = Math.round(qtyToPut * rate * 100) / 100;
+
+            if (
+              currentInvoiceAmount + amt > thresholdMax &&
+              currentInvoiceProducts.length > 0
+            ) {
+              remainingPool.push(p);
+              continue;
+            }
+
+            usedQuantities.add(qtyToPut);
             currentInvoiceProducts.push({
               ...p,
               quantity: qtyToPut,
+              rate,
               amount: amt,
             });
             currentInvoiceAmount =
               Math.round((currentInvoiceAmount + amt) * 100) / 100;
-            remainingQty -= qtyToPut;
-          }
-        }
 
-        if (currentInvoiceProducts.length > 0) {
-          dayInvoices.push({
-            category_key: catKey,
-            products: currentInvoiceProducts,
-            total_amount: currentInvoiceAmount,
-          });
+            p.quantity = Math.round((p.quantity - qtyToPut) * 100) / 100;
+            if (p.quantity >= prodMinQty) {
+              remainingPool.push(p);
+            }
+          }
+
+          const unchosen = pool.slice(targetSubsetCount);
+          pool = [...remainingPool, ...unchosen];
+
+          if (currentInvoiceProducts.length > 0) {
+            dayInvoices.push({
+              category_key: catKey,
+              products: currentInvoiceProducts,
+              total_amount: currentInvoiceAmount,
+            });
+          } else {
+            break;
+          }
         }
       }
 
-      // Merge last invoice into previous if it's below threshold
+      // Merge last invoice into previous SAME-CATEGORY invoice ONLY if it's below thresholdMin
       if (dayInvoices.length > 1) {
         const lastInv = dayInvoices[dayInvoices.length - 1];
         if (lastInv.total_amount < thresholdMin) {
-          const prevInv = dayInvoices[dayInvoices.length - 2];
-          if (prevInv.total_amount + lastInv.total_amount <= thresholdMax) {
-            prevInv.products.push(...lastInv.products);
-            prevInv.total_amount =
-              Math.round((prevInv.total_amount + lastInv.total_amount) * 100) /
-              100;
+          const sameCatPrevInv = dayInvoices
+            .slice(0, dayInvoices.length - 1)
+            .reverse()
+            .find((inv) => inv.category_key === lastInv.category_key);
+
+          if (
+            sameCatPrevInv &&
+            sameCatPrevInv.total_amount + lastInv.total_amount <= thresholdMax
+          ) {
+            sameCatPrevInv.products.push(...lastInv.products);
+            sameCatPrevInv.total_amount =
+              Math.round(
+                (sameCatPrevInv.total_amount + lastInv.total_amount) * 100,
+              ) / 100;
             dayInvoices.pop();
           }
         }
@@ -1179,13 +1262,23 @@ Normalized Remaining: ${actualRemaining}
 
       for (const inv of dayInvoices) {
         let assignedCustomerId = null;
+        const invCategory = inv.category_key || "Meat";
 
-        // Try eligible major customer who hasn't been billed today
+        // Filter major customer eligible by day AND customer category lock for this batch
         const eligibleMajor =
           majorTracking.find(
             (m) =>
-              m.remainingInvoices > 0 && !usedPartiesOnDay.has(m.customer_id),
-          ) || majorTracking.find((m) => m.remainingInvoices > 0);
+              m.remainingInvoices > 0 &&
+              !usedPartiesOnDay.has(m.customer_id) &&
+              (!customerBatchCategoryMap.has(m.customer_id) ||
+                customerBatchCategoryMap.get(m.customer_id) === invCategory),
+          ) ||
+          majorTracking.find(
+            (m) =>
+              m.remainingInvoices > 0 &&
+              (!customerBatchCategoryMap.has(m.customer_id) ||
+                customerBatchCategoryMap.get(m.customer_id) === invCategory),
+          );
 
         if (eligibleMajor) {
           assignedCustomerId = eligibleMajor.customer_id;
@@ -1194,22 +1287,62 @@ Normalized Remaining: ${actualRemaining}
             Math.round(
               (eligibleMajor.remainingAmount - inv.total_amount) * 100,
             ) / 100;
-        } else if (selectedCustomers.length > 0) {
-          const availableCustomers = selectedCustomers.filter(
-            (cId) => !usedPartiesOnDay.has(cId),
+        } else if (activeSelectedCustomers.length > 0) {
+          const catEst = categoryTotals.get(invCategory) || 0;
+          const catRatio = catEst / grandTotalEst;
+          const catQuota = Math.max(
+            1,
+            Math.round(activeSelectedCustomers.length * catRatio),
+          );
+          const assignedCountForCat = Array.from(
+            customerBatchCategoryMap.values(),
+          ).filter((c) => c === invCategory).length;
+
+          // Customers already assigned to invCategory or unassigned (if quota allows)
+          const categoryAndDayEligible = activeSelectedCustomers.filter(
+            (cId) => {
+              if (usedPartiesOnDay.has(cId)) return false;
+              const currentCat = customerBatchCategoryMap.get(cId);
+              if (currentCat === invCategory) return true;
+              if (!currentCat && assignedCountForCat < catQuota) return true;
+              return false;
+            },
           );
 
-          if (availableCustomers.length > 0) {
+          const categoryEligibleOnly = activeSelectedCustomers.filter((cId) => {
+            const currentCat = customerBatchCategoryMap.get(cId);
+            if (currentCat === invCategory) return true;
+            if (!currentCat && assignedCountForCat < catQuota) return true;
+            return false;
+          });
+
+          const fallbackAnySameCategory = activeSelectedCustomers.filter(
+            (cId) =>
+              !customerBatchCategoryMap.has(cId) ||
+              customerBatchCategoryMap.get(cId) === invCategory,
+          );
+
+          if (categoryAndDayEligible.length > 0) {
             const randomCustomerIndex = Math.floor(
-              Math.random() * availableCustomers.length,
+              Math.random() * categoryAndDayEligible.length,
             );
-            assignedCustomerId = availableCustomers[randomCustomerIndex];
+            assignedCustomerId = categoryAndDayEligible[randomCustomerIndex];
+          } else if (categoryEligibleOnly.length > 0) {
+            const randomCustomerIndex = Math.floor(
+              Math.random() * categoryEligibleOnly.length,
+            );
+            assignedCustomerId = categoryEligibleOnly[randomCustomerIndex];
+          } else if (fallbackAnySameCategory.length > 0) {
+            const randomCustomerIndex = Math.floor(
+              Math.random() * fallbackAnySameCategory.length,
+            );
+            assignedCustomerId = fallbackAnySameCategory[randomCustomerIndex];
           } else {
             // Fallback if capacity exceeded on this single date
             const randomCustomerIndex = Math.floor(
-              Math.random() * selectedCustomers.length,
+              Math.random() * activeSelectedCustomers.length,
             );
-            assignedCustomerId = selectedCustomers[randomCustomerIndex];
+            assignedCustomerId = activeSelectedCustomers[randomCustomerIndex];
           }
         } else {
           assignedCustomerId = batch.receiving_company_id;
@@ -1217,6 +1350,7 @@ Normalized Remaining: ${actualRemaining}
 
         if (assignedCustomerId) {
           usedPartiesOnDay.add(assignedCustomerId);
+          customerBatchCategoryMap.set(assignedCustomerId, invCategory);
         }
 
         const abbr = (batch as any).issuing_company_abbreviation || "IC";
@@ -1247,6 +1381,69 @@ Normalized Remaining: ${actualRemaining}
         invoiceCounter++;
       }
     }
+
+    // ── Exact Batch Total Balancing Routine (Issue 6) ──
+    // Guarantees sum(invoice.total_amount) === batch.total_amount to exact ₹0.00
+    const targetTotal = batch.total_amount;
+    let currentTotal =
+      Math.round(
+        invoices.reduce((sum, inv) => sum + inv.total_amount, 0) * 100,
+      ) / 100;
+    let batchDiff = Math.round((targetTotal - currentTotal) * 100) / 100;
+
+    if (Math.abs(batchDiff) > 0.001 && invoices.length > 0) {
+      for (let i = invoices.length - 1; i >= 0; i--) {
+        const inv = invoices[i];
+        if (!inv.products || inv.products.length === 0) continue;
+
+        for (let j = inv.products.length - 1; j >= 0; j--) {
+          const item = inv.products[j];
+          const newProdAmount =
+            Math.round((item.amount + batchDiff) * 100) / 100;
+
+          if (newProdAmount > 0) {
+            let newRate = roundToWholeInteger(
+              newProdAmount / (item.quantity || 1),
+            );
+            if (newRate <= 0) newRate = item.rate;
+
+            const computedAmount = computeLineAmount(item.quantity, newRate);
+            const lineDiff =
+              Math.round((newProdAmount - computedAmount) * 100) / 100;
+
+            if (Math.abs(lineDiff) < 0.01) {
+              item.rate = newRate;
+              item.amount = computedAmount;
+            } else {
+              item.amount = newProdAmount;
+            }
+
+            inv.total_amount =
+              Math.round(
+                inv.products.reduce((s: number, p: any) => s + p.amount, 0) *
+                  100,
+              ) / 100;
+
+            currentTotal =
+              Math.round(
+                invoices.reduce((sum, inv) => sum + inv.total_amount, 0) * 100,
+              ) / 100;
+            batchDiff = Math.round((targetTotal - currentTotal) * 100) / 100;
+
+            if (Math.abs(batchDiff) < 0.001) break;
+          }
+        }
+        if (Math.abs(batchDiff) < 0.001) break;
+      }
+    }
+
+    // ── Ascending Invoice Number Sort (Issue 5) ──
+    invoices.sort((a, b) =>
+      a.invoice_number.localeCompare(b.invoice_number, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }),
+    );
 
     return invoices;
   }
@@ -1404,6 +1601,8 @@ Normalized Remaining: ${actualRemaining}
       }
     }
 
+    const existingQuantitiesInInvoice = new Set<number>();
+
     selectedProducts.forEach((item, index) => {
       const targetProdAmount = A[index];
 
@@ -1412,18 +1611,15 @@ Normalized Remaining: ${actualRemaining}
       const qLow = Math.max(item.minQty, qMinPossible);
       const qHigh = Math.min(item.maxQty, qMaxPossible);
 
-      let quantity: number;
-      if (qLow <= qHigh) {
-        quantity = roundToQuarterIncrement(
-          qLow + Math.random() * (qHigh - qLow),
-        );
-      } else {
-        quantity = roundToQuarterIncrement(
-          item.minQty + Math.random() * (item.maxQty - item.minQty),
-        );
-      }
+      const lowBound = qLow <= qHigh ? qLow : item.minQty;
+      const highBound = qLow <= qHigh ? qHigh : item.maxQty;
+      let quantity = generateCommercialQuantity(lowBound, highBound, {
+        productName: item.config.product_name,
+        existingQuantities: existingQuantitiesInInvoice,
+      });
       quantity = Math.max(item.minQty, Math.min(item.maxQty, quantity));
       quantity = roundToQuarterIncrement(quantity);
+      existingQuantitiesInInvoice.add(quantity);
 
       let rate = Math.round(targetProdAmount / (quantity || 1));
       rate = Math.max(
@@ -1531,6 +1727,21 @@ Normalized Remaining: ${actualRemaining}
       batch.receiving_company_id
     ) {
       selectedCustomers = [batch.receiving_company_id];
+    }
+
+    // Natural Active Subset Sampling for Purchase Suppliers
+    if (selectedCustomers.length > 5) {
+      const poolRatio = 0.3 + Math.random() * 0.2; // 30% to 50%
+      const targetSubCount = Math.max(
+        3,
+        Math.min(
+          selectedCustomers.length,
+          Math.ceil(selectedCustomers.length * poolRatio),
+        ),
+      );
+      selectedCustomers = [...selectedCustomers]
+        .sort(() => Math.random() - 0.5)
+        .slice(0, targetSubCount);
     }
 
     // 2. Prepare target invoice budgets and customer assignments
@@ -1945,15 +2156,13 @@ Normalized Remaining: ${actualRemaining}
       const targetProdAmount = allocations[index];
       const { minQty, maxQty, minRate, maxRate } = item;
 
-      let qty = 0;
-      if (minQty <= maxQty) {
-        qty = Math.round(minQty + Math.random() * (maxQty - minQty));
-      } else {
-        qty = Math.round(maxQty);
-      }
+      let qty = generateCommercialQuantity(
+        minQty,
+        Math.min(maxQty, item.config.currentAvailable),
+      );
       qty = Math.max(
         0,
-        Math.min(Math.floor(item.config.currentAvailable), qty),
+        Math.min(roundToQuarterIncrement(item.config.currentAvailable), qty),
       );
 
       if (qty > 0) {

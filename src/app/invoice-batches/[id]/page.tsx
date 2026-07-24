@@ -214,12 +214,20 @@ export default function BatchDetail() {
   );
 
   const dateWiseSummary = Object.entries(invoicesByDate)
-    .map(([date, invs]) => ({
-      date,
-      count: invs.length,
-      total: invs.reduce((sum, inv) => sum + inv.total_amount, 0),
-      invoices: invs,
-    }))
+    .map(([date, invs]) => {
+      const sortedInvs = [...invs].sort((a, b) =>
+        a.invoice_number.localeCompare(b.invoice_number, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        }),
+      );
+      return {
+        date,
+        count: sortedInvs.length,
+        total: sortedInvs.reduce((sum, inv) => sum + inv.total_amount, 0),
+        invoices: sortedInvs,
+      };
+    })
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
   return (

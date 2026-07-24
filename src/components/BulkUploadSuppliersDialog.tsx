@@ -55,12 +55,22 @@ export function BulkUploadSuppliersDialog() {
   const downloadSupplierTemplate = () => {
     const data = [
       {
-        "Supplier Name": "XYZ Supplies Ltd",
+        "Supplier Name": "ABC Chicken Farm",
         Address: "456 Industrial Estate",
-        GSTIN: "33XYZDE1234F1Z5",
-        PAN: "XYZDE1234F",
+        GSTIN: "33AAAAA0000A1Z5",
+        PAN: "AAAAA0000A",
         State: "Tamil Nadu",
         "State Code": "33",
+        Category: "Meat",
+      },
+      {
+        "Supplier Name": "Green Valley Fruits Pvt Ltd",
+        Address: "789 Orchard Road",
+        GSTIN: "33BBBBB0000B1Z5",
+        PAN: "BBBBB0000B",
+        State: "Tamil Nadu",
+        "State Code": "33",
+        Category: "Fruits",
       },
     ];
 
@@ -109,6 +119,7 @@ export function BulkUploadSuppliersDialog() {
           "PAN",
           "State",
           "State Code",
+          "Category",
         ];
 
         // Check if required headers are present
@@ -117,7 +128,9 @@ export function BulkUploadSuppliersDialog() {
         );
 
         if (!hasAllHeaders) {
-          setError("Required columns missing");
+          setError(
+            "Required columns missing. Required: Supplier Name, Address, GSTIN, PAN, State, State Code, Category",
+          );
           setUploading(false);
           return;
         }
@@ -128,6 +141,31 @@ export function BulkUploadSuppliersDialog() {
         const panIdx = headers.indexOf("PAN");
         const stateIdx = headers.indexOf("State");
         const stateCodeIdx = headers.indexOf("State Code");
+        const categoryIdx = headers.indexOf("Category");
+
+        // ── Strict Category Pre-Validation Loop ──
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i];
+          if (!row || row.length === 0) continue;
+
+          const isRowBlank = row.every(
+            (val) =>
+              val === undefined || val === null || String(val).trim() === "",
+          );
+          if (isRowBlank) continue;
+
+          const rawCategory = row[categoryIdx]?.toString()?.trim();
+          if (
+            !rawCategory ||
+            (rawCategory !== "Meat" && rawCategory !== "Fruits")
+          ) {
+            setError(
+              `Row ${i + 1}: Invalid Category. Allowed values are Meat or Fruits.`,
+            );
+            setUploading(false);
+            return;
+          }
+        }
 
         // Fetch existing suppliers to perform lookups in-memory
         const { data: existingSuppliers, error: fetchError } = await supabase
@@ -170,6 +208,7 @@ export function BulkUploadSuppliersDialog() {
           const pan = row[panIdx]?.toString()?.trim() || null;
           const state = row[stateIdx]?.toString()?.trim() || "";
           const state_code = row[stateCodeIdx]?.toString()?.trim() || null;
+          const category = row[categoryIdx]?.toString()?.trim() || "Meat";
 
           if (!company_name || !address || !state) {
             failed++;
@@ -185,6 +224,7 @@ export function BulkUploadSuppliersDialog() {
                 .from("suppliers")
                 .update({
                   address,
+                  category,
                   gstin: gstin || null,
                   pan: pan || null,
                   state_code: state_code || null,
@@ -202,6 +242,7 @@ export function BulkUploadSuppliersDialog() {
                 .from("suppliers")
                 .insert({
                   company_name,
+                  category,
                   address,
                   gstin: gstin || null,
                   pan: pan || null,

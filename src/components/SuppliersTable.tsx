@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 type Supplier = {
   id: string;
   company_name: string;
+  category?: string;
   address: string;
   gstin?: string | null;
   pan?: string | null;
@@ -67,6 +68,7 @@ export function SuppliersTable({ suppliers }: { suppliers: Supplier[] }) {
       const query = searchQuery.toLowerCase();
       return (
         supplier.company_name?.toLowerCase().includes(query) ||
+        supplier.category?.toLowerCase().includes(query) ||
         supplier.address?.toLowerCase().includes(query) ||
         supplier.gstin?.toLowerCase().includes(query) ||
         supplier.pan?.toLowerCase().includes(query) ||
@@ -108,13 +110,11 @@ export function SuppliersTable({ suppliers }: { suppliers: Supplier[] }) {
       </div>
 
       {filteredAndSortedSuppliers.length === 0 ? (
-        <p className="text-slate-500 text-center py-8">
-          {searchQuery
-            ? "No suppliers match your search."
-            : "No suppliers found. Add your first supplier!"}
-        </p>
+        <div className="border border-slate-200 rounded-lg p-8 text-center text-slate-500">
+          No suppliers found.
+        </div>
       ) : (
-        <div className="rounded-md border overflow-x-auto">
+        <div className="border border-slate-200 rounded-lg overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow>
@@ -126,6 +126,16 @@ export function SuppliersTable({ suppliers }: { suppliers: Supplier[] }) {
                     className="p-0 h-auto font-semibold hover:bg-transparent"
                   >
                     {getSortIcon("company_name")}
+                  </Button>
+                </TableHead>
+                <TableHead className="min-w-[120px]">
+                  Category
+                  <Button
+                    variant="ghost"
+                    onClick={() => handleSort("category")}
+                    className="h-auto p-0 font-semibold hover:bg-transparent"
+                  >
+                    {getSortIcon("category")}
                   </Button>
                 </TableHead>
                 <TableHead className="min-w-[300px]">Address</TableHead>
@@ -168,6 +178,11 @@ export function SuppliersTable({ suppliers }: { suppliers: Supplier[] }) {
                 <TableRow key={supplier.id}>
                   <TableCell className="font-medium">
                     {supplier.company_name}
+                  </TableCell>
+                  <TableCell>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-800 border border-slate-200">
+                      {supplier.category || "Meat"}
+                    </span>
                   </TableCell>
                   <TableCell className="text-sm">
                     <div className="max-w-[300px] text-wrap">

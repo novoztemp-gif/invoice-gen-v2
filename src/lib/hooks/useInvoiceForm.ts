@@ -440,6 +440,10 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             products: selectedProducts.map((item) => ({
               product_id: item.product.id,
               product_name: item.product.product_name,
+              category:
+                (item.product as any).category_name ||
+                (item.product as any).category ||
+                "Meat",
               hsn_code: item.product.hsn_code,
               unit_of_measure: item.product.unit_of_measure,
               perDayQtyMin: item.perDayQtyMin,
@@ -534,6 +538,10 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           products: selectedProducts.map((item) => ({
             product_id: item.product.id,
             product_name: item.product.product_name,
+            category:
+              (item.product as any).category_name ||
+              (item.product as any).category ||
+              "Meat",
             hsn_code: item.product.hsn_code,
             unit_of_measure: item.product.unit_of_measure,
             perDayQtyMin: item.perDayQtyMin,
@@ -720,13 +728,44 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     // ── General Party & Product Availability Validation ──
     const partyTerm =
       batchType === "PURCHASE" ? "Supplier" : "Receiving Customer";
-    const availableParties = receivingCompanies;
+    let availableParties = receivingCompanies;
 
-    if (!availableParties || availableParties.length === 0) {
-      setErrorPopup(
-        `No ${partyTerm}s are available. Please create at least one ${partyTerm} before generating invoices.`,
-      );
-      return;
+    if (batchType === "PURCHASE") {
+      if (!receivingCompanies || receivingCompanies.length === 0) {
+        setErrorPopup(
+          "No Suppliers are available. Please create at least one Supplier or perform a Bulk Upload.",
+        );
+        return;
+      }
+
+      const firstProd = selectedProducts[0]?.product;
+      const rawCat = (
+        (firstProd as any)?.category_name ||
+        (firstProd as any)?.category ||
+        "Meat"
+      ).toUpperCase();
+      const targetCategory = rawCat.includes("FRUIT") ? "FRUITS" : "MEAT";
+
+      const matchedSuppliers = receivingCompanies.filter((p: any) => {
+        const cat = (p.category || "Meat").toUpperCase();
+        return cat === targetCategory;
+      });
+
+      if (matchedSuppliers.length === 0) {
+        const displayCat = targetCategory === "FRUITS" ? "Fruit" : "Meat";
+        setErrorPopup(
+          `No ${displayCat} Suppliers are available. Please create at least one ${displayCat} Supplier.`,
+        );
+        return;
+      }
+      availableParties = matchedSuppliers;
+    } else {
+      if (!availableParties || availableParties.length === 0) {
+        setErrorPopup(
+          `No ${partyTerm}s are available. Please create at least one ${partyTerm} before generating invoices.`,
+        );
+        return;
+      }
     }
 
     if (!products || products.length === 0) {
@@ -884,6 +923,10 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           products: selectedProducts.map((item) => ({
             product_id: item.product.id,
             product_name: item.product.product_name,
+            category:
+              (item.product as any).category_name ||
+              (item.product as any).category ||
+              "Meat",
             hsn_code: item.product.hsn_code,
             unit_of_measure: item.product.unit_of_measure,
             perDayQtyMin: item.perDayQtyMin,

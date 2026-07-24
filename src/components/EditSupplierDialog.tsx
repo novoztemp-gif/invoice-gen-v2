@@ -17,6 +17,7 @@ import { createClient } from "@/lib/supabase/client";
 type Supplier = {
   id: string;
   company_name: string;
+  category?: string;
   address: string;
   gstin?: string | null;
   pan?: string | null;
@@ -69,6 +70,7 @@ export function EditSupplierDialog({
         .from("suppliers")
         .update({
           company_name: formData.company_name,
+          category: formData.category || "Meat",
           address: formData.address,
           gstin: gstin ? gstin.toUpperCase() : null,
           pan: pan ? pan.toUpperCase() : null,
@@ -102,7 +104,7 @@ export function EditSupplierDialog({
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
-            <div className="col-span-2">
+            <div>
               <Label htmlFor="edit_company_name">
                 Company / Supplier Name *
               </Label>
@@ -114,6 +116,22 @@ export function EditSupplierDialog({
                 }
                 required
               />
+            </div>
+
+            <div>
+              <Label htmlFor="edit_category">Product Category Supplied *</Label>
+              <select
+                id="edit_category"
+                value={formData.category || "Meat"}
+                onChange={(e) =>
+                  setFormData({ ...formData, category: e.target.value })
+                }
+                className="w-full h-10 px-3 border border-slate-200 rounded-md bg-white text-sm focus:outline-none focus:ring-2 focus:ring-slate-950"
+                required
+              >
+                <option value="Meat">🥩 Meat</option>
+                <option value="Fruits">🍎 Fruits</option>
+              </select>
             </div>
 
             <div className="col-span-2">

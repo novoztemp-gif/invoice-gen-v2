@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import { createClient } from "@/lib/supabase/server";
+import { roundToQuarterIncrement } from "@/lib/utils/quantity-rate-utils";
 
 export async function POST(request: NextRequest) {
   try {
@@ -201,21 +202,22 @@ export async function POST(request: NextRequest) {
         const key = `${row.ledger_date}_${productId}`;
         let proposed = proposedQtyMap.get(key) || 0;
 
-        const available =
-          Math.round((opening + purchased - prevSold) * 100) / 100;
-        let remaining = Math.round((available - proposed) * 100) / 100;
+        const available = roundToQuarterIncrement(
+          opening + purchased - prevSold,
+        );
+        let remaining = roundToQuarterIncrement(available - proposed);
 
         // Perform final normalization step to strictly enforce Remaining ∈ [0, 15]
         if (remaining > 15) {
-          proposed = Math.round((proposed + (remaining - 15)) * 100) / 100;
+          proposed = roundToQuarterIncrement(proposed + (remaining - 15));
           remaining = 15;
         } else if (remaining < 0) {
-          proposed = Math.round((proposed + remaining) * 100) / 100;
+          proposed = roundToQuarterIncrement(proposed + remaining);
           remaining = 0;
         }
 
         // Recompute to guarantee 0 <= remaining <= 15
-        remaining = Math.round((available - proposed) * 100) / 100;
+        remaining = roundToQuarterIncrement(available - proposed);
         proposedQtyMap.set(key, proposed);
 
         reviewRows.push({
