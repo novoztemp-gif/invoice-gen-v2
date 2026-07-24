@@ -147,13 +147,7 @@ export async function POST(request: NextRequest) {
         total_amount: Number(inv.total_amount || 0),
         products: inv.products,
         status: inv.status || "generated",
-        customer_id:
-          inv.customer_id ||
-          inv.products?.[0]?.customer_id ||
-          receivingCompanyId,
-        transport_mode:
-          inv.transport_mode || transportMode || "In hand Delivery",
-        vehicle_number: inv.vehicle_number || vehicleNumber || "NA",
+        batch_type: "SALES",
       }));
 
       const { data: insertedInvoices, error: invoiceInsertError } =
