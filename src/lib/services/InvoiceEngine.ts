@@ -1124,33 +1124,35 @@ export class InvoiceEngine {
           continue;
         }
 
-        // Business rule: Remaining ∈ [0, 15]
-        const maxTargetRemaining = Math.min(15, available);
-        const targetRemaining =
-          Math.round(Math.random() * maxTargetRemaining * 100) / 100;
+        let qtyToSell = 0;
+        let actualRemaining = 0;
 
-        let qtyToSell = Math.max(
-          0,
-          Math.round((available - targetRemaining) * 100) / 100,
-        );
-
-        let actualRemaining = Math.round((available - qtyToSell) * 100) / 100;
-
-        const initialProposedSold = qtyToSell;
-        const initialRemaining = actualRemaining;
-
-        // Perform final normalization step to strictly enforce Remaining ∈ [0, 15]
-        if (actualRemaining > 15) {
-          qtyToSell =
-            Math.round((qtyToSell + (actualRemaining - 15)) * 100) / 100;
-          actualRemaining = 15;
-        } else if (actualRemaining < 0) {
-          qtyToSell = Math.round((qtyToSell + actualRemaining) * 100) / 100;
+        if (available < 10) {
+          // If total available stock is less than 10 KG, consume the entire remaining stock at once
+          // to prevent generating micro splits like 0.25 KG, 0.36 KG, 0.44 KG
+          qtyToSell = available;
           actualRemaining = 0;
-        }
+        } else {
+          // Available >= 10 KG: target remaining <= 15 KG while ensuring qtyToSell >= 10 KG
+          const maxTargetRemaining = Math.min(15, available - 10);
+          const targetRemaining =
+            Math.round(Math.random() * maxTargetRemaining * 4) / 4;
 
-        // Recompute to guarantee 0 <= remaining <= 15
-        actualRemaining = Math.round((available - qtyToSell) * 100) / 100;
+          qtyToSell = Math.max(
+            10,
+            Math.round((available - targetRemaining) * 4) / 4,
+          );
+
+          actualRemaining = Math.round((available - qtyToSell) * 100) / 100;
+          if (actualRemaining > 15) {
+            qtyToSell =
+              Math.round((qtyToSell + (actualRemaining - 15)) * 4) / 4;
+            actualRemaining = 15;
+          } else if (actualRemaining < 0) {
+            qtyToSell = available;
+            actualRemaining = 0;
+          }
+        }
 
         if (
           prodConfig.product_name.toUpperCase().includes("CHICKEN") &&
@@ -1471,29 +1473,29 @@ Normalized Remaining: ${actualRemaining}
     }
 
     // ── Exact Batch Total Balancing Routine (Issue 6) ──
-    // Guarantees sum(invoice.total_amount) === batch.total_amount to exact ₹0.00
-    const targetTotal = batch.total_amount;
-    let currentTotal =
-      Math.round(
-        invoices.reduce((sum, inv) => sum + inv.total_amount, 0) * 100,
-      ) / 100;
-    let batchDiff = Math.round((targetTotal - currentTotal) * 100) / 100;
+    // Guarantees sum(invoice.total_amount) === batch.total_amount to exact ₹0 (whole integer rupees)
+    const targetTotal = Math.round(batch.total_amount);
+    let currentTotal = Math.round(
+      invoices.reduce((sum, inv) => sum + Math.round(inv.total_amount || 0), 0),
+    );
+    let batchDiff = targetTotal - currentTotal;
 
-    if (Math.abs(batchDiff) > 0.001 && invoices.length > 0) {
+    if (Math.abs(batchDiff) > 0 && invoices.length > 0) {
       const lastInv = invoices[invoices.length - 1];
       if (lastInv && lastInv.products && lastInv.products.length > 0) {
         const lastItem = lastInv.products[lastInv.products.length - 1];
-        const targetLineAmt =
-          Math.round((lastItem.amount + batchDiff) * 100) / 100;
+        const targetLineAmt = Math.round(lastItem.amount + batchDiff);
         if (targetLineAmt > 0) {
-          lastItem.quantity =
-            Math.round((targetLineAmt / (lastItem.rate || 1)) * 100) / 100;
           lastItem.amount = targetLineAmt;
-          lastInv.total_amount =
-            Math.round(
-              lastInv.products.reduce((s: number, p: any) => s + p.amount, 0) *
-                100,
-            ) / 100;
+          lastItem.rate = roundToWholeInteger(
+            lastItem.amount / (lastItem.quantity || 1),
+          );
+          lastInv.total_amount = Math.round(
+            lastInv.products.reduce(
+              (s: number, p: any) => s + Math.round(p.amount || 0),
+              0,
+            ),
+          );
         }
       }
     }
@@ -1994,28 +1996,28 @@ Normalized Remaining: ${actualRemaining}
       });
     }
 
-    // Final global penny-level drift alignment across invoices to hit totalAmount EXACTLY
-    const finalSum =
-      Math.round(
-        invoices.reduce((sum, inv) => sum + inv.total_amount, 0) * 100,
-      ) / 100;
-    const globalDrift = Math.round((totalAmount - finalSum) * 100) / 100;
+    // Final global drift alignment across invoices to hit totalAmount EXACTLY in whole integer rupees
+    const finalSum = Math.round(
+      invoices.reduce((sum, inv) => sum + Math.round(inv.total_amount || 0), 0),
+    );
+    const globalDrift = Math.round(totalAmount) - finalSum;
 
-    if (Math.abs(globalDrift) > 0.001 && invoices.length > 0) {
+    if (Math.abs(globalDrift) > 0 && invoices.length > 0) {
       const lastInv = invoices[invoices.length - 1];
       if (lastInv && lastInv.products.length > 0) {
         const lastItem = lastInv.products[lastInv.products.length - 1];
-        const targetLineAmt =
-          Math.round((lastItem.amount + globalDrift) * 100) / 100;
+        const targetLineAmt = Math.round(lastItem.amount + globalDrift);
         if (targetLineAmt > 0) {
-          lastItem.quantity =
-            Math.round((targetLineAmt / (lastItem.rate || 1)) * 100) / 100;
           lastItem.amount = targetLineAmt;
-          lastInv.total_amount =
-            Math.round(
-              lastInv.products.reduce((s: number, p: any) => s + p.amount, 0) *
-                100,
-            ) / 100;
+          lastItem.rate = roundToWholeInteger(
+            lastItem.amount / (lastItem.quantity || 1),
+          );
+          lastInv.total_amount = Math.round(
+            lastInv.products.reduce(
+              (s: number, p: any) => s + Math.round(p.amount || 0),
+              0,
+            ),
+          );
         }
       }
     }

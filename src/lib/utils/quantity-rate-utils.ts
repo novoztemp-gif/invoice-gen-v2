@@ -35,10 +35,11 @@ export function isValidWholeNumber(rate: number): boolean {
 }
 
 /**
- * Computes line item amount (quantity * rate) rounded to 2 decimal places.
+ * Computes line item amount (quantity * rate) rounded to a whole integer (rupee, no decimals).
  */
 export function computeLineAmount(qty: number, rate: number): number {
-  return Math.round(qty * rate * 100) / 100;
+  if (isNaN(qty) || isNaN(rate)) return 0;
+  return Math.round(qty * rate);
 }
 
 /**
@@ -58,6 +59,7 @@ export interface CommercialQuantityOptions {
 /**
  * Generates a realistic commercial quantity within [minQty, maxQty].
  * - Product-aware step selection
+ * - Min 10 KG threshold per line item for commercial wholesale
  * - 70–80% whole integer quantities, 20–30% quarter-decimals (.00, .25, .50, .75)
  * - Prevents duplicate line-item quantities within a single invoice
  * - Strictly respects minQty <= quantity <= maxQty
@@ -67,7 +69,13 @@ export function generateCommercialQuantity(
   maxQty: number,
   options: CommercialQuantityOptions = {},
 ): number {
-  const low = Math.max(0, Math.min(minQty, maxQty));
+  // If total available quantity is less than 10 KG, consume the entire quantity at once to prevent micro-splits
+  if (maxQty < 10 && maxQty > 0) {
+    return roundToQuarterIncrement(maxQty);
+  }
+
+  const effectiveMin = Math.max(10, minQty || 10);
+  const low = Math.max(effectiveMin, Math.min(effectiveMin, maxQty));
   const high = Math.max(low, maxQty);
 
   if (low === high) {
