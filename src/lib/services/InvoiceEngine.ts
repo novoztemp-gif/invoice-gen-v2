@@ -1179,8 +1179,11 @@ Normalized Remaining: ${actualRemaining}
             );
             p.rate = rate;
 
-            const prodMinQty = parseFloat(p.perDayQtyMin) || 2;
-            const prodMaxQty = parseFloat(p.perDayQtyMax) || 100;
+            const prodMinQty = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
+            const prodMaxQty = Math.max(
+              prodMinQty,
+              parseFloat(p.perDayQtyMax) || 100,
+            );
 
             const maxQtyFitting =
               (thresholdMax - currentInvoiceAmount) / (rate || 1);
@@ -1804,8 +1807,8 @@ Normalized Remaining: ${actualRemaining}
             minR + Math.random() * (maxR - minR),
           );
 
-          const minQ = parseFloat(p.perDayQtyMin) || 5;
-          const maxQ = parseFloat(p.perDayQtyMax) || 100;
+          const minQ = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
+          const maxQ = Math.max(minQ, parseFloat(p.perDayQtyMax) || 100);
 
           const maxQtyFitting =
             (thresholdMax - currentInvoiceAmount) / (rate || 1);
