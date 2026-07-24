@@ -25,6 +25,7 @@ export async function POST(request: NextRequest) {
       recurringProducts,
       stockSourceBatchId,
       userId,
+      invoicesOverride,
     } = body;
 
     // Validate stockSourceBatchId
@@ -98,62 +99,93 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // 2. Prepare the Batch Configuration object to pass to the engine
-    const fromDate = new Date(invoiceDateFrom);
-    const toDate = new Date(invoiceDateTo);
-    const timeDiff = toDate.getTime() - fromDate.getTime();
-    const numberOfDays = Math.ceil(timeDiff / (1000 * 3600 * 24)) + 1;
+    // 1. Create the new Sales invoice_batch record first
+    const { data: newBatch, error: batchError } = await supabase
+      .from("invoice_batch")
+      .insert({
+        issuing_company_id: issuingCompanyId,
+        stock_source_batch_id: stockSourceBatchId,
+        receiving_company_id: receivingCompanyId || null,
+        selected_customers: selectedCustomers || [],
+        major_customers: majorCustomers || [],
+        transport_mode: transportMode || "In hand Delivery",
+        vehicle_number: vehicleNumber || "NA",
+        date_of_supply: dateOfSupply || invoiceDateTo,
+        invoice_date_from: invoiceDateFrom,
+        invoice_date_to: invoiceDateTo,
+        minimum_invoice_amount: parseFloat(minimumInvoiceAmount),
+        maximum_invoice_amount: parseFloat(maximumInvoiceAmount),
+        total_amount: parseFloat(totalAmount),
+        financial_year: `FY${financialYearStart}-${String(financialYearEnd).slice(2)}`,
+        batch_type: "SALES",
+        status: "generated",
+        batch_status: "FINALIZED",
+        products: products,
+        created_by: userId,
+      })
+      .select()
+      .single();
 
-    // Resolve starting invoice counter
-    const { data: allInvoices } = await supabase
-      .from("invoice")
-      .select("invoice_number")
-      .order("invoice_number", { ascending: false })
-      .limit(1);
-
-    let startingCounter = 1;
-    if (allInvoices && allInvoices.length > 0) {
-      for (const inv of allInvoices) {
-        const match = inv.invoice_number.match(/(\d+)$/);
-        if (match) {
-          startingCounter = parseInt(match[1], 10) + 1;
-          break;
-        }
-      }
+    if (batchError || !newBatch) {
+      console.error("Error creating sales batch record:", batchError);
+      return NextResponse.json(
+        {
+          message: `Failed to create sales batch: ${batchError?.message || "Unknown error"}`,
+        },
+        { status: 500 },
+      );
     }
 
-    const batchConfig = {
-      issuingCompanyId,
-      receivingCompanyId,
-      selectedCustomers,
-      majorCustomers,
-      transportMode,
-      vehicleNumber,
-      dateOfSupply,
-      invoiceDateFrom,
-      invoiceDateTo,
-      minimumInvoiceAmount: parseFloat(minimumInvoiceAmount),
-      maximumInvoiceAmount: parseFloat(maximumInvoiceAmount),
-      totalAmount: parseFloat(totalAmount),
-      financialYearStart: parseInt(financialYearStart),
-      financialYearEnd: parseInt(financialYearEnd),
-      products,
-      recurringProducts: recurringProducts || [],
-      stockSourceBatchId: primaryBatchId,
-      availableStockMap,
-      numberOfDays,
-      startingCounter,
-    };
+    let savedInvoices: any[] = [];
 
-    // 3. Generate Proposed Sales Invoices using InvoiceEngine
-    const proposedInvoices = await InvoiceEngine.generateAndSaveInvoices(
-      supabase,
-      batchConfig as any,
-    );
+    // 2. If invoicesOverride is provided from Daily Stock Review modal, save them directly under newBatch.id
+    if (Array.isArray(invoicesOverride) && invoicesOverride.length > 0) {
+      const invoicesToInsert = invoicesOverride.map((inv: any) => ({
+        invoice_batch_id: newBatch.id,
+        invoice_number: inv.invoice_number,
+        invoice_date: inv.invoice_date,
+        total_amount: Number(inv.total_amount || 0),
+        products: inv.products,
+        status: inv.status || "generated",
+        customer_id:
+          inv.customer_id ||
+          inv.products?.[0]?.customer_id ||
+          receivingCompanyId,
+        transport_mode:
+          inv.transport_mode || transportMode || "In hand Delivery",
+        vehicle_number: inv.vehicle_number || vehicleNumber || "NA",
+      }));
+
+      const { data: insertedInvoices, error: invoiceInsertError } =
+        await supabase.from("invoice").insert(invoicesToInsert).select();
+
+      if (invoiceInsertError) {
+        console.error("Error inserting sales invoices:", invoiceInsertError);
+        // Rollback batch if invoice insertion fails
+        await supabase.from("invoice_batch").delete().eq("id", newBatch.id);
+        return NextResponse.json(
+          {
+            message: `Failed to insert sales invoices: ${invoiceInsertError.message}`,
+          },
+          { status: 500 },
+        );
+      }
+      savedInvoices = insertedInvoices || [];
+    } else {
+      // Otherwise use InvoiceEngine to generate and save invoices for newBatch.id
+      await InvoiceEngine.generateAndSaveInvoices(supabase, newBatch.id);
+      const { data: invs } = await supabase
+        .from("invoice")
+        .select("*")
+        .eq("invoice_batch_id", newBatch.id);
+      savedInvoices = invs || [];
+    }
 
     return NextResponse.json({
       success: true,
-      proposedInvoices,
+      batchId: newBatch.id,
+      invoicesCount: savedInvoices.length,
+      proposedInvoices: savedInvoices,
     });
   } catch (error: any) {
     console.error("Error generating proposed sales batch:", error);
