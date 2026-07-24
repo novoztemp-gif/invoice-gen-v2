@@ -1057,10 +1057,43 @@ export default function GenerateInvoice() {
 
         {/* Products Card */}
         <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
-          <CardHeader className="p-3 pb-2 border-b border-slate-100">
+          <CardHeader className="p-3 pb-2 border-b border-slate-100 flex flex-row items-center justify-between">
             <CardTitle className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
               Products
             </CardTitle>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (
+                  selectedProducts.length === products.length &&
+                  products.length > 0
+                ) {
+                  setSelectedProducts([]);
+                } else {
+                  const newSelections = products.map((product) => {
+                    const rule = productRules.find(
+                      (r) => r.product_id === product.id,
+                    );
+                    return {
+                      product,
+                      perDayQtyMin: rule?.quantity_min?.toString() || "",
+                      perDayQtyMax: rule?.quantity_max?.toString() || "",
+                      perDayRateMin: rule?.rate_min?.toString() || "",
+                      perDayRateMax: rule?.rate_max?.toString() || "",
+                    };
+                  });
+                  setSelectedProducts(newSelections);
+                }
+              }}
+              className="h-6 text-xs px-2"
+            >
+              {selectedProducts.length === products.length &&
+              products.length > 0
+                ? "Deselect All"
+                : "Select All"}
+            </Button>
           </CardHeader>
           <CardContent className="p-3.5 space-y-3">
             <div className="space-y-1">
