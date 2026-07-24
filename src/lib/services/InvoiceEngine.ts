@@ -1414,48 +1414,21 @@ Normalized Remaining: ${actualRemaining}
     let batchDiff = Math.round((targetTotal - currentTotal) * 100) / 100;
 
     if (Math.abs(batchDiff) > 0.001 && invoices.length > 0) {
-      for (let i = invoices.length - 1; i >= 0; i--) {
-        const inv = invoices[i];
-        if (!inv.products || inv.products.length === 0) continue;
-
-        for (let j = inv.products.length - 1; j >= 0; j--) {
-          const item = inv.products[j];
-          const newProdAmount =
-            Math.round((item.amount + batchDiff) * 100) / 100;
-
-          if (newProdAmount > 0) {
-            let newRate = roundToWholeInteger(
-              newProdAmount / (item.quantity || 1),
-            );
-            if (newRate <= 0) newRate = item.rate;
-
-            const computedAmount = computeLineAmount(item.quantity, newRate);
-            const lineDiff =
-              Math.round((newProdAmount - computedAmount) * 100) / 100;
-
-            if (Math.abs(lineDiff) < 0.01) {
-              item.rate = newRate;
-              item.amount = computedAmount;
-            } else {
-              item.amount = newProdAmount;
-            }
-
-            inv.total_amount =
-              Math.round(
-                inv.products.reduce((s: number, p: any) => s + p.amount, 0) *
-                  100,
-              ) / 100;
-
-            currentTotal =
-              Math.round(
-                invoices.reduce((sum, inv) => sum + inv.total_amount, 0) * 100,
-              ) / 100;
-            batchDiff = Math.round((targetTotal - currentTotal) * 100) / 100;
-
-            if (Math.abs(batchDiff) < 0.001) break;
-          }
+      const lastInv = invoices[invoices.length - 1];
+      if (lastInv && lastInv.products && lastInv.products.length > 0) {
+        const lastItem = lastInv.products[lastInv.products.length - 1];
+        const targetLineAmt =
+          Math.round((lastItem.amount + batchDiff) * 100) / 100;
+        if (targetLineAmt > 0) {
+          lastItem.quantity =
+            Math.round((targetLineAmt / (lastItem.rate || 1)) * 100) / 100;
+          lastItem.amount = computeLineAmount(lastItem.quantity, lastItem.rate);
+          lastInv.total_amount =
+            Math.round(
+              lastInv.products.reduce((s: number, p: any) => s + p.amount, 0) *
+                100,
+            ) / 100;
         }
-        if (Math.abs(batchDiff) < 0.001) break;
       }
     }
 
@@ -1955,37 +1928,28 @@ Normalized Remaining: ${actualRemaining}
       });
     }
 
-    // Final global penny-level drift alignment across invoices
+    // Final global penny-level drift alignment across invoices to hit totalAmount EXACTLY
     const finalSum =
       Math.round(
         invoices.reduce((sum, inv) => sum + inv.total_amount, 0) * 100,
       ) / 100;
-    let globalDrift = Math.round((totalAmount - finalSum) * 100) / 100;
+    const globalDrift = Math.round((totalAmount - finalSum) * 100) / 100;
 
     if (Math.abs(globalDrift) > 0.001 && invoices.length > 0) {
-      for (const inv of invoices) {
-        if (Math.abs(globalDrift) <= 0.01) break;
-        for (const item of inv.products) {
-          const targetLineAmt =
-            Math.round((item.amount + globalDrift) * 100) / 100;
-          if (targetLineAmt > 0) {
-            const newRate = roundToWholeInteger(targetLineAmt / item.quantity);
-            if (newRate > 0) {
-              item.rate = newRate;
-              item.amount = computeLineAmount(item.quantity, newRate);
-              inv.total_amount =
-                Math.round(
-                  inv.products.reduce((s: number, p: any) => s + p.amount, 0) *
-                    100,
-                ) / 100;
-              const newSum =
-                Math.round(
-                  invoices.reduce((sum, i) => sum + i.total_amount, 0) * 100,
-                ) / 100;
-              globalDrift = Math.round((totalAmount - newSum) * 100) / 100;
-              if (Math.abs(globalDrift) <= 0.01) break;
-            }
-          }
+      const lastInv = invoices[invoices.length - 1];
+      if (lastInv && lastInv.products.length > 0) {
+        const lastItem = lastInv.products[lastInv.products.length - 1];
+        const targetLineAmt =
+          Math.round((lastItem.amount + globalDrift) * 100) / 100;
+        if (targetLineAmt > 0) {
+          lastItem.quantity =
+            Math.round((targetLineAmt / (lastItem.rate || 1)) * 100) / 100;
+          lastItem.amount = computeLineAmount(lastItem.quantity, lastItem.rate);
+          lastInv.total_amount =
+            Math.round(
+              lastInv.products.reduce((s: number, p: any) => s + p.amount, 0) *
+                100,
+            ) / 100;
         }
       }
     }
