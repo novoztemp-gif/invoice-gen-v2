@@ -37,12 +37,20 @@ export async function POST(request: NextRequest) {
     const supabase = await createClient();
 
     // 1. Fetch daily stock ledger for the selected stock source purchase batch
+    const batchIds = stockSourceBatchId
+      .split(",")
+      .map((id: string) => id.trim())
+      .filter((id: string) => Boolean(id) && !id.startsWith("CARRY_FORWARD_"));
+
     const { data: ledgerData, error: ledgerError } = await supabase
       .from("daily_stock_ledger")
       .select(
         "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
       )
-      .eq("purchase_batch_id", stockSourceBatchId)
+      .in(
+        "purchase_batch_id",
+        batchIds.length > 0 ? batchIds : [stockSourceBatchId],
+      )
       .order("ledger_date", { ascending: true });
 
     if (ledgerError) {
@@ -51,19 +59,81 @@ export async function POST(request: NextRequest) {
         { status: 500 },
       );
     }
-    console.log("DRY-RUN: raw ledgerData from DB:", JSON.stringify(ledgerData));
+
+    let effectiveLedgerData = ledgerData || [];
+
+    // Fallback: If daily_stock_ledger has no entries for these purchase batches, generate synthetic stock ledger rows from purchase invoices/batches
+    if (effectiveLedgerData.length === 0 && batchIds.length > 0) {
+      const { data: purchaseInvoices } = await supabase
+        .from("invoice")
+        .select("invoice_batch_id, invoice_date, products")
+        .in("invoice_batch_id", batchIds);
+
+      const { data: purchaseBatches } = await supabase
+        .from("invoice_batch")
+        .select("id, products")
+        .in("id", batchIds);
+
+      const productQtyMap = new Map<string, number>();
+
+      if (purchaseInvoices && purchaseInvoices.length > 0) {
+        for (const inv of purchaseInvoices) {
+          for (const p of inv.products || []) {
+            if (p.product_id) {
+              const qty = Number(p.quantity || 0);
+              productQtyMap.set(
+                p.product_id,
+                (productQtyMap.get(p.product_id) || 0) + qty,
+              );
+            }
+          }
+        }
+      } else if (purchaseBatches && purchaseBatches.length > 0) {
+        for (const b of purchaseBatches) {
+          for (const p of b.products || []) {
+            if (p.product_id) {
+              const qty = Number(p.monthly_quantity || p.quantity || 0);
+              productQtyMap.set(
+                p.product_id,
+                (productQtyMap.get(p.product_id) || 0) + qty,
+              );
+            }
+          }
+        }
+      }
+
+      // Build date list from invoiceDateFrom -> invoiceDateTo
+      const dateList: string[] = [];
+      const curDate = new Date(invoiceDateFrom);
+      const endDate = new Date(invoiceDateTo);
+      while (curDate <= endDate) {
+        dateList.push(curDate.toISOString().slice(0, 10));
+        curDate.setDate(curDate.getDate() + 1);
+      }
+
+      const syntheticRows: any[] = [];
+      for (const [prodId, totalPurchased] of productQtyMap.entries()) {
+        dateList.forEach((dateStr, idx) => {
+          syntheticRows.push({
+            ledger_date: dateStr,
+            product_id: prodId,
+            opening_stock: 0,
+            purchased_quantity: idx === 0 ? totalPurchased : 0,
+            sold_quantity: 0,
+          });
+        });
+      }
+      effectiveLedgerData = syntheticRows;
+    }
+
+    console.log(
+      "DRY-RUN: effectiveLedgerData rows count:",
+      effectiveLedgerData.length,
+    );
 
     // ── Build per-day stock picture ────────────────────────────────────────
-    // For each product, walk the days in order and carry forward the
-    // remaining stock so that opening(day n+1) = remaining(day n).
-    //
-    // We build two maps:
-    //   perDayLedger   — full opening/purchased/prevSold/available per day
-    //   availableStockMap — keyed by "date_productId" → available stock
-    //                       (this is what the engine uses to derive purchased)
-    //
     const productGroups = new Map<string, any[]>();
-    for (const row of ledgerData || []) {
+    for (const row of effectiveLedgerData) {
       if (!productGroups.has(row.product_id)) {
         productGroups.set(row.product_id, []);
       }
@@ -81,15 +151,9 @@ export async function POST(request: NextRequest) {
       }
     >();
 
-    // availableStockMap: "date_productId" → available stock for this day
-    // The generator interprets this as  available ≈ opening + purchased
-    // (it derives purchased = available - running_opening).
-    // To make that derivation exact we store the true "opening + purchased"
-    // (i.e. available before sales on that day, after applying carry-forward).
     const availableStockMap = new Map<string, any>();
 
     for (const [productId, rows] of productGroups.entries()) {
-      // Sort rows chronologically
       rows.sort((a: any, b: any) => a.ledger_date.localeCompare(b.ledger_date));
 
       let carryForward = Number(rows[0].opening_stock) || 0;
@@ -99,21 +163,17 @@ export async function POST(request: NextRequest) {
         const purchased = Number(row.purchased_quantity) || 0;
         const prevSold = Number(row.sold_quantity) || 0;
 
-        // Available before any new sales on this day
         const availableBeforeSales = opening + purchased;
-        // Available after existing recorded sales
         const available = Math.max(0, availableBeforeSales - prevSold);
 
         const key = `${row.ledger_date}_${productId}`;
         perDayLedger.set(key, { opening, purchased, prevSold, available });
 
-        // Store opening and purchased so the generator can derive available stock correctly
         availableStockMap.set(key, {
           opening: opening,
           purchased: Math.max(0, purchased - prevSold),
         });
 
-        // Next day opens with whatever is left after recorded sales
         carryForward = available;
       }
     }
@@ -182,6 +242,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    const { data: dbProducts } = await supabase
+      .from("products")
+      .select("id, product_name, unit_of_measure");
+    const dbProductMap = new Map();
+    (dbProducts || []).forEach((p) => dbProductMap.set(p.id, p));
+
     // 4. Construct the review rows by chronologically carrying forward the new proposed sales per product
     const reviewRows: any[] = [];
     for (const [productId, rows] of productGroups.entries()) {
@@ -191,8 +257,11 @@ export async function POST(request: NextRequest) {
       let carryForward = Number(rows[0].opening_stock) || 0;
 
       const productObj = products.find((p: any) => p.product_id === productId);
-      const productName = productObj?.product_name || "Unknown Product";
-      const unit = productObj?.unit_of_measure || "kg";
+      const dbProd = dbProductMap.get(productId);
+      const productName =
+        productObj?.product_name || dbProd?.product_name || "Product";
+      const unit =
+        productObj?.unit_of_measure || dbProd?.unit_of_measure || "kg";
 
       for (const row of rows) {
         const opening = carryForward;

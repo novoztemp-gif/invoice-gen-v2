@@ -151,24 +151,40 @@ export function SalesPlanningAssistant({
     let minSales = 0;
     let maxSales = 0;
 
+    const avgBatchRate =
+      totalPurchasedQty > 0 && batchValue > 0
+        ? batchValue / totalPurchasedQty
+        : 0;
+
     for (const prod of selectedProducts) {
       const pId = prod.product_id || prod.product?.id;
       const summaryItem = stockSummary.find((s) => s.product_id === pId);
       const availQty =
         Number(summaryItem?.total_available || summaryItem?.purchased) || 0;
 
-      const minRate = parseFloat(prod.perDayRateMin) || 0;
-      const maxRate = parseFloat(prod.perDayRateMax) || 0;
+      const minRate =
+        parseFloat(prod.perDayRateMin) ||
+        (avgBatchRate > 0 ? avgBatchRate * 0.9 : 0);
+      const maxRate = Math.max(
+        parseFloat(prod.perDayRateMax) || 0,
+        avgBatchRate > 0 ? avgBatchRate * 2.0 : 0,
+      );
 
       minSales += availQty * minRate;
       maxSales += availQty * maxRate;
+    }
+
+    // Fallback if maxSales is 0 or no products selected yet but batchValue exists
+    if (maxSales === 0 && batchValue > 0) {
+      minSales = batchValue * 0.9;
+      maxSales = batchValue * 2.0;
     }
 
     return {
       minAchievableSales: Math.round(minSales * 100) / 100,
       maxAchievableSales: Math.round(maxSales * 100) / 100,
     };
-  }, [selectedProducts, stockSummary]);
+  }, [selectedProducts, stockSummary, batchValue, totalPurchasedQty]);
 
   const isTargetAchievable = useMemo(() => {
     if (!targetSalesAmount || targetSalesAmount <= 0) return true;

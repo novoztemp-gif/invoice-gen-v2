@@ -724,12 +724,22 @@ export class InvoiceEngine {
     } else {
       let availableStockMap: Map<string, any> | null = null;
       if (typedBatch.stock_source_batch_id) {
+        const batchIds = typedBatch.stock_source_batch_id
+          .split(",")
+          .map((id: string) => id.trim())
+          .filter(
+            (id: string) => Boolean(id) && !id.startsWith("CARRY_FORWARD_"),
+          );
+
         const { data: ledgerData, error: ledgerError } = await supabase
           .from("daily_stock_ledger")
           .select(
             "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
           )
-          .eq("purchase_batch_id", typedBatch.stock_source_batch_id)
+          .in(
+            "purchase_batch_id",
+            batchIds.length > 0 ? batchIds : [typedBatch.stock_source_batch_id],
+          )
           .order("ledger_date", { ascending: true });
 
         if (ledgerError) {
@@ -738,9 +748,72 @@ export class InvoiceEngine {
           );
         }
 
+        let effectiveLedger = ledgerData || [];
+
+        if (effectiveLedger.length === 0 && batchIds.length > 0) {
+          const { data: purchaseInvoices } = await supabase
+            .from("invoice")
+            .select("invoice_batch_id, products")
+            .in("invoice_batch_id", batchIds);
+
+          const { data: purchaseBatches } = await supabase
+            .from("invoice_batch")
+            .select("id, products")
+            .in("id", batchIds);
+
+          const productQtyMap = new Map<string, number>();
+          if (purchaseInvoices && purchaseInvoices.length > 0) {
+            for (const inv of purchaseInvoices) {
+              for (const p of inv.products || []) {
+                if (p.product_id) {
+                  const qty = Number(p.quantity || 0);
+                  productQtyMap.set(
+                    p.product_id,
+                    (productQtyMap.get(p.product_id) || 0) + qty,
+                  );
+                }
+              }
+            }
+          } else if (purchaseBatches && purchaseBatches.length > 0) {
+            for (const b of purchaseBatches) {
+              for (const p of b.products || []) {
+                if (p.product_id) {
+                  const qty = Number(p.monthly_quantity || p.quantity || 0);
+                  productQtyMap.set(
+                    p.product_id,
+                    (productQtyMap.get(p.product_id) || 0) + qty,
+                  );
+                }
+              }
+            }
+          }
+
+          const syntheticRows: any[] = [];
+          const curD = new Date(fromDate);
+          const endD = new Date(typedBatch.invoice_date_to);
+          const dates: string[] = [];
+          while (curD <= endD) {
+            dates.push(curD.toISOString().slice(0, 10));
+            curD.setDate(curD.getDate() + 1);
+          }
+
+          for (const [prodId, totalQty] of productQtyMap.entries()) {
+            dates.forEach((dateStr, idx) => {
+              syntheticRows.push({
+                ledger_date: dateStr,
+                product_id: prodId,
+                opening_stock: 0,
+                purchased_quantity: idx === 0 ? totalQty : 0,
+                sold_quantity: 0,
+              });
+            });
+          }
+          effectiveLedger = syntheticRows;
+        }
+
         availableStockMap = new Map<string, any>();
         const productGroups = new Map<string, any[]>();
-        for (const row of ledgerData || []) {
+        for (const row of effectiveLedger) {
           if (!productGroups.has(row.product_id)) {
             productGroups.set(row.product_id, []);
           }
