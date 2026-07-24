@@ -106,11 +106,6 @@ export default function InvoiceEditor({
       const qty = Number(p.quantity);
       const rate = Number(p.rate);
       if (isNaN(qty) || qty <= 0) return alert("All quantities must be > 0");
-      if (!isValidQuarterIncrement(qty)) {
-        return alert(
-          "Quantity must be in increments of 0.25.\n\nAllowed values:\n.00\n.25\n.50\n.75",
-        );
-      }
       if (isNaN(rate) || rate <= 0) return alert("All rates must be > 0");
       if (!isValidWholeNumber(rate)) {
         return alert(

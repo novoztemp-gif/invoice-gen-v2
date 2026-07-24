@@ -12,12 +12,10 @@ export function roundToQuarterIncrement(qty: number): number {
 }
 
 /**
- * Validates whether a quantity is in valid 0.25 increments (.00, .25, .50, .75).
+ * Validates whether a quantity is valid (positive, allowing kilogram and gram increments).
  */
 export function isValidQuarterIncrement(qty: number): boolean {
-  if (isNaN(qty) || qty <= 0) return false;
-  const remainder = Math.abs((qty * 100) % 25);
-  return remainder < 0.001 || remainder > 24.999;
+  return !isNaN(qty) && qty > 0;
 }
 
 /**

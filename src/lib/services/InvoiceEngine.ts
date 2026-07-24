@@ -464,13 +464,6 @@ export class InvoiceEngine {
         };
       }
 
-      if (!isValidQuarterIncrement(qty)) {
-        return {
-          isValid: false,
-          message: `Quantity must be in increments of 0.25.\n\nAllowed values:\n.00\n.25\n.50\n.75\n\nFound: ${qty}`,
-        };
-      }
-
       if (isNaN(rate) || rate <= 0) {
         return {
           isValid: false,
