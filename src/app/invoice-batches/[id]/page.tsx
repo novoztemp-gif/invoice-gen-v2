@@ -782,19 +782,25 @@ export default function BatchDetail() {
                                       )}
                                     </div>
                                     {(() => {
-                                      const custId =
-                                        invoice.products?.[0]?.customer_id;
-                                      const custName = custId
-                                        ? receivingCustomers[custId]
-                                            ?.company_name
-                                        : batch.receiving_companies
-                                            ?.company_name;
-                                      return custName ? (
+                                      const partnerId =
+                                        (invoice as any).customer_id ||
+                                        invoice.products?.[0]?.customer_id ||
+                                        (batch as any).supplier_id ||
+                                        batch.receiving_company_id;
+                                      const partnerObj = partnerId
+                                        ? receivingCustomers[partnerId]
+                                        : null;
+                                      const partnerName =
+                                        partnerObj?.company_name ||
+                                        partnerObj?.supplier_name ||
+                                        batch.suppliers?.company_name ||
+                                        batch.receiving_companies?.company_name;
+                                      return partnerName ? (
                                         <p className="text-xs text-slate-500 font-medium mt-0.5">
                                           {batch.batch_type === "PURCHASE"
                                             ? "Supplier: "
                                             : "Customer: "}
-                                          {custName}
+                                          {partnerName}
                                         </p>
                                       ) : null;
                                     })()}
@@ -834,23 +840,25 @@ export default function BatchDetail() {
                                       <Eye className="h-4 w-4 mr-2" />
                                       Preview
                                     </Button>
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      className="flex-1 text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
-                                      onClick={() => {
-                                        setPreviewIndex(
-                                          invoices.findIndex(
-                                            (inv) => inv.id === invoice.id,
-                                          ),
-                                        );
-                                        setIsEditingMode(true);
-                                        setIsPreviewChallan(false);
-                                      }}
-                                    >
-                                      <Edit3 className="h-4 w-4 mr-2" />
-                                      Edit
-                                    </Button>
+                                    {batch.batch_status !== "FINALIZED" && (
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1 text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
+                                        onClick={() => {
+                                          setPreviewIndex(
+                                            invoices.findIndex(
+                                              (inv) => inv.id === invoice.id,
+                                            ),
+                                          );
+                                          setIsEditingMode(true);
+                                          setIsPreviewChallan(false);
+                                        }}
+                                      >
+                                        <Edit3 className="h-4 w-4 mr-2" />
+                                        Edit
+                                      </Button>
+                                    )}
                                     <Button
                                       variant="outline"
                                       size="sm"
@@ -885,23 +893,25 @@ export default function BatchDetail() {
                                     </Button>
 
                                     {/* 2. Edit */}
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      className="flex-1 min-w-[90px] text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
-                                      onClick={() => {
-                                        setPreviewIndex(
-                                          invoices.findIndex(
-                                            (inv) => inv.id === invoice.id,
-                                          ),
-                                        );
-                                        setIsEditingMode(true);
-                                        setIsPreviewChallan(false);
-                                      }}
-                                    >
-                                      <Edit3 className="h-3.5 w-3.5 mr-1.5" />
-                                      Edit
-                                    </Button>
+                                    {batch.batch_status !== "FINALIZED" && (
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1 min-w-[90px] text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
+                                        onClick={() => {
+                                          setPreviewIndex(
+                                            invoices.findIndex(
+                                              (inv) => inv.id === invoice.id,
+                                            ),
+                                          );
+                                          setIsEditingMode(true);
+                                          setIsPreviewChallan(false);
+                                        }}
+                                      >
+                                        <Edit3 className="h-3.5 w-3.5 mr-1.5" />
+                                        Edit
+                                      </Button>
+                                    )}
 
                                     {/* 3. Download Invoice */}
                                     <Button

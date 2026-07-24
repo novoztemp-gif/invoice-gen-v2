@@ -67,15 +67,26 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Fetch receiving companies to map names & GSTINs
+    // Fetch receiving companies and suppliers to map names & GSTINs
     const { data: receivingCompaniesList } = await supabase
       .from("receiving_companies")
       .select("*");
+    const { data: suppliersList } = await supabase
+      .from("suppliers")
+      .select("*");
 
-    const receivingCompaniesMap = new Map();
+    const partnerMap = new Map();
     if (receivingCompaniesList) {
       for (const comp of receivingCompaniesList) {
-        receivingCompaniesMap.set(comp.id, comp);
+        partnerMap.set(comp.id, comp);
+      }
+    }
+    if (suppliersList) {
+      for (const sup of suppliersList) {
+        partnerMap.set(sup.id, {
+          ...sup,
+          company_name: sup.supplier_name || sup.name || sup.company_name,
+        });
       }
     }
 
@@ -86,7 +97,11 @@ export async function GET(request: NextRequest) {
     const customerIds = new Set(
       invoices
         .map(
-          (inv) => inv.products?.[0]?.customer_id || batch.receiving_company_id,
+          (inv) =>
+            inv.customer_id ||
+            inv.products?.[0]?.customer_id ||
+            batch.receiving_company_id ||
+            batch.supplier_id,
         )
         .filter(Boolean),
     );
@@ -135,18 +150,24 @@ export async function GET(request: NextRequest) {
     // 3. Customer / Supplier Summary Aggregation
     const customerSummaryMap = new Map();
     invoices.forEach((inv) => {
-      const customerId =
-        inv.products?.[0]?.customer_id || batch.receiving_company_id;
-      const key = customerId || "unknown";
+      const partnerId =
+        inv.customer_id ||
+        inv.products?.[0]?.customer_id ||
+        batch.receiving_company_id ||
+        batch.supplier_id;
+      const key = partnerId || "unknown";
 
-      const company = receivingCompaniesMap.get(customerId) || {
-        company_name: "Unknown Company",
-        gstin: "N/A",
-      };
+      const company = partnerMap.get(partnerId) ||
+        partnerMap.get(batch.supplier_id) ||
+        partnerMap.get(batch.receiving_company_id) || {
+          company_name: "Unknown Company",
+          gstin: "N/A",
+        };
 
       if (!customerSummaryMap.has(key)) {
         customerSummaryMap.set(key, {
-          company_name: company.company_name,
+          company_name:
+            company.company_name || company.supplier_name || "Unknown Company",
           gstin: company.gstin || "N/A",
           invoiceCount: 0,
           totalAmount: 0,
@@ -514,10 +535,18 @@ export async function GET(request: NextRequest) {
     }
 
     invoices.forEach((inv, index) => {
-      const customerId =
-        inv.products?.[0]?.customer_id || batch.receiving_company_id;
-      const company = receivingCompaniesMap.get(customerId) || {};
-      const companyName = company.company_name || "Unknown Company";
+      const partnerId =
+        inv.customer_id ||
+        inv.products?.[0]?.customer_id ||
+        batch.receiving_company_id ||
+        batch.supplier_id;
+      const company =
+        partnerMap.get(partnerId) ||
+        partnerMap.get(batch.supplier_id) ||
+        partnerMap.get(batch.receiving_company_id) ||
+        {};
+      const companyName =
+        company.company_name || company.supplier_name || "Unknown Company";
       const gstin = company.gstin || "N/A";
       const isOdd = index % 2 === 1;
 

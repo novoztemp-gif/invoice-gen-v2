@@ -47,10 +47,14 @@ export type InvoiceBatch = {
     perDayRateMax: string;
     occurrencePercentage?: number | null;
   }>;
+  supplier_id?: string;
   issuing_companies?: {
     company_name: string;
   };
   receiving_companies?: {
+    company_name: string;
+  };
+  suppliers?: {
     company_name: string;
   };
 };
@@ -60,6 +64,7 @@ export type Invoice = {
   invoice_batch_id: string;
   invoice_number: string;
   invoice_date: string;
+  customer_id?: string;
   products: Array<{
     product_id: string;
     product_name: string;
@@ -102,14 +107,25 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
   const fetchReceivingCustomers = async () => {
     try {
       const supabase = createClient();
-      const { data } = await supabase.from("receiving_companies").select("*");
-      if (data) {
-        const map: Record<string, any> = {};
-        data.forEach((c) => {
+      const { data: recData } = await supabase
+        .from("receiving_companies")
+        .select("*");
+      const { data: supData } = await supabase.from("suppliers").select("*");
+      const map: Record<string, any> = {};
+      if (recData) {
+        recData.forEach((c) => {
           map[c.id] = c;
         });
-        setReceivingCustomers(map);
       }
+      if (supData) {
+        supData.forEach((s) => {
+          map[s.id] = {
+            ...s,
+            company_name: s.supplier_name || s.name || s.company_name,
+          };
+        });
+      }
+      setReceivingCustomers(map);
     } catch (e) {
       console.error("Error fetching receiving customers map:", e);
     }

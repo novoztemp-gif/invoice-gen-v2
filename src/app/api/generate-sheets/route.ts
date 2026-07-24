@@ -178,20 +178,32 @@ export async function POST(request: NextRequest) {
     const { data: receivingCompaniesList } = await supabase
       .from("receiving_companies")
       .select("*");
+    const { data: suppliersList } = await supabase
+      .from("suppliers")
+      .select("*");
 
-    const receivingCompaniesMap = new Map();
+    const partnerMap = new Map();
     if (receivingCompaniesList) {
       for (const comp of receivingCompaniesList) {
-        receivingCompaniesMap.set(comp.id, comp);
+        partnerMap.set(comp.id, comp);
+      }
+    }
+    if (suppliersList) {
+      for (const sup of suppliersList) {
+        partnerMap.set(sup.id, {
+          ...sup,
+          company_name: sup.supplier_name || sup.name || sup.company_name,
+        });
       }
     }
 
     const invoicePayloads = invoices.map((invoice) => {
-      const rCompId =
-        invoice.products?.[0]?.customer_id || batch.receiving_company_id;
-      const receivingCompany = rCompId
-        ? receivingCompaniesMap.get(rCompId)
-        : null;
+      const partnerId =
+        invoice.customer_id ||
+        invoice.products?.[0]?.customer_id ||
+        batch.receiving_company_id ||
+        batch.supplier_id;
+      const receivingCompany = partnerId ? partnerMap.get(partnerId) : null;
 
       const payload = {
         // Invoice identification
