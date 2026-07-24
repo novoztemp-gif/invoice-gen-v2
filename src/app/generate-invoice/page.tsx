@@ -123,7 +123,11 @@ export default function GenerateInvoice() {
   useEffect(() => {
     const fetchAvailableSources = async () => {
       const supabase = createClient();
-      const [{ data: batches }, { data: ledgerRows }] = await Promise.all([
+      const [
+        { data: batches },
+        { data: ledgerRows },
+        { data: purchaseInvoices },
+      ] = await Promise.all([
         supabase
           .from("invoice_batch")
           .select(
@@ -137,6 +141,10 @@ export default function GenerateInvoice() {
           .select(
             "purchase_batch_id, purchased_quantity, sold_quantity, opening_stock, ledger_date",
           ),
+        supabase
+          .from("invoice")
+          .select("invoice_batch_id, products")
+          .eq("batch_type", "PURCHASE"),
       ]);
 
       const allBatches = batches || [];
@@ -168,11 +176,37 @@ export default function GenerateInvoice() {
         }
       }
 
+      // Fallback: Sum purchased quantities directly from Purchase invoices if not in daily_stock_ledger
+      for (const inv of purchaseInvoices || []) {
+        if (inv.invoice_batch_id) {
+          const item = batchLedgerMap.get(inv.invoice_batch_id) || {
+            purchased: 0,
+            sold: 0,
+          };
+          if (item.purchased === 0) {
+            let invQty = 0;
+            for (const p of inv.products || []) {
+              invQty += Number(p.quantity || 0);
+            }
+            item.purchased += invQty;
+            batchLedgerMap.set(inv.invoice_batch_id, item);
+          }
+        }
+      }
+
       const sources: InventorySourceItem[] = [];
 
       // 1. Purchase Batches with remaining stock > 0
       for (const b of allBatches) {
-        const item = batchLedgerMap.get(b.id) || { purchased: 0, sold: 0 };
+        let item = batchLedgerMap.get(b.id);
+        if (!item || item.purchased === 0) {
+          let batchQty = 0;
+          for (const p of b.products || []) {
+            batchQty += Number(p.monthly_quantity || p.quantity || 0);
+          }
+          item = { purchased: batchQty, sold: item?.sold || 0 };
+        }
+
         const rem = Math.max(0, item.purchased - item.sold);
         if (rem > 0.001) {
           const monthLabel = b.invoice_date_from

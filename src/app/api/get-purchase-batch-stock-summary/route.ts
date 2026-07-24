@@ -86,11 +86,16 @@ export async function GET(request: NextRequest) {
       earliestDate,
     );
 
-    // 3. Sum up purchased quantities across all selected batches in daily_stock_ledger
+    // 3. Sum up purchased quantities across all selected batches
     const { data: ledgerRows, error: ledgerError } = await supabase
       .from("daily_stock_ledger")
       .select("product_id, purchased_quantity, sold_quantity")
       .in("purchase_batch_id", batchIds);
+
+    const { data: purchaseInvoices } = await supabase
+      .from("invoice")
+      .select("invoice_batch_id, products")
+      .in("invoice_batch_id", batchIds);
 
     if (ledgerError) {
       return NextResponse.json(
@@ -110,6 +115,26 @@ export async function GET(request: NextRequest) {
         row.product_id,
         (purchasedSums.get(row.product_id) || 0) + availableFromBatch,
       );
+    }
+
+    // Fallback: Sum product quantities directly from invoices if daily_stock_ledger is empty for these batches
+    if (purchaseInvoices && purchaseInvoices.length > 0) {
+      for (const inv of purchaseInvoices) {
+        for (const p of inv.products || []) {
+          if (p.product_id) {
+            const qty = Number(p.quantity || 0);
+            if (
+              !purchasedSums.has(p.product_id) ||
+              purchasedSums.get(p.product_id) === 0
+            ) {
+              purchasedSums.set(
+                p.product_id,
+                (purchasedSums.get(p.product_id) || 0) + qty,
+              );
+            }
+          }
+        }
+      }
     }
 
     // Aggregate unique products across selected batches
