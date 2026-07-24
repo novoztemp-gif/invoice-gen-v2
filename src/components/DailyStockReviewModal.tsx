@@ -43,13 +43,70 @@ export function DailyStockReviewModal({
 }: DailyStockReviewModalProps) {
   const [rows, setRows] = useState<StockReviewRow[]>([]);
   const [autoAllocate, setAutoAllocate] = useState(false);
+  const [nullStock, setNullStock] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setRows(JSON.parse(JSON.stringify(initialRows)));
       setAutoAllocate(false);
+      setNullStock(false);
     }
   }, [isOpen, initialRows]);
+
+  // Execute Null Stock Allocation (Fully consumes all stock so Closing Stock = 0 KG)
+  const performNullStockAllocation = (currentRows: StockReviewRow[]) => {
+    const updatedRows = JSON.parse(JSON.stringify(currentRows));
+    const productIds = [...new Set(updatedRows.map((r: any) => r.product_id))];
+
+    for (const pId of productIds) {
+      const pRows = updatedRows
+        .filter((r: any) => r.product_id === pId)
+        .sort((a: any, b: any) => a.date.localeCompare(b.date));
+
+      if (pRows.length === 0) continue;
+
+      let runningCarry = Number(pRows[0].opening_stock) || 0;
+      pRows.forEach((row: any, idx: number) => {
+        row.opening_stock = runningCarry;
+        const available =
+          Math.round(
+            (row.opening_stock + Number(row.purchased_quantity)) * 100,
+          ) / 100;
+
+        if (idx === pRows.length - 1) {
+          // Final day: Consume all remaining stock to reach 0.00 KG closing stock
+          row.proposed_sold = roundToQuarterIncrement(available);
+          row.remaining_stock = 0;
+        } else {
+          // Intermediate days: keep remaining stock <= 15 KG
+          const targetRem = Math.min(15, available);
+          let proposed = Math.max(0, available - targetRem);
+          proposed = roundToQuarterIncrement(proposed);
+          row.proposed_sold = proposed;
+          row.remaining_stock =
+            Math.round((available - row.proposed_sold) * 100) / 100;
+        }
+        runningCarry = row.remaining_stock;
+      });
+    }
+
+    return updatedRows;
+  };
+
+  const handleToggleNullStock = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const checked = e.target.checked;
+    setNullStock(checked);
+    if (checked) {
+      setAutoAllocate(false);
+      const allocated = performNullStockAllocation(rows);
+      setRows(allocated);
+      onRowsChange?.(allocated);
+    } else {
+      const reset = JSON.parse(JSON.stringify(initialRows));
+      setRows(reset);
+      onRowsChange?.(reset);
+    }
+  };
 
   // Execute Auto Allocation across dates per product
   const performAutoAllocation = (currentRows: StockReviewRow[]) => {
@@ -101,6 +158,7 @@ export function DailyStockReviewModal({
     setAutoAllocate(checked);
 
     if (checked) {
+      setNullStock(false);
       const allocated = performAutoAllocation(rows);
       setRows(allocated);
       onRowsChange?.(allocated);
@@ -278,29 +336,52 @@ export function DailyStockReviewModal({
           </p>
         </DialogHeader>
 
-        {/* Top Controls: Auto Allocate Toggle & Live Stock Summary */}
+        {/* Top Controls: Auto Allocate & Null Stock Toggles & Live Stock Summary */}
         <div className="space-y-3 my-2">
-          {/* Auto Allocate Available Stock Checkbox Toggle */}
-          <div className="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-lg p-3">
-            <div className="flex items-center gap-3">
-              <input
-                type="checkbox"
-                id="autoAllocateToggle"
-                checked={autoAllocate}
-                onChange={handleToggleAutoAllocate}
-                className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-950 cursor-pointer"
-              />
-              <label
-                htmlFor="autoAllocateToggle"
-                className="text-sm font-semibold text-slate-900 cursor-pointer select-none"
-              >
-                Auto Allocate Available Stock
-              </label>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {/* Auto Allocate Available Stock Checkbox Toggle */}
+            <div className="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-lg p-3">
+              <div className="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  id="autoAllocateToggle"
+                  checked={autoAllocate}
+                  onChange={handleToggleAutoAllocate}
+                  className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-950 cursor-pointer"
+                />
+                <label
+                  htmlFor="autoAllocateToggle"
+                  className="text-sm font-semibold text-slate-900 cursor-pointer select-none"
+                >
+                  Auto Allocate Stock
+                </label>
+              </div>
+              <span className="text-xs text-slate-500 font-medium">
+                (Default: OFF) — Evenly distributes stock
+              </span>
             </div>
-            <span className="text-xs text-slate-500 font-medium">
-              (Default: OFF) — Evenly distributes available inventory across
-              sales dates
-            </span>
+
+            {/* Null Stock Checkbox Toggle */}
+            <div className="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-lg p-3">
+              <div className="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  id="nullStockToggle"
+                  checked={nullStock}
+                  onChange={handleToggleNullStock}
+                  className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-950 cursor-pointer"
+                />
+                <label
+                  htmlFor="nullStockToggle"
+                  className="text-sm font-semibold text-slate-900 cursor-pointer select-none"
+                >
+                  Null Stock (0 KG Leftover)
+                </label>
+              </div>
+              <span className="text-xs text-slate-500 font-medium">
+                Fully consumes inventory (Closing Stock = 0)
+              </span>
+            </div>
           </div>
 
           {/* Live Remaining Stock Summary Panel */}
