@@ -43,6 +43,11 @@ export async function fetchAllInvoicesForBatch<T = any>(
   }
 
   allInvoices.sort((a: any, b: any) => {
+    const dateA = a.invoice_date || "";
+    const dateB = b.invoice_date || "";
+    const dateCmp = dateA.localeCompare(dateB);
+    if (dateCmp !== 0) return dateCmp;
+
     if (a.invoice_number && b.invoice_number) {
       return a.invoice_number.localeCompare(b.invoice_number, undefined, {
         numeric: true,

@@ -47,8 +47,8 @@ export function computeLineAmount(qty: number, rate: number): number {
  * Standard commercial quantity steps used for realistic commercial invoice generation.
  */
 const COMMERCIAL_QUANTITY_STEPS = [
-  2, 3, 4, 5, 6, 8, 10, 12, 15, 18, 20, 25, 30, 35, 40, 45, 50, 60, 75, 80, 100,
-  125, 150, 200, 250, 300, 400, 500, 750, 1000,
+  5, 6, 8, 10, 12, 15, 18, 20, 25, 30, 35, 40, 45, 50, 60, 75, 80, 100, 125,
+  150, 200, 250, 300, 400, 500, 750, 1000,
 ];
 
 export interface CommercialQuantityOptions {
@@ -91,7 +91,7 @@ export function generateCommercialQuantity(
   );
   let relevantSteps = COMMERCIAL_QUANTITY_STEPS;
   if (isSmallUnitProduct && high <= 50) {
-    relevantSteps = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
+    relevantSteps = [5, 6, 8, 10, 12, 15, 20];
   }
 
   const integerCandidates: number[] = [];
@@ -104,8 +104,8 @@ export function generateCommercialQuantity(
     }
   }
 
-  // Include low boundary if low < 2 (e.g. minQty = 1)
-  if (low < 2 && low > 0) {
+  // Include low boundary ONLY if high < 5 (e.g. maxQty = 4)
+  if (high < 5 && low > 0) {
     const lowRounded = roundToQuarterIncrement(low);
     if (lowRounded === Math.floor(lowRounded)) {
       integerCandidates.push(lowRounded);

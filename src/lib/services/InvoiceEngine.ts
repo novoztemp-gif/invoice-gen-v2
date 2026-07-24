@@ -911,6 +911,26 @@ export class InvoiceEngine {
     return `${day}-${month}-${year}`;
   }
 
+  private static getProductCategory(p: any): "Meat" | "Fruits" {
+    const name = String(p?.product_name || "").toUpperCase();
+    if (
+      /APPLE|BANANA|BLUEBERRY|CUSTARD APPLE|KIWI|LYCHEE|CHERRY|FIG|ORANGE|GRAPE|MANGO|PEACH|PEAR|PLUM|WATERMELON|PINEAPPLE|PAPAYA|FRUIT/i.test(
+        name,
+      )
+    ) {
+      return "Fruits";
+    }
+    if (
+      /CHICKEN|GOAT|DUCK|CLAM|FISH|MACKEREL|MUSSEL|OYSTER|CRAB|SHRIMP|MEAT/i.test(
+        name,
+      )
+    ) {
+      return "Meat";
+    }
+    const cat = String(p?.category || p?.category_name || "Meat").toUpperCase();
+    return cat.includes("FRUIT") ? "Fruits" : "Meat";
+  }
+
   /**
    * Internal generator logic
    */
@@ -1121,8 +1141,7 @@ Normalized Remaining: ${actualRemaining}
       // ── Redesigned Invoice Composition Algorithm (3-8 Products, Commercial Quantities First) ──
       const productsByCategory = new Map<string, any[]>();
       for (const p of productsOnDay) {
-        const rawCat = String(p.category || "Meat").toUpperCase();
-        const catKey = rawCat.includes("FRUIT") ? "Fruits" : "Meat";
+        const catKey = this.getProductCategory(p);
         p.category = catKey;
 
         if (!productsByCategory.has(catKey)) {
@@ -1437,13 +1456,21 @@ Normalized Remaining: ${actualRemaining}
       }
     }
 
-    // ── Ascending Invoice Number Sort (Issue 5) ──
-    invoices.sort((a, b) =>
-      a.invoice_number.localeCompare(b.invoice_number, undefined, {
-        numeric: true,
-        sensitivity: "base",
-      }),
-    );
+    // ── Chronological & Ascending Invoice Number Sort ──
+    invoices.sort((a, b) => {
+      const dateCmp = (a.invoice_date || "").localeCompare(
+        b.invoice_date || "",
+      );
+      if (dateCmp !== 0) return dateCmp;
+      return (a.invoice_number || "").localeCompare(
+        b.invoice_number || "",
+        undefined,
+        {
+          numeric: true,
+          sensitivity: "base",
+        },
+      );
+    });
 
     return invoices;
   }

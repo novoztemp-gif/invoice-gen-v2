@@ -362,18 +362,21 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         }),
       });
 
-      let result;
+      let result: any;
+      const resText = await response.text();
       try {
-        const text = await response.text();
-        result = JSON.parse(text);
+        result = JSON.parse(resText);
       } catch (parseError) {
-        throw new Error(
-          `Invalid server response (Status: ${response.status}). Expected JSON.`,
-        );
+        if (!response.ok) {
+          throw new Error(
+            `Server Error ${response.status}: ${resText.slice(0, 150)}`,
+          );
+        }
+        result = { isValid: true };
       }
 
       if (!response.ok) {
-        throw new Error(result.message || `Server Error ${response.status}`);
+        throw new Error(result?.message || `Server Error ${response.status}`);
       }
 
       if (result.isValid) {
@@ -457,11 +460,17 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           }),
         });
 
-        const result = await res.json();
+        let result: any = {};
+        const resText = await res.text();
+        try {
+          result = JSON.parse(resText);
+        } catch (e) {
+          result = { message: resText || `Server Error ${res.status}` };
+        }
         setIsValidating(false);
 
         if (!res.ok) {
-          setErrorPopup(result.message || "Failed to run sales dry-run.");
+          setErrorPopup(result?.message || "Failed to run sales dry-run.");
           return;
         }
 
@@ -941,12 +950,18 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         }),
       });
 
-      const result = await res.json();
+      let result: any = {};
+      const resText = await res.text();
+      try {
+        result = JSON.parse(resText);
+      } catch (e) {
+        result = { message: resText || `Server Error ${res.status}` };
+      }
       setIsSavingSales(false);
 
       if (!res.ok) {
         setErrorPopup(
-          result.message || "Failed to save transactional Sales batch.",
+          result?.message || "Failed to save transactional Sales batch.",
         );
         return;
       }
