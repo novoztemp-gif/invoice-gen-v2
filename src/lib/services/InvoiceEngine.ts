@@ -1768,6 +1768,46 @@ Normalized Remaining: ${actualRemaining}
       productsByCategory.get(catKey)!.push(p);
     }
 
+    const categoryKeys = Array.from(productsByCategory.keys());
+    if (categoryKeys.length === 0) return [];
+
+    // 2. Determine exact target invoice count N to partition totalAmount EXACTLY
+    const avgThreshold = (thresholdMin + thresholdMax) / 2;
+    let targetInvoiceCount = Math.round(totalAmount / avgThreshold);
+    const minInvoices = Math.ceil(totalAmount / thresholdMax);
+    const maxInvoices = Math.floor(totalAmount / thresholdMin);
+    targetInvoiceCount = Math.max(
+      minInvoices,
+      Math.min(maxInvoices, targetInvoiceCount),
+    );
+    if (targetInvoiceCount < 1) targetInvoiceCount = 1;
+
+    // Partition totalAmount into EXACT targetInvoiceCount invoice budgets that sum to totalAmount
+    const invoiceBudgets: number[] = [];
+    let unallocated = totalAmount;
+
+    for (let i = 0; i < targetInvoiceCount; i++) {
+      invoiceBudgets.push(thresholdMin);
+      unallocated -= thresholdMin;
+    }
+
+    const roomPerInvoice = thresholdMax - thresholdMin;
+    for (let i = 0; i < targetInvoiceCount - 1; i++) {
+      const minAdd = Math.max(
+        0,
+        unallocated - (targetInvoiceCount - 1 - i) * roomPerInvoice,
+      );
+      const maxAdd = Math.min(unallocated, roomPerInvoice);
+      const add = minAdd + Math.random() * (maxAdd - minAdd);
+      const roundedAdd = Math.round(add * 100) / 100;
+      invoiceBudgets[i] =
+        Math.round((invoiceBudgets[i] + roundedAdd) * 100) / 100;
+      unallocated = Math.round((unallocated - roundedAdd) * 100) / 100;
+    }
+    invoiceBudgets[targetInvoiceCount - 1] =
+      Math.round((invoiceBudgets[targetInvoiceCount - 1] + unallocated) * 100) /
+      100;
+
     // Prepare date list
     const dateList: string[] = [];
     for (let d = 0; d < numberOfDays; d++) {
@@ -1776,181 +1816,156 @@ Normalized Remaining: ${actualRemaining}
       dateList.push(formatDateForStorage(curDate));
     }
 
-    // Build invoices for each category block
-    for (const [catKey, categoryProducts] of productsByCategory.entries()) {
+    // 3. Build each invoice to match its target budget exactly
+    for (let i = 0; i < invoiceBudgets.length; i++) {
+      const targetBudget = invoiceBudgets[i];
+      const catKey = categoryKeys[i % categoryKeys.length];
+      const categoryProducts = productsByCategory.get(catKey) || [];
       if (categoryProducts.length === 0) continue;
 
-      let remainingCategoryBudget = totalAmount / productsByCategory.size;
-      let dayIndex = 0;
+      const dateStr = dateList[i % dateList.length];
 
-      while (remainingCategoryBudget > 0.01) {
-        const dateStr = dateList[dayIndex % dateList.length];
-        dayIndex++;
+      // Select 3 to 8 products from this category
+      const targetSubsetCount = Math.min(
+        categoryProducts.length,
+        Math.floor(Math.random() * 6) + 3,
+      );
+      const shuffled = [...categoryProducts].sort(() => Math.random() - 0.5);
+      const chosenProducts = shuffled.slice(0, targetSubsetCount);
 
-        // Select a natural subset of 3 to 8 products from this category
-        const targetSubsetCount = Math.min(
-          categoryProducts.length,
-          Math.floor(Math.random() * 6) + 3,
-        );
+      let currentInvoiceProducts: any[] = [];
+      let currentInvoiceAmount = 0;
+      const usedQuantities = new Set<number>();
 
-        const shuffled = [...categoryProducts].sort(() => Math.random() - 0.5);
-        const chosenProducts = shuffled.slice(0, targetSubsetCount);
+      for (let j = 0; j < chosenProducts.length; j++) {
+        const p = chosenProducts[j];
+        const isLastProduct = j === chosenProducts.length - 1;
+        const minR = parseFloat(p.perDayRateMin) || 10;
+        const maxR = parseFloat(p.perDayRateMax) || 500;
+        const rate = roundToWholeInteger(minR + Math.random() * (maxR - minR));
 
-        let currentInvoiceProducts: any[] = [];
-        let currentInvoiceAmount = 0;
-        const usedQuantities = new Set<number>();
+        const minQ = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
+        const maxQ = Math.max(minQ, parseFloat(p.perDayQtyMax) || 100);
 
-        for (const p of chosenProducts) {
-          const minR = parseFloat(p.perDayRateMin) || 10;
-          const maxR = parseFloat(p.perDayRateMax) || 500;
-          const rate = roundToWholeInteger(
-            minR + Math.random() * (maxR - minR),
-          );
+        const remBudget = targetBudget - currentInvoiceAmount;
+        const maxQtyFitting = remBudget / (rate || 1);
 
-          const minQ = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
-          const maxQ = Math.max(minQ, parseFloat(p.perDayQtyMax) || 100);
-
-          const maxQtyFitting =
-            (thresholdMax - currentInvoiceAmount) / (rate || 1);
-
-          if (maxQtyFitting < minQ && currentInvoiceProducts.length > 0) {
-            continue;
-          }
-
-          const upperLimit = Math.min(maxQ, Math.max(minQ, maxQtyFitting));
-
-          const qtyToPut = generateCommercialQuantity(minQ, upperLimit, {
-            productName: p.product_name,
-            existingQuantities: usedQuantities,
-          });
-
-          if (qtyToPut <= 0) continue;
-
-          const amt = Math.round(qtyToPut * rate * 100) / 100;
-
-          if (
-            currentInvoiceAmount + amt > thresholdMax &&
-            currentInvoiceProducts.length > 0
-          ) {
-            continue;
-          }
-
-          usedQuantities.add(qtyToPut);
-          currentInvoiceProducts.push({
-            product_id: p.product_id,
-            product_name: p.product_name,
-            hsn_code: p.hsn_code,
-            unit_of_measure: p.unit_of_measure,
-            category: catKey,
-            quantity: qtyToPut,
-            rate,
-            amount: amt,
-          });
-          currentInvoiceAmount =
-            Math.round((currentInvoiceAmount + amt) * 100) / 100;
+        if (maxQtyFitting < minQ && currentInvoiceProducts.length > 0) {
+          continue;
         }
 
+        const upperLimit = Math.min(maxQ, Math.max(minQ, maxQtyFitting));
+
+        let qtyToPut = generateCommercialQuantity(minQ, upperLimit, {
+          productName: p.product_name,
+          existingQuantities: usedQuantities,
+        });
+
+        if (qtyToPut <= 0) qtyToPut = minQ;
+
+        let amt = computeLineAmount(qtyToPut, rate);
+
         if (
+          currentInvoiceAmount + amt > targetBudget &&
           currentInvoiceProducts.length > 0 &&
-          currentInvoiceAmount >= thresholdMin
+          !isLastProduct
         ) {
-          const supplierId =
-            selectedCustomers.length > 0
-              ? selectedCustomers[
-                  Math.floor(Math.random() * selectedCustomers.length)
-                ]
-              : batch.receiving_company_id || null;
+          continue;
+        }
 
-          invoices.push({
-            invoice_number: `INV-TEMP-${invoiceCounter++}`,
-            invoice_date: dateStr,
-            customer_id: supplierId,
-            category_key: catKey,
-            products: currentInvoiceProducts,
-            total_amount: currentInvoiceAmount,
-            status: "generated",
-            batch_type: "PURCHASE",
-          });
+        usedQuantities.add(qtyToPut);
+        currentInvoiceProducts.push({
+          product_id: p.product_id,
+          product_name: p.product_name,
+          hsn_code: p.hsn_code,
+          unit_of_measure: p.unit_of_measure,
+          category: catKey,
+          quantity: qtyToPut,
+          rate,
+          amount: amt,
+        });
+        currentInvoiceAmount =
+          Math.round((currentInvoiceAmount + amt) * 100) / 100;
+      }
 
-          remainingCategoryBudget -= currentInvoiceAmount;
-        } else if (remainingCategoryBudget < thresholdMin) {
-          break;
+      if (currentInvoiceProducts.length === 0) {
+        const p = categoryProducts[0];
+        const minQ = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
+        const rate = roundToWholeInteger(targetBudget / minQ);
+        const amt = computeLineAmount(minQ, rate);
+        currentInvoiceProducts.push({
+          product_id: p.product_id,
+          product_name: p.product_name,
+          hsn_code: p.hsn_code,
+          unit_of_measure: p.unit_of_measure,
+          category: catKey,
+          quantity: minQ,
+          rate,
+          amount: amt,
+        });
+        currentInvoiceAmount = amt;
+      }
+
+      // Absorb line-item drift onto product rates to hit targetBudget EXACTLY
+      let lineDrift =
+        Math.round((targetBudget - currentInvoiceAmount) * 100) / 100;
+
+      if (Math.abs(lineDrift) > 0.001) {
+        for (const item of currentInvoiceProducts) {
+          const newAmt = Math.round((item.amount + lineDrift) * 100) / 100;
+          if (newAmt > 0) {
+            let newRate = roundToWholeInteger(newAmt / item.quantity);
+            if (newRate <= 0) newRate = item.rate;
+            item.rate = newRate;
+            item.amount = computeLineAmount(item.quantity, newRate);
+            lineDrift = Math.round((targetBudget - item.amount) * 100) / 100;
+            if (Math.abs(lineDrift) <= 0.01) break;
+          }
         }
       }
+
+      const finalInvoiceTotal =
+        Math.round(
+          currentInvoiceProducts.reduce((sum, p) => sum + p.amount, 0) * 100,
+        ) / 100;
+
+      const supplierId =
+        selectedCustomers.length > 0
+          ? selectedCustomers[i % selectedCustomers.length]
+          : batch.receiving_company_id || null;
+
+      invoices.push({
+        invoice_number: `INV-TEMP-${invoiceCounter++}`,
+        invoice_date: dateStr,
+        customer_id: supplierId,
+        category_key: catKey,
+        products: currentInvoiceProducts,
+        total_amount: finalInvoiceTotal,
+        status: "generated",
+        batch_type: "PURCHASE",
+      });
     }
 
-    // Merge last invoice into previous SAME-CATEGORY invoice ONLY if it's below thresholdMin
-    if (invoices.length > 1) {
-      const lastInv = invoices[invoices.length - 1];
-      if (lastInv.total_amount < thresholdMin) {
-        const sameCatPrevInv = invoices
-          .slice(0, invoices.length - 1)
-          .reverse()
-          .find((inv) => inv.category_key === lastInv.category_key);
-
-        if (
-          sameCatPrevInv &&
-          sameCatPrevInv.total_amount + lastInv.total_amount <= thresholdMax
-        ) {
-          sameCatPrevInv.products.push(...lastInv.products);
-          sameCatPrevInv.total_amount =
-            Math.round(
-              (sameCatPrevInv.total_amount + lastInv.total_amount) * 100,
-            ) / 100;
-          invoices.pop();
-        }
-      }
-    }
-
-    // ── Exact Total Balancing for Purchase Invoices ──
-    const targetTotal = totalAmount;
-    let currentTotal =
+    // Final global penny-level drift alignment to guarantee sum(invoices) === totalAmount EXACTLY
+    const finalSum =
       Math.round(
         invoices.reduce((sum, inv) => sum + inv.total_amount, 0) * 100,
       ) / 100;
-    let batchDiff = Math.round((targetTotal - currentTotal) * 100) / 100;
+    const globalDrift = Math.round((totalAmount - finalSum) * 100) / 100;
 
-    if (Math.abs(batchDiff) > 0.001 && invoices.length > 0) {
-      for (let i = 0; i < invoices.length; i++) {
-        const inv = invoices[i];
-        for (let j = 0; j < inv.products.length; j++) {
-          const item = inv.products[j];
-          const newProdAmount =
-            Math.round((item.amount + batchDiff) * 100) / 100;
-
-          if (newProdAmount > 0) {
-            let newRate = roundToWholeInteger(
-              newProdAmount / (item.quantity || 1),
-            );
-            if (newRate <= 0) newRate = item.rate;
-
-            const computedAmount = computeLineAmount(item.quantity, newRate);
-            const lineDiff =
-              Math.round((newProdAmount - computedAmount) * 100) / 100;
-
-            if (Math.abs(lineDiff) < 0.01) {
-              item.rate = newRate;
-              item.amount = computedAmount;
-            } else {
-              item.amount = newProdAmount;
-            }
-
-            inv.total_amount =
-              Math.round(
-                inv.products.reduce((s: number, p: any) => s + p.amount, 0) *
-                  100,
-              ) / 100;
-
-            currentTotal =
-              Math.round(
-                invoices.reduce((sum, inv) => sum + inv.total_amount, 0) * 100,
-              ) / 100;
-            batchDiff = Math.round((targetTotal - currentTotal) * 100) / 100;
-
-            if (Math.abs(batchDiff) < 0.001) break;
-          }
-        }
-        if (Math.abs(batchDiff) < 0.001) break;
+    if (Math.abs(globalDrift) > 0.001 && invoices.length > 0) {
+      const lastInv = invoices[invoices.length - 1];
+      if (lastInv.products.length > 0) {
+        const lastProd = lastInv.products[lastInv.products.length - 1];
+        lastProd.amount =
+          Math.round((lastProd.amount + globalDrift) * 100) / 100;
+        lastInv.total_amount =
+          Math.round(
+            lastInv.products.reduce(
+              (sum: number, p: any) => sum + p.amount,
+              0,
+            ) * 100,
+          ) / 100;
       }
     }
 
