@@ -1422,7 +1422,7 @@ Normalized Remaining: ${actualRemaining}
         if (targetLineAmt > 0) {
           lastItem.quantity =
             Math.round((targetLineAmt / (lastItem.rate || 1)) * 100) / 100;
-          lastItem.amount = computeLineAmount(lastItem.quantity, lastItem.rate);
+          lastItem.amount = targetLineAmt;
           lastInv.total_amount =
             Math.round(
               lastInv.products.reduce((s: number, p: any) => s + p.amount, 0) *
@@ -1944,7 +1944,7 @@ Normalized Remaining: ${actualRemaining}
         if (targetLineAmt > 0) {
           lastItem.quantity =
             Math.round((targetLineAmt / (lastItem.rate || 1)) * 100) / 100;
-          lastItem.amount = computeLineAmount(lastItem.quantity, lastItem.rate);
+          lastItem.amount = targetLineAmt;
           lastInv.total_amount =
             Math.round(
               lastInv.products.reduce((s: number, p: any) => s + p.amount, 0) *
