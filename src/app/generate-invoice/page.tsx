@@ -132,10 +132,9 @@ export default function GenerateInvoice() {
         supabase
           .from("invoice_batch")
           .select(
-            "id, total_amount, invoice_date_from, invoice_date_to, financial_year, products",
+            "id, total_amount, invoice_date_from, invoice_date_to, financial_year, products, status, batch_status",
           )
           .eq("batch_type", "PURCHASE")
-          .eq("batch_status", "FINALIZED")
           .order("invoice_date_from", { ascending: false }),
         supabase
           .from("invoice_batch")

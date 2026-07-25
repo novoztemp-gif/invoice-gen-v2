@@ -562,7 +562,8 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
               : null,
           })),
           recurring_products: [],
-          status: "pending",
+          status: "generated",
+          batch_status: "FINALIZED",
           created_by: user.id,
         })
         .select()
