@@ -715,11 +715,31 @@ export class InvoiceEngine {
 
     let invoices: any[] = [];
     if (typedBatch.batch_type === "PURCHASE") {
+      const supplierCategoryMap = new Map<string, "Fruits" | "Meat">();
+      const selectedCustomers = typedBatch.selected_customers || [];
+      if (selectedCustomers.length > 0) {
+        const { data: sups } = await supabase
+          .from("suppliers")
+          .select("id, category")
+          .in("id", selectedCustomers);
+
+        for (const s of sups || []) {
+          const cat = String(s.category || "Meat")
+            .toUpperCase()
+            .includes("FRUIT")
+            ? "Fruits"
+            : "Meat";
+          supplierCategoryMap.set(s.id, cat);
+        }
+      }
+
       invoices = this.generatePurchaseInvoiceSplitupsInternal(
         typedBatch,
         numberOfDays,
         fromDate,
         startingCounter,
+        undefined,
+        supplierCategoryMap,
       );
     } else {
       let availableStockMap: Map<string, any> | null = null;
@@ -1762,6 +1782,7 @@ export class InvoiceEngine {
     startDate: Date,
     startingCounter: number,
     monthlyQuantities?: Map<string, number>,
+    supplierCategoryMap?: Map<string, "Fruits" | "Meat">,
   ) {
     const thresholdMin = batch.minimum_invoice_amount;
     const thresholdMax = batch.maximum_invoice_amount;
@@ -1781,6 +1802,18 @@ export class InvoiceEngine {
       selectedCustomers = [batch.receiving_company_id];
     }
 
+    // Classify selected suppliers into Fruits vs Meat
+    const fruitSuppliers: string[] = [];
+    const meatSuppliers: string[] = [];
+    for (const custId of selectedCustomers) {
+      const cat = supplierCategoryMap?.get(custId) || "Meat";
+      if (cat === "Fruits") {
+        fruitSuppliers.push(custId);
+      } else {
+        meatSuppliers.push(custId);
+      }
+    }
+
     // 1. Group products strictly by category using getProductCategory(p)
     const productsByCategory = new Map<string, ProductConfig[]>();
     for (const p of batch.products) {
@@ -1791,7 +1824,26 @@ export class InvoiceEngine {
       productsByCategory.get(catKey)!.push(p);
     }
 
-    const categoryKeys = Array.from(productsByCategory.keys());
+    let categoryKeys = Array.from(productsByCategory.keys());
+
+    // If suppliers are specified, filter product categories to match supplier categories
+    if (
+      selectedCustomers.length > 0 &&
+      supplierCategoryMap &&
+      supplierCategoryMap.size > 0
+    ) {
+      const hasFruitSuppliers = fruitSuppliers.length > 0;
+      const hasMeatSuppliers = meatSuppliers.length > 0;
+
+      if (hasFruitSuppliers && !hasMeatSuppliers) {
+        // ONLY Fruit Suppliers selected: ONLY bill Fruit products!
+        categoryKeys = categoryKeys.filter((c) => c === "Fruits");
+      } else if (hasMeatSuppliers && !hasFruitSuppliers) {
+        // ONLY Meat Suppliers selected: ONLY bill Meat products!
+        categoryKeys = categoryKeys.filter((c) => c === "Meat");
+      }
+    }
+
     if (categoryKeys.length === 0) return [];
 
     // 2. Determine exact target invoice count N to partition totalAmount EXACTLY
@@ -1961,10 +2013,14 @@ export class InvoiceEngine {
           currentInvoiceProducts.reduce((sum, p) => sum + p.amount, 0) * 100,
         ) / 100;
 
-      const supplierId =
-        selectedCustomers.length > 0
-          ? selectedCustomers[i % selectedCustomers.length]
-          : batch.receiving_company_id || null;
+      let supplierId = batch.receiving_company_id || null;
+      if (catKey === "Fruits" && fruitSuppliers.length > 0) {
+        supplierId = fruitSuppliers[i % fruitSuppliers.length];
+      } else if (catKey === "Meat" && meatSuppliers.length > 0) {
+        supplierId = meatSuppliers[i % meatSuppliers.length];
+      } else if (selectedCustomers.length > 0) {
+        supplierId = selectedCustomers[i % selectedCustomers.length];
+      }
 
       invoices.push({
         invoice_number: `INV-TEMP-${invoiceCounter++}`,
