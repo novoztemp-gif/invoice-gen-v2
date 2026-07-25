@@ -123,37 +123,54 @@ export default function GenerateInvoice() {
   useEffect(() => {
     const fetchAvailableSources = async () => {
       const supabase = createClient();
-      const [
-        { data: batches },
-        { data: salesBatches },
-        { data: ledgerRows },
-        { data: purchaseInvoices },
-      ] = await Promise.all([
-        supabase
-          .from("invoice_batch")
-          .select(
-            "id, total_amount, invoice_date_from, invoice_date_to, financial_year, products, status, batch_status",
-          )
-          .eq("batch_type", "PURCHASE")
-          .order("invoice_date_from", { ascending: false }),
-        supabase
-          .from("invoice_batch")
-          .select(
-            "id, stock_source_batch_id, invoice_date_from, invoice_date_to, created_at",
-          )
-          .eq("batch_type", "SALES")
-          .eq("batch_status", "FINALIZED")
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("daily_stock_ledger")
-          .select(
-            "purchase_batch_id, purchased_quantity, sold_quantity, opening_stock, ledger_date",
-          ),
-        supabase
+      const [{ data: batches }, { data: salesBatches }, { data: ledgerRows }] =
+        await Promise.all([
+          supabase
+            .from("invoice_batch")
+            .select(
+              "id, total_amount, invoice_date_from, invoice_date_to, financial_year, products, status, batch_status",
+            )
+            .eq("batch_type", "PURCHASE")
+            .order("invoice_date_from", { ascending: false }),
+          supabase
+            .from("invoice_batch")
+            .select(
+              "id, stock_source_batch_id, invoice_date_from, invoice_date_to, created_at",
+            )
+            .eq("batch_type", "SALES")
+            .eq("batch_status", "FINALIZED")
+            .order("created_at", { ascending: false }),
+          supabase
+            .from("daily_stock_ledger")
+            .select(
+              "purchase_batch_id, purchased_quantity, sold_quantity, opening_stock, ledger_date",
+            ),
+        ]);
+
+      // Paginate through invoice table to fetch ALL purchase invoices without PostgREST 1000-row cap
+      const purchaseInvoices: any[] = [];
+      let invPage = 0;
+      const invPageSize = 1000;
+      let hasMoreInvoices = true;
+
+      while (hasMoreInvoices) {
+        const { data: pageInvoices } = await supabase
           .from("invoice")
           .select("invoice_batch_id, products")
-          .eq("batch_type", "PURCHASE"),
-      ]);
+          .eq("batch_type", "PURCHASE")
+          .range(invPage * invPageSize, (invPage + 1) * invPageSize - 1);
+
+        if (pageInvoices && pageInvoices.length > 0) {
+          purchaseInvoices.push(...pageInvoices);
+          if (pageInvoices.length < invPageSize) {
+            hasMoreInvoices = false;
+          } else {
+            invPage++;
+          }
+        } else {
+          hasMoreInvoices = false;
+        }
+      }
 
       const allBatches = batches || [];
       setFinalizedPurchaseBatches(allBatches);

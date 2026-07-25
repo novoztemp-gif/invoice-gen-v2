@@ -92,10 +92,30 @@ export async function GET(request: NextRequest) {
       .select("product_id, purchased_quantity, sold_quantity")
       .in("purchase_batch_id", batchIds);
 
-    const { data: purchaseInvoices } = await supabase
-      .from("invoice")
-      .select("invoice_batch_id, products")
-      .in("invoice_batch_id", batchIds);
+    // Paginate through invoice table to fetch ALL purchase invoices without PostgREST 1000-row cap
+    const purchaseInvoices: any[] = [];
+    let page = 0;
+    const pageSize = 1000;
+    let hasMore = true;
+
+    while (hasMore) {
+      const { data: pageInvoices } = await supabase
+        .from("invoice")
+        .select("invoice_batch_id, products")
+        .in("invoice_batch_id", batchIds)
+        .range(page * pageSize, (page + 1) * pageSize - 1);
+
+      if (pageInvoices && pageInvoices.length > 0) {
+        purchaseInvoices.push(...pageInvoices);
+        if (pageInvoices.length < pageSize) {
+          hasMore = false;
+        } else {
+          page++;
+        }
+      } else {
+        hasMore = false;
+      }
+    }
 
     if (ledgerError) {
       return NextResponse.json(
