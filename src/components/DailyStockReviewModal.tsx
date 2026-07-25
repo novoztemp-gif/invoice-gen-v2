@@ -47,13 +47,16 @@ export function DailyStockReviewModal({
 
   useEffect(() => {
     if (isOpen) {
-      setRows(JSON.parse(JSON.stringify(initialRows)));
-      setAutoAllocate(false);
+      // Auto Allocate is MANDATORY (enabled by default)
+      setAutoAllocate(true);
       setNullStock(false);
+      const allocated = performAutoAllocation(initialRows);
+      setRows(allocated);
+      onRowsChange?.(allocated);
     }
   }, [isOpen, initialRows]);
 
-  // Execute Null Stock Allocation (Fully consumes all stock so Closing Stock = 0 KG)
+  // Execute Null Stock Allocation (Proposed Sold equals total available stock so Closing Stock = 0.00 KG)
   const performNullStockAllocation = (currentRows: StockReviewRow[]) => {
     const updatedRows = JSON.parse(JSON.stringify(currentRows));
     const productIds = [...new Set(updatedRows.map((r: any) => r.product_id))];
@@ -74,8 +77,8 @@ export function DailyStockReviewModal({
           ) / 100;
 
         if (idx === pRows.length - 1) {
-          // Final day: Consume all remaining stock to reach 0.00 KG closing stock
-          row.proposed_sold = roundToQuarterIncrement(available);
+          // Final day: Proposed sold equals ENTIRE available stock so remaining stock = 0.00 KG!
+          row.proposed_sold = available;
           row.remaining_stock = 0;
         } else {
           // Intermediate days: keep remaining stock <= 15 KG
@@ -97,12 +100,11 @@ export function DailyStockReviewModal({
     const checked = e.target.checked;
     setNullStock(checked);
     if (checked) {
-      setAutoAllocate(false);
       const allocated = performNullStockAllocation(rows);
       setRows(allocated);
       onRowsChange?.(allocated);
     } else {
-      const reset = JSON.parse(JSON.stringify(initialRows));
+      const reset = performAutoAllocation(initialRows);
       setRows(reset);
       onRowsChange?.(reset);
     }
@@ -357,7 +359,7 @@ export function DailyStockReviewModal({
                 </label>
               </div>
               <span className="text-xs text-slate-500 font-medium">
-                (Default: OFF) — Evenly distributes stock
+                (Mandatory — Enabled by Default)
               </span>
             </div>
 
