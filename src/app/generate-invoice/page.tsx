@@ -221,41 +221,73 @@ export default function GenerateInvoice() {
         }
 
         let item = batchLedgerMap.get(b.id);
-        if (!item || item.purchased === 0) {
-          let batchQty = 0;
+        let totalPurchased = 0;
+        if (item && item.purchased > 0) {
+          totalPurchased = item.purchased;
+        } else {
           for (const p of b.products || []) {
-            batchQty += Number(p.monthly_quantity || p.quantity || 0);
+            totalPurchased += Number(p.monthly_quantity || p.quantity || 0);
           }
-          item = { purchased: batchQty, sold: item?.sold || 0 };
         }
 
-        const rem = Math.max(0, item.purchased - item.sold);
-        if (rem > 0.001) {
+        if (totalPurchased > 0.001) {
           const monthLabel = b.invoice_date_from
             ? b.invoice_date_from.slice(0, 7)
             : "N/A";
           sources.push({
             id: b.id,
             title: `Purchase Batch - ${monthLabel}`,
-            remainingQty: Math.round(rem * 100) / 100,
+            remainingQty: Math.round(totalPurchased * 100) / 100,
             dateLabel: `${b.invoice_date_from || "N/A"} (${b.financial_year || "FY"})`,
             sourceType: "Purchase Batch",
           });
         }
       }
 
-      // 2. Leftover Stock from Previous Sales Batch (shown as a separate distinct card icon)
+      // 2. Leftover Stock from Previous Sales Batch (shown ONLY if real remaining stock > 0)
       if (salesBatches && salesBatches.length > 0) {
         const latestSales = salesBatches[0];
-        // Default carry forward leftover stock quantity (between 20 KG and 50 KG)
-        const leftoverQty = 22.75;
-        sources.push({
-          id: `LEFTOVER_PREVIOUS_BATCH_${latestSales.id}`,
-          title: "Leftover Stock from Previous Batch",
-          remainingQty: leftoverQty,
-          dateLabel: "Previous Sales Batch Leftover",
-          sourceType: "Leftover Stock",
-        });
+        const stockBatchId =
+          latestSales.stock_source_batch_id || latestSales.id;
+
+        const { data: latestLedger } = await supabase
+          .from("daily_stock_ledger")
+          .select(
+            "opening_stock, purchased_quantity, sold_quantity, ledger_date",
+          )
+          .in(
+            "purchase_batch_id",
+            stockBatchId.split(",").map((s: string) => s.trim()),
+          )
+          .order("ledger_date", { ascending: false });
+
+        let leftoverQty = 0;
+        if (latestLedger && latestLedger.length > 0) {
+          const maxDate = latestLedger[0].ledger_date;
+          const maxDateRows = latestLedger.filter(
+            (r) => r.ledger_date === maxDate,
+          );
+
+          leftoverQty = maxDateRows.reduce((sum, r) => {
+            const avail =
+              Number(r.opening_stock || 0) + Number(r.purchased_quantity || 0);
+            const rem = Math.max(0, avail - Number(r.sold_quantity || 0));
+            return sum + rem;
+          }, 0);
+        }
+
+        leftoverQty = Math.round(leftoverQty * 100) / 100;
+
+        // ONLY push the Leftover Stock card if leftoverQty > 0!
+        if (leftoverQty > 0.001) {
+          sources.push({
+            id: `LEFTOVER_PREVIOUS_BATCH_${latestSales.id}`,
+            title: "Leftover Stock from Previous Batch",
+            remainingQty: leftoverQty,
+            dateLabel: "Previous Sales Batch Leftover",
+            sourceType: "Leftover Stock",
+          });
+        }
       }
 
       setAvailableSources(sources);
@@ -445,7 +477,9 @@ export default function GenerateInvoice() {
                               isSelected ? "text-slate-400" : "text-slate-500",
                             )}
                           >
-                            Remaining Stock
+                            {source.sourceType === "Purchase Batch"
+                              ? "Total Stock"
+                              : "Leftover Stock"}
                           </span>
                           <span className="font-mono font-bold text-sm">
                             {source.remainingQty.toLocaleString("en-IN")} KG
