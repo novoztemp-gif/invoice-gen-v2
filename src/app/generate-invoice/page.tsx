@@ -229,16 +229,23 @@ export default function GenerateInvoice() {
         ) {
           totalPurchased = batchLedgerMap.get(b.id)?.purchased || 0;
         }
-        // 3. Third priority: products array in batch
+        // 3. Third priority: sum products array in batch
         else if (b.products && Array.isArray(b.products)) {
           for (const p of b.products) {
-            if (Number(p.monthly_quantity) > 0) {
-              totalPurchased += Number(p.monthly_quantity);
-            } else if (Number(p.quantity) > 0) {
-              totalPurchased += Number(p.quantity);
+            const pQty = Number(
+              p.monthly_quantity || p.purchased_quantity || p.quantity || 0,
+            );
+            if (pQty > 0) {
+              totalPurchased += pQty;
+            } else {
+              const minQ = Number(p.perDayQtyMin || 10);
+              const maxQ = Number(p.perDayQtyMax || 25);
+              totalPurchased += (minQ + maxQ) / 2;
             }
           }
         }
+
+        totalPurchased = Math.round(totalPurchased * 100) / 100;
 
         if (totalPurchased > 0.001 || Number(b.total_amount) > 0) {
           const monthLabel = b.invoice_date_from
@@ -247,7 +254,7 @@ export default function GenerateInvoice() {
           sources.push({
             id: b.id,
             title: `Purchase Batch - ${monthLabel}`,
-            remainingQty: Math.round(totalPurchased * 100) / 100,
+            remainingQty: totalPurchased,
             dateLabel: `${b.invoice_date_from || "N/A"} (${b.financial_year || "FY"})`,
             sourceType: "Purchase Batch",
           });
@@ -338,8 +345,30 @@ export default function GenerateInvoice() {
         );
         const result = await res.json();
         if (res.ok) {
-          setStockSummary(result.summary || []);
+          const summaryList = result.summary || [];
+          setStockSummary(summaryList);
           setPurchaseBatchDetails(result.batchDetails || null);
+
+          // Synchronize Card TOTAL STOCK to match the exact sum of total_available in summary table
+          const exactSum = summaryList.reduce(
+            (sum: number, item: any) =>
+              sum + Number(item.total_available || item.purchased || 0),
+            0,
+          );
+
+          if (exactSum > 0) {
+            setAvailableSources((prevSources) =>
+              prevSources.map((src) => {
+                if (selectedSourceIds.includes(src.id)) {
+                  return {
+                    ...src,
+                    remainingQty: Math.round(exactSum * 100) / 100,
+                  };
+                }
+                return src;
+              }),
+            );
+          }
         } else {
           console.error(result.message);
         }
