@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import { createClient } from "@/lib/supabase/server";
+import { roundToQuarterIncrement } from "@/lib/utils/quantity-rate-utils";
 
 export async function POST(request: NextRequest) {
   try {
@@ -140,15 +141,40 @@ export async function POST(request: NextRequest) {
 
     // 2. If invoicesOverride is provided from Daily Stock Review modal, save them directly under newBatch.id
     if (Array.isArray(invoicesOverride) && invoicesOverride.length > 0) {
-      const invoicesToInsert = invoicesOverride.map((inv: any) => ({
-        invoice_batch_id: newBatch.id,
-        invoice_number: inv.invoice_number,
-        invoice_date: inv.invoice_date,
-        total_amount: Number(inv.total_amount || 0),
-        products: inv.products,
-        status: inv.status || "generated",
-        batch_type: "SALES",
-      }));
+      const invoicesToInsert = invoicesOverride.map((inv: any) => {
+        const normalizedProducts = (inv.products || []).map((p: any) => {
+          let qty = Number(p.quantity || 0);
+          if (qty > 0 && qty < 10) {
+            qty = Math.max(10, roundToQuarterIncrement(qty));
+          } else {
+            qty = roundToQuarterIncrement(qty);
+          }
+          const amt = Math.round(qty * Number(p.rate || 1));
+          return {
+            ...p,
+            quantity: qty,
+            amount: amt,
+            rate: Math.round(Number(p.rate || 1)),
+          };
+        });
+
+        const totalAmt = Math.round(
+          normalizedProducts.reduce(
+            (sum: number, p: any) => sum + Math.round(p.amount || 0),
+            0,
+          ),
+        );
+
+        return {
+          invoice_batch_id: newBatch.id,
+          invoice_number: inv.invoice_number,
+          invoice_date: inv.invoice_date,
+          total_amount: totalAmt,
+          products: normalizedProducts,
+          status: inv.status || "generated",
+          batch_type: "SALES",
+        };
+      });
 
       const { data: insertedInvoices, error: invoiceInsertError } =
         await supabase.from("invoice").insert(invoicesToInsert).select();

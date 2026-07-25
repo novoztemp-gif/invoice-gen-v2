@@ -292,9 +292,17 @@ export function DailyStockReviewModal({
               return { ...p, quantity: 0, amount: 0 };
             }
 
-            const newQty =
+            let newQty =
               Math.round(p.quantity * (targetQty / origSum) * 100) / 100;
-            const newAmt = Math.round(newQty * p.rate * 100) / 100;
+            // Enforce commercial wholesale minimum (>= 10.0 KG) unless total target stock is < 10 KG
+            if (newQty > 0 && newQty < 10 && targetQty >= 10) {
+              newQty = Math.max(10, roundToQuarterIncrement(newQty));
+            } else {
+              newQty = roundToQuarterIncrement(newQty);
+            }
+
+            // Enforce whole integer rupee amounts (0 decimals / 0 paisa)
+            const newAmt = Math.round(newQty * (p.rate || 1));
             return {
               ...p,
               quantity: newQty,
@@ -303,11 +311,13 @@ export function DailyStockReviewModal({
           })
           .filter((p: any) => p.quantity > 0);
 
-        const totalAmount =
-          Math.round(
-            updatedProducts.reduce((sum: number, p: any) => sum + p.amount, 0) *
-              100,
-          ) / 100;
+        // Invoice total is exact integer sum of line item amounts (0 decimals / 0 paisa)
+        const totalAmount = Math.round(
+          updatedProducts.reduce(
+            (sum: number, p: any) => sum + Math.round(p.amount || 0),
+            0,
+          ),
+        );
 
         return {
           ...inv,
