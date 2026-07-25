@@ -376,7 +376,10 @@ export default function GenerateInvoice() {
           if (exactSum > 0) {
             setAvailableSources((prevSources) =>
               prevSources.map((src) => {
-                if (selectedSourceIds.includes(src.id)) {
+                if (
+                  src.id === formData.stockSourceBatchId ||
+                  formData.stockSourceBatchId?.includes(src.id)
+                ) {
                   return {
                     ...src,
                     remainingQty: Math.round(exactSum * 100) / 100,

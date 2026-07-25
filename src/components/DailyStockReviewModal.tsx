@@ -52,9 +52,8 @@ export function DailyStockReviewModal({
       setNullStock(false);
       const allocated = performAutoAllocation(initialRows);
       setRows(allocated);
-      onRowsChange?.(allocated);
     }
-  }, [isOpen, initialRows]);
+  }, [isOpen]);
 
   // Execute Null Stock Allocation (Proposed Sold equals total available stock so Closing Stock = 0.00 KG)
   const performNullStockAllocation = (currentRows: StockReviewRow[]) => {
