@@ -107,31 +107,40 @@ export async function GET(request: NextRequest) {
     }
 
     const purchasedSums = new Map<string, number>();
-    for (const row of ledgerRows || []) {
-      const purchased = Number(row.purchased_quantity || 0);
-      const prevSold = Number(row.sold_quantity || 0);
-      const availableFromBatch = Math.max(0, purchased - prevSold);
-      purchasedSums.set(
-        row.product_id,
-        (purchasedSums.get(row.product_id) || 0) + availableFromBatch,
-      );
+
+    // 1. If daily_stock_ledger has rows for these batches, sum purchased_quantity across days
+    if (ledgerRows && ledgerRows.length > 0) {
+      for (const row of ledgerRows) {
+        if (row.product_id) {
+          const purchased = Number(row.purchased_quantity || 0);
+          purchasedSums.set(
+            row.product_id,
+            (purchasedSums.get(row.product_id) || 0) + purchased,
+          );
+        }
+      }
     }
 
-    // Fallback: Sum product quantities directly from invoices if daily_stock_ledger is empty for these batches
-    if (purchaseInvoices && purchaseInvoices.length > 0) {
+    // 2. If purchasedSums is empty or daily_stock_ledger had no entries, sum ALL purchase invoices
+    const totalLedgerPurchased = Array.from(purchasedSums.values()).reduce(
+      (a, b) => a + b,
+      0,
+    );
+
+    if (
+      totalLedgerPurchased === 0 &&
+      purchaseInvoices &&
+      purchaseInvoices.length > 0
+    ) {
+      purchasedSums.clear();
       for (const inv of purchaseInvoices) {
         for (const p of inv.products || []) {
           if (p.product_id) {
             const qty = Number(p.quantity || 0);
-            if (
-              !purchasedSums.has(p.product_id) ||
-              purchasedSums.get(p.product_id) === 0
-            ) {
-              purchasedSums.set(
-                p.product_id,
-                (purchasedSums.get(p.product_id) || 0) + qty,
-              );
-            }
+            purchasedSums.set(
+              p.product_id,
+              (purchasedSums.get(p.product_id) || 0) + qty,
+            );
           }
         }
       }
