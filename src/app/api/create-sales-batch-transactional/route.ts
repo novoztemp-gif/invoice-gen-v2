@@ -143,12 +143,7 @@ export async function POST(request: NextRequest) {
     if (Array.isArray(invoicesOverride) && invoicesOverride.length > 0) {
       const invoicesToInsert = invoicesOverride.map((inv: any) => {
         const normalizedProducts = (inv.products || []).map((p: any) => {
-          let qty = Number(p.quantity || 0);
-          if (qty > 0 && qty < 10) {
-            qty = Math.max(10, roundToQuarterIncrement(qty));
-          } else {
-            qty = roundToQuarterIncrement(qty);
-          }
+          const qty = roundToQuarterIncrement(Number(p.quantity || 0));
           const amt = Math.round(qty * Number(p.rate || 1));
           return {
             ...p,

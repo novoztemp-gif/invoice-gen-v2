@@ -292,14 +292,8 @@ export function DailyStockReviewModal({
               return { ...p, quantity: 0, amount: 0 };
             }
 
-            let newQty =
-              Math.round(p.quantity * (targetQty / origSum) * 100) / 100;
-            // Enforce commercial wholesale minimum (>= 10.0 KG) unless total target stock is < 10 KG
-            if (newQty > 0 && newQty < 10 && targetQty >= 10) {
-              newQty = Math.max(10, roundToQuarterIncrement(newQty));
-            } else {
-              newQty = roundToQuarterIncrement(newQty);
-            }
+            const scaledQty = p.quantity * (targetQty / origSum);
+            const newQty = roundToQuarterIncrement(scaledQty);
 
             // Enforce whole integer rupee amounts (0 decimals / 0 paisa)
             const newAmt = Math.round(newQty * (p.rate || 1));
