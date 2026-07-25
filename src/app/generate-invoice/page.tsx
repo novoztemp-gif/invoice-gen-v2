@@ -192,21 +192,18 @@ export default function GenerateInvoice() {
         }
       }
 
-      // Fallback: Sum purchased quantities directly from Purchase invoices if not in daily_stock_ledger
+      // Sum purchased quantities directly from Purchase invoices across ALL invoices
+      const invoiceQtyMap = new Map<string, number>();
       for (const inv of purchaseInvoices || []) {
-        if (inv.invoice_batch_id) {
-          const item = batchLedgerMap.get(inv.invoice_batch_id) || {
-            purchased: 0,
-            sold: 0,
-          };
-          if (item.purchased === 0) {
-            let invQty = 0;
-            for (const p of inv.products || []) {
-              invQty += Number(p.quantity || 0);
-            }
-            item.purchased += invQty;
-            batchLedgerMap.set(inv.invoice_batch_id, item);
+        if (inv.invoice_batch_id && Array.isArray(inv.products)) {
+          let invQty = 0;
+          for (const p of inv.products) {
+            invQty += Number(p.quantity || 0);
           }
+          invoiceQtyMap.set(
+            inv.invoice_batch_id,
+            (invoiceQtyMap.get(inv.invoice_batch_id) || 0) + invQty,
+          );
         }
       }
 
@@ -219,58 +216,38 @@ export default function GenerateInvoice() {
           continue;
         }
 
-        let item = batchLedgerMap.get(b.id);
         let totalPurchased = 0;
 
-        if (item && item.purchased > 0) {
-          totalPurchased = item.purchased;
+        // 1. First priority: sum of actual generated purchase invoices for this batch
+        if (invoiceQtyMap.has(b.id) && (invoiceQtyMap.get(b.id) || 0) > 0) {
+          totalPurchased = invoiceQtyMap.get(b.id) || 0;
         }
-
-        if (totalPurchased === 0 && b.products && Array.isArray(b.products)) {
+        // 2. Second priority: daily stock ledger
+        else if (
+          batchLedgerMap.has(b.id) &&
+          (batchLedgerMap.get(b.id)?.purchased || 0) > 0
+        ) {
+          totalPurchased = batchLedgerMap.get(b.id)?.purchased || 0;
+        }
+        // 3. Third priority: products array in batch
+        else if (b.products && Array.isArray(b.products)) {
           for (const p of b.products) {
             if (Number(p.monthly_quantity) > 0) {
               totalPurchased += Number(p.monthly_quantity);
             } else if (Number(p.quantity) > 0) {
               totalPurchased += Number(p.quantity);
-            } else if (
-              Number(p.perDayQtyMax) > 0 ||
-              Number(p.perDayQtyMin) > 0
-            ) {
-              const avgDaily =
-                (Number(p.perDayQtyMin || 0) + Number(p.perDayQtyMax || 0)) /
-                  2 || Number(p.perDayQtyMax || 0);
-              totalPurchased += avgDaily * 30;
             }
           }
         }
 
-        // Additional fallback: Sum from purchaseInvoices array if still 0
-        if (totalPurchased === 0) {
-          for (const inv of purchaseInvoices || []) {
-            if (inv.invoice_batch_id === b.id && inv.products) {
-              for (const p of inv.products) {
-                totalPurchased += Number(p.quantity || 0);
-              }
-            }
-          }
-        }
-
-        // Fail-safe: If total_amount > 0, batch has stock!
-        const effectiveQty =
-          totalPurchased > 0
-            ? totalPurchased
-            : Number(b.total_amount) > 0
-              ? 26892.25
-              : 0;
-
-        if (effectiveQty > 0.001 || Number(b.total_amount) > 0) {
+        if (totalPurchased > 0.001 || Number(b.total_amount) > 0) {
           const monthLabel = b.invoice_date_from
             ? b.invoice_date_from.slice(0, 7)
             : "N/A";
           sources.push({
             id: b.id,
             title: `Purchase Batch - ${monthLabel}`,
-            remainingQty: Math.round(effectiveQty * 100) / 100,
+            remainingQty: Math.round(totalPurchased * 100) / 100,
             dateLabel: `${b.invoice_date_from || "N/A"} (${b.financial_year || "FY"})`,
             sourceType: "Purchase Batch",
           });
