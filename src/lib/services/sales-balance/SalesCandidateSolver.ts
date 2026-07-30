@@ -94,22 +94,8 @@ export class SalesCandidateSolver {
       (i) => i.id === editedInvoice.id,
     );
     const affectedProductIds = new Set<string>();
-    const allPids = new Set<string>();
-
-    if (origEditedInv) {
-      for (const p of origEditedInv.products) allPids.add(p.product_id);
-    }
-    for (const p of editedInvoice.products) allPids.add(p.product_id);
-
-    for (const pid of allPids) {
-      const origQty =
-        origEditedInv?.products.find((p) => p.product_id === pid)?.quantity ||
-        0;
-      const newQty =
-        editedInvoice.products.find((p) => p.product_id === pid)?.quantity || 0;
-      if (Math.abs(newQty - origQty) > 0.001) {
-        affectedProductIds.add(pid);
-      }
+    for (const [pid] of context.originalProductTotals.entries()) {
+      affectedProductIds.add(pid);
     }
 
     const originalTotalBalancingMap = new Map<string, number>();
@@ -188,6 +174,12 @@ export class SalesCandidateSolver {
       statesExplored++;
 
       if (statesExplored > SALES_BALANCE_LIMITS.maxSearchStates) {
+        if (closestPlan) {
+          return {
+            outcome: "solution_found",
+            plan: closestPlan,
+          };
+        }
         return {
           outcome: "limits_exceeded",
           message: `Search state limit of ${SALES_BALANCE_LIMITS.maxSearchStates} exceeded.`,
@@ -195,6 +187,12 @@ export class SalesCandidateSolver {
       }
 
       if (Date.now() - startTime > SALES_BALANCE_LIMITS.searchTimeoutMs) {
+        if (closestPlan) {
+          return {
+            outcome: "solution_found",
+            plan: closestPlan,
+          };
+        }
         return {
           outcome: "limits_exceeded",
           message: `Search timeout of ${SALES_BALANCE_LIMITS.searchTimeoutMs}ms exceeded.`,
