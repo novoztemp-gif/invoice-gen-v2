@@ -1119,12 +1119,10 @@ export class InvoiceEngine {
       total_amount: inv.total_amount,
       status: inv.status || "generated",
       batch_type: inv.batch_type || typedBatch.batch_type || "PURCHASE",
-      customer_id: inv.customer_id || inv.supplier_id || null,
-      supplier_id: inv.supplier_id || inv.customer_id || null,
+      pdf_link: inv.pdf_link || null,
       transport_mode: inv.transport_mode || null,
       vehicle_number: inv.vehicle_number || null,
       date_of_supply: inv.date_of_supply || null,
-      pdf_link: inv.pdf_link || null,
       is_edited: inv.is_edited || false,
       edited_at: inv.edited_at || null,
     }));
