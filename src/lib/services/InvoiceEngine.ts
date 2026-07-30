@@ -1110,52 +1110,16 @@ export class InvoiceEngine {
       }
     }
 
-    // Commit invoices and update sequence atomically inside ONE single database transaction
-    let savedInvoices: any[] = [];
+    // Save generated invoices directly into database (manual previous_ending_sequence + 1 numbering)
+    const { data: selectInvoices, error: insertError } = await supabase
+      .from("invoice")
+      .insert(invoices)
+      .select();
 
-    try {
-      const committedSeqs =
-        await InvoiceNumberingService.commitInvoiceBatchWithSequences(
-          supabase,
-          batchId,
-          typedBatch.issuing_company_id,
-          typedBatch.financial_year || "2026-27",
-          invType,
-          invoices,
-        );
-
-      // Re-fetch created invoices for stock ledger tracking without 1000-row PostgREST truncation
-      savedInvoices = await fetchAllInvoicesForBatch(supabase, batchId);
-    } catch (rpcErr: any) {
-      console.warn(
-        "RPC commitInvoiceBatchWithSequences fallback to client insert:",
-        rpcErr,
-      );
-
-      // Fallback: Generate sequential numbers and insert
-      const seqNumbers =
-        await InvoiceNumberingService.generateSequentialInvoiceNumbers(
-          supabase,
-          typedBatch.issuing_company_id,
-          typedBatch.financial_year || "2026-27",
-          invType,
-          invoices.length,
-        );
-
-      for (let i = 0; i < invoices.length; i++) {
-        invoices[i].invoice_number = seqNumbers[i].invoice_number;
-      }
-
-      const { data: selectInvoices, error: insertError } = await supabase
-        .from("invoice")
-        .insert(invoices)
-        .select();
-
-      if (insertError) {
-        throw new Error(`Failed to save invoices: ${insertError.message}`);
-      }
-      savedInvoices = selectInvoices || [];
+    if (insertError) {
+      throw new Error(`Failed to save invoices: ${insertError.message}`);
     }
+    const savedInvoices = selectInvoices || [];
 
     // Update batch status
     const { error: updateError } = await supabase
@@ -1166,8 +1130,6 @@ export class InvoiceEngine {
     if (updateError) {
       console.error("Error updating batch status:", updateError);
     }
-
-    return invoices.length;
 
     return invoices.length;
   }
