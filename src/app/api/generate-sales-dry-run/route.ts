@@ -199,14 +199,6 @@ export async function POST(request: NextRequest) {
       `FY${financialYearStart}-${String(financialYearEnd).slice(2)}`,
     );
 
-    const { data: seqRow } = await supabase
-      .from("invoice_sequences")
-      .select("last_sequence_number")
-      .eq("issuing_company_id", issuingCompanyId)
-      .eq("financial_year", canonicalFy)
-      .eq("invoice_type", "S")
-      .maybeSingle();
-
     const { previousEndingSequenceNumber, previousEndingSequence } = body;
     const rawPrevSeq = previousEndingSequenceNumber ?? previousEndingSequence;
 
@@ -227,16 +219,14 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    let startingCounter = (seqRow ? Number(seqRow.last_sequence_number) : 0) + 1;
-
-    if (
+    // Manual Sequence Override: The ONLY source of truth is rawPrevSeq
+    const startingCounter =
       rawPrevSeq !== undefined &&
       rawPrevSeq !== null &&
       rawPrevSeq !== "" &&
       !isNaN(Number(rawPrevSeq))
-    ) {
-      startingCounter = Number(rawPrevSeq) + 1;
-    }
+        ? Number(rawPrevSeq) + 1
+        : 1;
 
     // Mock batch config for engine processing
     const mockBatch: any = {

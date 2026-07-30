@@ -889,50 +889,15 @@ export class InvoiceEngine {
       }
     }
 
-    const { data: seqRow } = await supabase
-      .from("invoice_sequences")
-      .select("last_sequence_number")
-      .eq("issuing_company_id", typedBatch.issuing_company_id)
-      .eq("financial_year", canonicalFy)
-      .eq("invoice_type", invType)
-      .maybeSingle();
-
-    let startingCounter =
-      (seqRow ? Number(seqRow.last_sequence_number) : 0) + 1;
-
-    // Feature 1: Manual Sequence Override from batch previous_ending_sequence
+    // Manual Sequence Override: The ONLY source of truth is typedBatch.previous_ending_sequence
     const prevEndingSeq = (typedBatch as any).previous_ending_sequence;
-    if (
+    const startingCounter =
       prevEndingSeq !== undefined &&
       prevEndingSeq !== null &&
       prevEndingSeq !== "" &&
       !isNaN(Number(prevEndingSeq))
-    ) {
-      startingCounter = Number(prevEndingSeq) + 1;
-    } else if (startingCounter === 1) {
-      // Fallback: If sequence row is not yet created, check existing invoice table for matching company, FY, and type
-      const abbr = (typedBatch as any).issuing_company_abbreviation || "IC";
-      const { data: allInvoices } = await supabase
-        .from("invoice")
-        .select("invoice_number")
-        .eq("batch_type", typedBatch.batch_type)
-        .like("invoice_number", `${abbr}-${canonicalFy}-${invType}-%`)
-        .order("invoice_number", { ascending: false })
-        .limit(1);
-
-      if (allInvoices && allInvoices.length > 0) {
-        const counters = allInvoices
-          .map((inv) => {
-            const match = inv.invoice_number.match(/-(\d+)$/);
-            return match ? parseInt(match[1], 10) : 0;
-          })
-          .filter((num) => !isNaN(num));
-
-        if (counters.length > 0) {
-          startingCounter = Math.max(...counters) + 1;
-        }
-      }
-    }
+        ? Number(prevEndingSeq) + 1
+        : 1;
 
     let invoices: any[] = [];
     if (typedBatch.batch_type === "PURCHASE") {

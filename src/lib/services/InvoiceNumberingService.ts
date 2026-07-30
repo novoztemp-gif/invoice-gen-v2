@@ -92,6 +92,7 @@ export class InvoiceNumberingService {
     issuingCompanyId: string,
     financialYear: string,
     invoiceType: InvoiceType,
+    previousEndingSequence?: number | string,
   ): Promise<InvoiceSequencePreview | null> {
     if (!issuingCompanyId) return null;
 
@@ -114,16 +115,14 @@ export class InvoiceNumberingService {
         .toUpperCase()
         .replace(/[^A-Z0-9]/g, "");
 
-    // 2. Fetch current last sequence
-    const { data: seqRow } = await supabase
-      .from("invoice_sequences")
-      .select("last_sequence_number")
-      .eq("issuing_company_id", issuingCompanyId)
-      .eq("financial_year", canonicalFy)
-      .eq("invoice_type", invoiceType)
-      .maybeSingle();
+    const parsedPrev =
+      previousEndingSequence !== undefined &&
+      previousEndingSequence !== null &&
+      previousEndingSequence !== ""
+        ? Number(previousEndingSequence)
+        : 0;
 
-    const currentSeq = seqRow ? Number(seqRow.last_sequence_number) : 0;
+    const currentSeq = !isNaN(parsedPrev) ? parsedPrev : 0;
     const nextSeq = currentSeq + 1;
 
     const currentInvoiceNumber =
@@ -200,6 +199,7 @@ export class InvoiceNumberingService {
     financialYear: string,
     invoiceType: InvoiceType,
     count: number,
+    previousEndingSequence?: number | string,
   ): Promise<Array<{ invoice_number: string; sequence_number: number }>> {
     const canonicalFy = this.normalizeFinancialYear(financialYear);
 
@@ -217,24 +217,14 @@ export class InvoiceNumberingService {
         .replace(/[^A-Z0-9]/g, "") ||
       "IC";
 
-    const { data: seqRow } = await supabase
-      .from("invoice_sequences")
-      .select("last_sequence_number")
-      .eq("issuing_company_id", issuingCompanyId)
-      .eq("financial_year", canonicalFy)
-      .eq("invoice_type", invoiceType)
-      .maybeSingle();
+    const parsedPrev =
+      previousEndingSequence !== undefined &&
+      previousEndingSequence !== null &&
+      previousEndingSequence !== ""
+        ? Number(previousEndingSequence)
+        : 0;
 
-    const startSeq = (seqRow ? Number(seqRow.last_sequence_number) : 0) + 1;
-    const endSeq = startSeq + count - 1;
-
-    await supabase.from("invoice_sequences").upsert({
-      issuing_company_id: issuingCompanyId,
-      financial_year: canonicalFy,
-      invoice_type: invoiceType,
-      last_sequence_number: endSeq,
-      updated_at: new Date().toISOString(),
-    });
+    const startSeq = (!isNaN(parsedPrev) ? parsedPrev : 0) + 1;
 
     const result = [];
     for (let i = 0; i < count; i++) {

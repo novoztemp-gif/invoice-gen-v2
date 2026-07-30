@@ -198,11 +198,13 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       selectedIssuingCompany.id,
       fyString,
       invType,
+      formData.previousEndingSequenceNumber,
     ).then((res) => setSequencePreview(res));
   }, [
     selectedIssuingCompany?.id,
     formData.financialYearStart,
     formData.financialYearEnd,
+    formData.previousEndingSequenceNumber,
     batchType,
   ]);
 

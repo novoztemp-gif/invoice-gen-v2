@@ -170,43 +170,14 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      const { data: seqRow } = await supabase
-        .from("invoice_sequences")
-        .select("last_sequence_number")
-        .eq("issuing_company_id", issuingCompanyId)
-        .eq("financial_year", canonicalFy)
-        .eq("invoice_type", "S")
-        .maybeSingle();
-
-      let startingCounter = (seqRow ? Number(seqRow.last_sequence_number) : 0) + 1;
-
-      if (
+      // Manual Sequence Override: The ONLY source of truth is rawPrevSeq
+      const startingCounter =
         rawPrevSeq !== undefined &&
         rawPrevSeq !== null &&
         rawPrevSeq !== "" &&
         !isNaN(Number(rawPrevSeq))
-      ) {
-        startingCounter = Number(rawPrevSeq) + 1;
-      } else {
-        // Fallback check against existing invoice table for this exact company, FY, and invoice_type
-        const { data: latestInvs } = await supabase
-          .from("invoice")
-          .select("invoice_number")
-          .eq("batch_type", "SALES")
-          .like("invoice_number", `${companyAbbr}-${canonicalFy}-S-%`)
-          .order("invoice_number", { ascending: false })
-          .limit(1);
-
-        if (latestInvs && latestInvs.length > 0) {
-          const match = latestInvs[0].invoice_number?.match(/-(\d+)$/);
-          if (match) {
-            const dbSeq = parseInt(match[1], 10);
-            if (!isNaN(dbSeq) && dbSeq >= startingCounter) {
-              startingCounter = dbSeq + 1;
-            }
-          }
-        }
-      }
+          ? Number(rawPrevSeq) + 1
+          : 1;
 
       let seqCounter = startingCounter;
       const invoicesToInsert = invoicesOverride.map((inv: any) => {
@@ -259,18 +230,6 @@ export async function POST(request: NextRequest) {
           },
           { status: 500 },
         );
-      }
-
-      // Update invoice_sequences with final sequence number
-      const finalMaxSeq = seqCounter - 1;
-      if (finalMaxSeq > 0) {
-        await supabase.from("invoice_sequences").upsert({
-          issuing_company_id: issuingCompanyId,
-          financial_year: canonicalFy,
-          invoice_type: "S",
-          last_sequence_number: finalMaxSeq,
-          updated_at: new Date().toISOString(),
-        });
       }
 
       savedInvoices = insertedInvoices || [];
