@@ -179,6 +179,12 @@ export class SalesFinalValidator {
       }
     }
 
+    console.log("[SalesFinalValidator] Validation Execution Result:", {
+      valid: errors.length === 0,
+      totalErrors: errors.length,
+      failedInvariants: errors.length > 0 ? errors : ["None (All Invariants Satisfied)"]
+    });
+
     if (errors.length > 0) {
       return { valid: false, errors };
     }

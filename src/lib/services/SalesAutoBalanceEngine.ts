@@ -78,6 +78,14 @@ export class SalesAutoBalanceEngine {
         normalisedEdited,
       );
 
+      console.log("[SalesAutoBalanceEngine] BEFORE LINE 82 - solverResult:", {
+        outcome: solverResult.outcome,
+        message: solverResult.message,
+        planExists: !!solverResult.plan,
+        batchDelta: solverResult.plan?.batchDelta,
+        productDeltas: solverResult.plan ? Object.fromEntries(solverResult.plan.productDeltas.entries()) : null,
+      });
+
       if (solverResult.outcome !== "solution_found" || !solverResult.plan) {
         throw new Error(
           `Sales Product Redistribution Failed: ${solverResult.message || solverResult.outcome}`,
@@ -89,7 +97,21 @@ export class SalesAutoBalanceEngine {
         finalPlan.batchDelta !== 0 ||
         Array.from(finalPlan.productDeltas.values()).some((d) => d !== 0)
       ) {
+        console.log("[SalesAutoBalanceEngine] BEFORE CALLING SalesResidualRepair - finalPlan:", {
+          batchDelta: finalPlan.batchDelta,
+          productDeltas: Object.fromEntries(finalPlan.productDeltas.entries()),
+          editedInvoiceTotal: finalPlan.editedInvoice.total_amount,
+          balancingInvoicesCount: finalPlan.balancingInvoices.length,
+        });
+
         const repaired = SalesResidualRepair.repairResidual(context, finalPlan);
+
+        console.log("[SalesAutoBalanceEngine] AFTER repairResidual - repaired:", {
+          repairedSuccess: !!repaired,
+          "repaired.batchDelta": repaired?.batchDelta,
+          "repaired.productDeltas": repaired ? Object.fromEntries(repaired.productDeltas.entries()) : null,
+        });
+
         if (!repaired) {
           throw new Error(
             "Residual Repair Failed: Unable to close residual batch delta or product quantity delta.",

@@ -146,10 +146,19 @@ export class SalesCandidateSolver {
         invoice: inv,
         candidates: invoiceCombinations,
       });
+
+      console.log(
+        `[SalesCandidateSolver] Candidate Invoice #${candidatesPerInvoice.length} (${inv.invoice_number}): generated ${invoiceCombinations.length} candidate combinations.`,
+      );
     }
+
+    console.log(
+      `[SalesCandidateSolver] Total Balancing Candidate Invoices: ${balancingInvoices.length}. Total candidatesPerInvoice entries: ${candidatesPerInvoice.length}.`,
+    );
 
     // 4. State space exploration using priority queue (lowest cost state first)
     let statesExplored = 0;
+    let completeStatesReached = 0;
     let bestPlan: SalesSolverPlan | null = null;
 
     const initialProductTotals = new Map<string, number>();
@@ -209,6 +218,7 @@ export class SalesCandidateSolver {
       const current = initialQueue.shift()!;
 
       if (current.invoiceIndex === balancingInvoices.length) {
+        completeStatesReached++;
         // Evaluate complete plan
         const batchDelta = roundMoney(
           targetBalancingAmount - current.accumulatedAmount,
@@ -234,6 +244,25 @@ export class SalesCandidateSolver {
             0,
           ) + amountDiff;
 
+        console.log(
+          `[SalesCandidateSolver] Reached Complete State #${completeStatesReached} (Explored #${statesExplored}):`,
+          {
+            isAmountMatched,
+            isProductsMatched,
+            batchDelta,
+            productDeltas: Object.fromEntries(productDeltas.entries()),
+            stateDiff,
+            rejectionReason:
+              !isAmountMatched && !isProductsMatched
+                ? `Amount diff (₹${amountDiff}) & Product diffs non-zero`
+                : !isAmountMatched
+                ? `Amount diff (₹${amountDiff}) non-zero`
+                : !isProductsMatched
+                ? `Product diffs non-zero`
+                : "None (Exact Match)",
+          },
+        );
+
         if (stateDiff < minStateDiff) {
           minStateDiff = stateDiff;
           closestPlan = {
@@ -243,6 +272,9 @@ export class SalesCandidateSolver {
             batchDelta,
             productDeltas,
           };
+          console.log(
+            `[SalesCandidateSolver] Updated closestPlan at complete state #${completeStatesReached}. minStateDiff=${minStateDiff}`,
+          );
         }
 
         if (isAmountMatched && isProductsMatched) {
@@ -260,6 +292,21 @@ export class SalesCandidateSolver {
 
       const { invoice, candidates } =
         candidatesPerInvoice[current.invoiceIndex];
+
+      if (!candidates || candidates.length === 0) {
+        console.log(
+          `[SalesCandidateSolver] DISCARDED SEARCH BRANCH at invoiceIndex=${current.invoiceIndex} (${invoice.invoice_number}):`,
+          {
+            reason: "0 candidate combinations generated for this invoice",
+            candidateRejected: invoice.invoice_number,
+            currentAccumulatedAmount: current.accumulatedAmount,
+            currentProductTotals: Object.fromEntries(
+              current.productTotals.entries(),
+            ),
+          },
+        );
+        continue;
+      }
 
       for (const cand of candidates) {
         const nextInvoice: SalesInvoice = {
@@ -290,6 +337,24 @@ export class SalesCandidateSolver {
     }
 
     const targetPlan = bestPlan || closestPlan;
+
+    console.log("[SalesCandidateSolver] Execution Search Report:", {
+      totalBalancingInvoices: balancingInvoices.length,
+      statesExplored,
+      completeStatesReached,
+      reachedTargetIndex: completeStatesReached > 0,
+      closestPlanExists: !!closestPlan,
+      bestPlanExists: !!bestPlan,
+      reasonClosestPlanNotAssigned:
+        completeStatesReached === 0
+          ? "Search never reached current.invoiceIndex === balancingInvoices.length (complete candidate state was never formed)."
+          : "N/A (closestPlan WAS assigned)",
+      finalOutcome: targetPlan ? "solution_found" : "no_solution",
+      finalBatchDelta: targetPlan?.batchDelta,
+      finalProductDeltas: targetPlan
+        ? Object.fromEntries(targetPlan.productDeltas.entries())
+        : null,
+    });
 
     if (targetPlan) {
       return {

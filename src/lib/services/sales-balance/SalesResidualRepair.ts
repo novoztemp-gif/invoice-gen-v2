@@ -48,6 +48,12 @@ export class SalesResidualRepair {
       }
     }
 
+    console.log("[SalesResidualRepair] INPUT:", {
+      inputBatchDelta: amountResidual,
+      planBatchDelta: plan.batchDelta,
+      productDeltas: Object.fromEntries(plan.productDeltas.entries()),
+    });
+
     console.log("=== AUTO BALANCE ENGINE DIAGNOSTIC LOGS ===");
     console.log("1. Original Batch Total:                  ", context.batchTotal);
     console.log("2. Current Batch Total after edit:        ", currentTotalAmount);
@@ -288,6 +294,15 @@ export class SalesResidualRepair {
     );
     const amountResidualLeaving = roundMoney(context.batchTotal - finalTotalAmt);
     console.log("8. Remaining Drift leaving Repair:        ", amountResidualLeaving);
+
+    const repairSuccess = amountResidualLeaving === 0;
+    console.log("[SalesResidualRepair] OUTPUT:", {
+      outputBatchDelta: amountResidualLeaving,
+      repairSuccess,
+      repairFailureReason: repairSuccess
+        ? "None (Repair Succeeded)"
+        : `Non-zero residual drift of ₹${amountResidualLeaving} remaining after repair`
+    });
 
     return {
       editedInvoice: plan.editedInvoice,

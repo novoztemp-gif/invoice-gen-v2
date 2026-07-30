@@ -92,7 +92,7 @@ export class SalesCandidateGenerator {
       }
     }
 
-    return Array.from(candidates)
+    const result = Array.from(candidates)
       .filter((q) => q === 0 || (q >= minQty && q <= maxQty))
       .sort((a, b) => {
         const isCurrentA = Math.abs(a - currentQty) < 0.001 ? 1 : 0;
@@ -149,6 +149,11 @@ export class SalesCandidateGenerator {
         return diffA - diffB;
       })
       .slice(0, SALES_BALANCE_LIMITS.maxQuantityCandidates);
+
+    if (result.length === 0) {
+      return [currentQty];
+    }
+    return result;
   }
 
   /**
@@ -173,10 +178,15 @@ export class SalesCandidateGenerator {
       }
     }
 
-    return Array.from(candidates)
+    const rates = Array.from(candidates)
       .filter((r) => r >= rateMin && r <= rateMax && r >= 1)
       .sort((a, b) => Math.abs(a - currentRate) - Math.abs(b - currentRate))
       .slice(0, SALES_BALANCE_LIMITS.maxRateCandidates);
+
+    if (rates.length === 0) {
+      return [Math.max(1, baseRate)];
+    }
+    return rates;
   }
 
   /**
@@ -218,6 +228,21 @@ export class SalesCandidateGenerator {
       const rates = this.generateRateCandidates(line.rate, constraint);
 
       const candidateSet = new Map<string, SalesGeneratedLineCandidate>();
+
+      // Guarantee the original unmodified line item candidate is present
+      const originalKey = `${line.quantity}_${line.rate}`;
+      candidateSet.set(originalKey, {
+        line: {
+          ...line,
+          quantity: line.quantity,
+          rate: line.rate,
+          amount: line.amount,
+        },
+        delta: 0,
+        quantity: line.quantity,
+        rate: line.rate,
+        amount: line.amount,
+      });
 
       for (const q of quantities) {
         for (const r of rates) {
