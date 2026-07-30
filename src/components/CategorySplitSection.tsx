@@ -114,8 +114,10 @@ export function CategorySplitSection({
       </CardHeader>
       <CardContent className="p-3.5">
         <p className="text-xs text-slate-500 mb-3">
-          Distribute total billing amount between Meat and Fruits categories.
-          Invoices generated for Meat and Fruits remain completely independent.
+          <span className="font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200 mr-1.5">
+            READ-ONLY
+          </span>
+          Automatically calculated from Product Occurrence Distribution.
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -137,14 +139,9 @@ export function CategorySplitSection({
               <Input
                 id="meat-pct"
                 type="number"
-                min="0"
-                max="100"
-                step="1"
+                readOnly
                 value={meatSplit.percentage}
-                onChange={(e) =>
-                  handleMeatChange(parseFloat(e.target.value) || 0)
-                }
-                className="h-8 text-xs bg-white text-right font-bold text-rose-900 border-rose-300"
+                className="h-8 text-xs bg-slate-100 cursor-not-allowed text-right font-bold text-rose-900 border-rose-300"
               />
               <span className="font-bold text-rose-900">%</span>
             </div>
@@ -168,14 +165,9 @@ export function CategorySplitSection({
               <Input
                 id="fruit-pct"
                 type="number"
-                min="0"
-                max="100"
-                step="1"
+                readOnly
                 value={fruitSplit.percentage}
-                onChange={(e) =>
-                  handleFruitChange(parseFloat(e.target.value) || 0)
-                }
-                className="h-8 text-xs bg-white text-right font-bold text-amber-900 border-amber-300"
+                className="h-8 text-xs bg-slate-100 cursor-not-allowed text-right font-bold text-amber-900 border-amber-300"
               />
               <span className="font-bold text-amber-900">%</span>
             </div>

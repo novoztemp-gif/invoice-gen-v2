@@ -100,8 +100,12 @@ export async function generatePurchasePDFBuffer(
     // being
     doc.font("Helvetica-Bold").fontSize(10).text("being", 40, 235);
     const productsList =
-      inv.products?.map((p: any) => p.product_name).join(", ") ||
-      "raw materials";
+      inv.products
+        ?.map((p: any) => {
+          const hsn = p.hsn_code ? String(p.hsn_code).trim() : "";
+          return hsn ? `${p.product_name} - ${hsn}` : p.product_name;
+        })
+        .join(", ") || "raw materials";
     doc.font("Helvetica-Oblique").text(`Purchase of ${productsList}`, 80, 235);
     doc
       .moveTo(80, 245)

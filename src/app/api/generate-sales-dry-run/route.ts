@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
+import { InvoiceNumberingService } from "@/lib/services/InvoiceNumberingService";
 import { createClient } from "@/lib/supabase/server";
 import { roundToQuarterIncrement } from "@/lib/utils/quantity-rate-utils";
 
@@ -74,16 +75,20 @@ export async function POST(request: NextRequest) {
         .select("id, products")
         .in("id", batchIds);
 
-      const productQtyMap = new Map<string, number>();
+      const purchasedByDateAndProduct = new Map<string, number>();
+      const productIds = new Set<string>();
 
       if (purchaseInvoices && purchaseInvoices.length > 0) {
         for (const inv of purchaseInvoices) {
+          const dateStr = inv.invoice_date;
           for (const p of inv.products || []) {
             if (p.product_id) {
+              productIds.add(p.product_id);
+              const key = `${dateStr}_${p.product_id}`;
               const qty = Number(p.quantity || 0);
-              productQtyMap.set(
-                p.product_id,
-                (productQtyMap.get(p.product_id) || 0) + qty,
+              purchasedByDateAndProduct.set(
+                key,
+                (purchasedByDateAndProduct.get(key) || 0) + qty,
               );
             }
           }
@@ -92,10 +97,12 @@ export async function POST(request: NextRequest) {
         for (const b of purchaseBatches) {
           for (const p of b.products || []) {
             if (p.product_id) {
+              productIds.add(p.product_id);
               const qty = Number(p.monthly_quantity || p.quantity || 0);
-              productQtyMap.set(
-                p.product_id,
-                (productQtyMap.get(p.product_id) || 0) + qty,
+              const key = `${invoiceDateFrom}_${p.product_id}`;
+              purchasedByDateAndProduct.set(
+                key,
+                (purchasedByDateAndProduct.get(key) || 0) + qty,
               );
             }
           }
@@ -112,13 +119,16 @@ export async function POST(request: NextRequest) {
       }
 
       const syntheticRows: any[] = [];
-      for (const [prodId, totalPurchased] of productQtyMap.entries()) {
-        dateList.forEach((dateStr, idx) => {
+      for (const prodId of productIds) {
+        dateList.forEach((dateStr) => {
+          const key = `${dateStr}_${prodId}`;
+          const purchasedQty =
+            Math.round((purchasedByDateAndProduct.get(key) || 0) * 100) / 100;
           syntheticRows.push({
             ledger_date: dateStr,
             product_id: prodId,
             opening_stock: 0,
-            purchased_quantity: idx === 0 ? totalPurchased : 0,
+            purchased_quantity: purchasedQty,
             sold_quantity: 0,
           });
         });
@@ -184,26 +194,20 @@ export async function POST(request: NextRequest) {
     const timeDiff = toDate.getTime() - fromDate.getTime();
     const numberOfDays = Math.ceil(timeDiff / (1000 * 3600 * 24)) + 1;
 
-    // Resolve starting invoice counter
-    const { data: allInvoices } = await supabase
-      .from("invoice")
-      .select("invoice_number")
-      .order("invoice_number", { ascending: false })
-      .limit(1);
+    // Resolve starting invoice counter from invoice_sequences
+    const canonicalFy = InvoiceNumberingService.normalizeFinancialYear(
+      `FY${financialYearStart}-${String(financialYearEnd).slice(2)}`,
+    );
 
-    let startingCounter = 1;
-    if (allInvoices && allInvoices.length > 0) {
-      const counters = allInvoices
-        .map((inv) => {
-          const match = inv.invoice_number.match(/-(\d+)$/);
-          return match ? parseInt(match[1], 10) : 0;
-        })
-        .filter((num) => !isNaN(num));
+    const { data: seqRow } = await supabase
+      .from("invoice_sequences")
+      .select("last_sequence_number")
+      .eq("issuing_company_id", issuingCompanyId)
+      .eq("financial_year", canonicalFy)
+      .eq("invoice_type", "S")
+      .maybeSingle();
 
-      if (counters.length > 0) {
-        startingCounter = Math.max(...counters) + 1;
-      }
-    }
+    let startingCounter = (seqRow ? Number(seqRow.last_sequence_number) : 0) + 1;
 
     // Mock batch config for engine processing
     const mockBatch: any = {

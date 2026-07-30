@@ -239,7 +239,12 @@ export async function GET(request: NextRequest) {
     ws.getCell("A14").font = { bold: true, size: 11 };
     ws.mergeCells("B14:H14");
     const cellBeingVal = ws.getCell("B14");
-    const productsList = products.map((p: any) => p.product_name).join(", ");
+    const productsList = products
+      .map((p: any) => {
+        const hsn = p.hsn_code ? String(p.hsn_code).trim() : "";
+        return hsn ? `${p.product_name} - ${hsn}` : p.product_name;
+      })
+      .join(", ");
     cellBeingVal.value = productsList
       ? `Purchase of ${productsList}`
       : "Purchase of raw materials";

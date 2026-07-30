@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
+import { InvoiceNumberingService } from "@/lib/services/InvoiceNumberingService";
 import { createClient } from "@/lib/supabase/server";
 import { roundToQuarterIncrement } from "@/lib/utils/quantity-rate-utils";
 
@@ -120,7 +121,7 @@ export async function POST(request: NextRequest) {
         financial_year: `FY${financialYearStart}-${String(financialYearEnd).slice(2)}`,
         batch_type: "SALES",
         status: "generated",
-        batch_status: "FINALIZED",
+        batch_status: "DRAFT",
         products: products,
         created_by: userId,
       })
@@ -141,6 +142,57 @@ export async function POST(request: NextRequest) {
 
     // 2. If invoicesOverride is provided from Daily Stock Review modal, save them directly under newBatch.id
     if (Array.isArray(invoicesOverride) && invoicesOverride.length > 0) {
+      const canonicalFy = InvoiceNumberingService.normalizeFinancialYear(
+        `FY${String(financialYearStart)}-${String(financialYearEnd)}`,
+      );
+
+      let companyAbbr = "IC";
+      if (issuingCompanyId) {
+        const { data: company } = await supabase
+          .from("issuing_companies")
+          .select("abbreviation, company_name")
+          .eq("id", issuingCompanyId)
+          .single();
+        if (company) {
+          companyAbbr =
+            company.abbreviation ||
+            company.company_name
+              .substring(0, 4)
+              .toUpperCase()
+              .replace(/[^A-Z0-9]/g, "");
+        }
+      }
+
+      const { data: seqRow } = await supabase
+        .from("invoice_sequences")
+        .select("last_sequence_number")
+        .eq("issuing_company_id", issuingCompanyId)
+        .eq("financial_year", canonicalFy)
+        .eq("invoice_type", "S")
+        .maybeSingle();
+
+      let startingCounter = (seqRow ? Number(seqRow.last_sequence_number) : 0) + 1;
+
+      // Fallback check against existing invoice table for this exact company, FY, and invoice_type
+      const { data: latestInvs } = await supabase
+        .from("invoice")
+        .select("invoice_number")
+        .eq("batch_type", "SALES")
+        .like("invoice_number", `${companyAbbr}-${canonicalFy}-S-%`)
+        .order("invoice_number", { ascending: false })
+        .limit(1);
+
+      if (latestInvs && latestInvs.length > 0) {
+        const match = latestInvs[0].invoice_number?.match(/-(\d+)$/);
+        if (match) {
+          const dbSeq = parseInt(match[1], 10);
+          if (!isNaN(dbSeq) && dbSeq >= startingCounter) {
+            startingCounter = dbSeq + 1;
+          }
+        }
+      }
+
+      let seqCounter = startingCounter;
       const invoicesToInsert = invoicesOverride.map((inv: any) => {
         const normalizedProducts = (inv.products || []).map((p: any) => {
           const qty = roundToQuarterIncrement(Number(p.quantity || 0));
@@ -160,9 +212,16 @@ export async function POST(request: NextRequest) {
           ),
         );
 
+        const currentInvNumber = InvoiceNumberingService.formatInvoiceNumber(
+          companyAbbr,
+          canonicalFy,
+          "S",
+          seqCounter++,
+        );
+
         return {
           invoice_batch_id: newBatch.id,
-          invoice_number: inv.invoice_number,
+          invoice_number: currentInvNumber,
           invoice_date: inv.invoice_date,
           total_amount: totalAmt,
           products: normalizedProducts,
@@ -185,6 +244,19 @@ export async function POST(request: NextRequest) {
           { status: 500 },
         );
       }
+
+      // Update invoice_sequences with final sequence number
+      const finalMaxSeq = seqCounter - 1;
+      if (finalMaxSeq > 0) {
+        await supabase.from("invoice_sequences").upsert({
+          issuing_company_id: issuingCompanyId,
+          financial_year: canonicalFy,
+          invoice_type: "S",
+          last_sequence_number: finalMaxSeq,
+          updated_at: new Date().toISOString(),
+        });
+      }
+
       savedInvoices = insertedInvoices || [];
     } else {
       // Otherwise use InvoiceEngine to generate and save invoices for newBatch.id

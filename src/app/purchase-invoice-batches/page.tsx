@@ -5,6 +5,7 @@ import { ArrowRight, Loader2, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { InvoiceNumberingService } from "@/lib/services/InvoiceNumberingService";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
@@ -100,6 +101,13 @@ export default function PurchaseInvoiceBatches() {
     try {
       const supabase = createClient();
 
+      // Fetch batch metadata before deletion for sequence rollback
+      const { data: targetBatch } = await supabase
+        .from("invoice_batch")
+        .select("issuing_company_id, financial_year, batch_type")
+        .eq("id", id)
+        .maybeSingle();
+
       // Delete associated invoices first
       await supabase.from("invoice").delete().eq("invoice_batch_id", id);
 
@@ -110,6 +118,49 @@ export default function PurchaseInvoiceBatches() {
         .eq("id", id);
 
       if (error) throw error;
+
+      // Rollback sequence to the last invoice sequence number of remaining batches
+      if (targetBatch && targetBatch.issuing_company_id) {
+        const canonicalFy = InvoiceNumberingService.normalizeFinancialYear(
+          targetBatch.financial_year || "2026-27",
+        );
+        const invType = targetBatch.batch_type === "PURCHASE" ? "P" : "S";
+
+        const { data: remainingBatches } = await supabase
+          .from("invoice_batch")
+          .select("id")
+          .eq("issuing_company_id", targetBatch.issuing_company_id)
+          .eq("financial_year", targetBatch.financial_year)
+          .eq("batch_type", targetBatch.batch_type || "PURCHASE");
+
+        const remainingBatchIds = (remainingBatches || []).map((b) => b.id);
+        let maxSeq = 0;
+
+        if (remainingBatchIds.length > 0) {
+          const { data: remainingInvoices } = await supabase
+            .from("invoice")
+            .select("invoice_number")
+            .in("invoice_batch_id", remainingBatchIds);
+
+          for (const inv of remainingInvoices || []) {
+            const match = inv.invoice_number?.match(/-(\d+)$/);
+            if (match) {
+              const seq = parseInt(match[1], 10);
+              if (!isNaN(seq) && seq > maxSeq) {
+                maxSeq = seq;
+              }
+            }
+          }
+        }
+
+        await supabase.from("invoice_sequences").upsert({
+          issuing_company_id: targetBatch.issuing_company_id,
+          financial_year: canonicalFy,
+          invoice_type: invType,
+          last_sequence_number: maxSeq,
+          updated_at: new Date().toISOString(),
+        });
+      }
 
       // Update the UI
       setBatches(batches.filter((b) => b.id !== id));

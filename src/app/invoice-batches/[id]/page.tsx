@@ -9,14 +9,18 @@ import {
   Edit3,
   Eye,
   Loader2,
+  Search,
+  X,
 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 import InvoiceEditor from "@/components/InvoiceEditor";
 import InvoicePreview from "@/components/InvoicePreview";
+import { PurchaseAutoBalanceSummaryModal } from "@/components/PurchaseAutoBalanceSummaryModal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -127,6 +131,99 @@ export default function BatchDetail() {
   } = useInvoiceBatchDetail({ batchId });
 
   const [isPreviewChallan, setIsPreviewChallan] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [autoBalanceSummary, setAutoBalanceSummary] = useState<any | null>(null);
+
+  const handleSaveInvoiceWithSummary = async (
+    invoiceId: string,
+    updates: any,
+    setStatus: (status: string) => void,
+  ) => {
+    const res = await handleSaveInvoice(invoiceId, updates, setStatus);
+    if (batch?.batch_type !== "SALES" && res?.impactSummary) {
+      setAutoBalanceSummary(res.impactSummary);
+    }
+  };
+
+  const cleanQuery = searchQuery.trim().toLowerCase();
+
+  const filteredInvoices = invoices.filter((invoice) => {
+    if (!cleanQuery) return true;
+
+    // 1. Invoice Number match
+    const invNumber = (invoice.invoice_number || "").toLowerCase();
+    if (invNumber.includes(cleanQuery)) return true;
+
+    // 2. Main Partner Name (Supplier / Customer)
+    const partnerId =
+      (invoice as any).customer_id ||
+      (invoice as any).supplier_id ||
+      invoice.products?.[0]?.customer_id ||
+      (batch as any)?.supplier_id ||
+      batch?.receiving_company_id;
+
+    const partnerObj = partnerId ? receivingCustomers[partnerId] : null;
+    const partnerName = (
+      partnerObj?.company_name ||
+      partnerObj?.supplier_name ||
+      partnerObj?.name ||
+      (batch as any)?.suppliers?.company_name ||
+      (batch as any)?.suppliers?.supplier_name ||
+      batch?.receiving_companies?.company_name ||
+      ""
+    ).toLowerCase();
+
+    if (partnerName.includes(cleanQuery)) return true;
+
+    // 3. Product-level Partner Names (Supplier / Customer)
+    if (invoice.products && Array.isArray(invoice.products)) {
+      for (const p of invoice.products) {
+        const pPartnerId = (p as any).customer_id || (p as any).supplier_id;
+        if (pPartnerId && receivingCustomers[pPartnerId]) {
+          const pObj = receivingCustomers[pPartnerId];
+          const pName = (
+            pObj.company_name ||
+            pObj.supplier_name ||
+            pObj.name ||
+            ""
+          ).toLowerCase();
+          if (pName.includes(cleanQuery)) return true;
+        }
+      }
+    }
+
+    return false;
+  });
+
+  // Group filtered invoices by date
+  const invoicesByDate = filteredInvoices.reduce(
+    (acc, invoice) => {
+      const date = invoice.invoice_date;
+      if (!acc[date]) {
+        acc[date] = [];
+      }
+      acc[date].push(invoice);
+      return acc;
+    },
+    {} as Record<string, Invoice[]>,
+  );
+
+  const dateWiseSummary = Object.entries(invoicesByDate)
+    .map(([date, invs]) => {
+      const sortedInvs = [...invs].sort((a, b) =>
+        a.invoice_number.localeCompare(b.invoice_number, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        }),
+      );
+      return {
+        date,
+        count: sortedInvs.length,
+        total: sortedInvs.reduce((sum, inv) => sum + inv.total_amount, 0),
+        invoices: sortedInvs,
+      };
+    })
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
   if (loading) {
     return (
@@ -199,36 +296,6 @@ export default function BatchDetail() {
       invoicesCount: invoices.length,
     };
   }
-
-  // Group invoices by date
-  const invoicesByDate = invoices.reduce(
-    (acc, invoice) => {
-      const date = invoice.invoice_date;
-      if (!acc[date]) {
-        acc[date] = [];
-      }
-      acc[date].push(invoice);
-      return acc;
-    },
-    {} as Record<string, Invoice[]>,
-  );
-
-  const dateWiseSummary = Object.entries(invoicesByDate)
-    .map(([date, invs]) => {
-      const sortedInvs = [...invs].sort((a, b) =>
-        a.invoice_number.localeCompare(b.invoice_number, undefined, {
-          numeric: true,
-          sensitivity: "base",
-        }),
-      );
-      return {
-        date,
-        count: sortedInvs.length,
-        total: sortedInvs.reduce((sum, inv) => sum + inv.total_amount, 0),
-        invoices: sortedInvs,
-      };
-    })
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
   return (
     <div className="space-y-6">
@@ -715,8 +782,54 @@ export default function BatchDetail() {
                 <h3 className="text-lg font-semibold mb-4">
                   Detailed Invoices
                 </h3>
-                <div className="space-y-4">
-                  {dateWiseSummary.map((summary) => {
+
+                {/* Search Bar */}
+                <div className="relative mb-6">
+                  <div className="relative flex items-center">
+                    <Search className="absolute left-3.5 h-4 w-4 text-slate-400 pointer-events-none" />
+                    <Input
+                      type="text"
+                      placeholder={
+                        batch?.batch_type === "PURCHASE"
+                          ? "Search by Supplier Name, Customer Name, or Invoice Number..."
+                          : "Search by Customer Name or Invoice Number..."
+                      }
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="pl-10 pr-10 h-10 bg-white border-slate-200 focus:border-indigo-500 focus:ring-indigo-500 text-sm shadow-2xs rounded-lg"
+                    />
+                    {searchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery("")}
+                        className="absolute right-3 text-slate-400 hover:text-slate-600 p-1 rounded-full hover:bg-slate-100 transition-colors"
+                        title="Clear search"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {filteredInvoices.length === 0 ? (
+                  <div className="text-center py-12 text-slate-500 bg-slate-50/60 rounded-xl border border-dashed border-slate-200 p-8">
+                    <Search className="h-10 w-10 mx-auto text-slate-300 mb-3" />
+                    <p className="text-base font-semibold text-slate-700">No invoices found.</p>
+                    <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                      No generated invoices match your search term &quot;{searchQuery}&quot;.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setSearchQuery("")}
+                      className="mt-4 text-xs font-medium text-slate-600 hover:text-slate-900 border-slate-300"
+                    >
+                      Clear Search
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {dateWiseSummary.map((summary) => {
                     const isExpanded = expandedDates[summary.date];
                     return (
                       <div
@@ -1018,6 +1131,7 @@ export default function BatchDetail() {
                     );
                   })}
                 </div>
+              )}
               </div>
               {/* Overall Statistics */}
               {/* {invoices.length > 0 && (
@@ -1181,7 +1295,13 @@ export default function BatchDetail() {
           previewIndex !== null && isEditingMode ? invoices[previewIndex] : null
         }
         batch={batch}
-        onSave={handleSaveInvoice}
+        onSave={handleSaveInvoiceWithSummary}
+      />
+
+      {/* Auto Balance Impact Summary Modal */}
+      <PurchaseAutoBalanceSummaryModal
+        summary={autoBalanceSummary}
+        onClose={() => setAutoBalanceSummary(null)}
       />
 
       {/* Custom Confirmation Modal */}

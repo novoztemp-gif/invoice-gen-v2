@@ -184,6 +184,42 @@ export default function GeneratePurchaseInvoice() {
     status,
     productBreakdown,
   } = calcValues();
+
+  const occurrenceTotal = selectedProducts.reduce((sum, item) => {
+    const val = parseFloat(item.occurrencePercentage || "0");
+    return sum + (isNaN(val) ? 0 : val);
+  }, 0);
+  const isOccurrence100Percent = Math.abs(occurrenceTotal - 100) < 0.01;
+
+  useEffect(() => {
+    let meatSum = 0;
+    let fruitSum = 0;
+    for (const p of selectedProducts) {
+      const occ = parseFloat(p.occurrencePercentage || "0") || 0;
+      const cat = (
+        (p.product as any).category_name ||
+        (p.product as any).category ||
+        "Meat"
+      ).toUpperCase();
+      if (cat.includes("FRUIT")) {
+        fruitSum += occ;
+      } else {
+        meatSum += occ;
+      }
+    }
+    meatSum = Math.round(meatSum * 100) / 100;
+    fruitSum = Math.round(fruitSum * 100) / 100;
+
+    const numericTotal = parseFloat(formData.totalAmount) || 0;
+    const meatAmt = Math.round(numericTotal * (meatSum / 100) * 100) / 100;
+    const fruitAmt = Math.round((numericTotal - meatAmt) * 100) / 100;
+
+    setCategorySplits([
+      { category_name: "Meat", percentage: meatSum, amount: meatAmt },
+      { category_name: "Fruits", percentage: fruitSum, amount: fruitAmt },
+    ]);
+  }, [selectedProducts, formData.totalAmount]);
+
   const isInvalid = status === "invalid";
 
   const handleProductRowClick = (productId: string) => {
@@ -639,10 +675,10 @@ export default function GeneratePurchaseInvoice() {
                                 key={company.id}
                                 value={`${company.company_name} ${company.gstin || ""} ${company.state || ""}`}
                                 onSelect={() => {
-                                  setTempMajorCustomer({
-                                    ...tempMajorCustomer,
+                                  setTempMajorCustomer((prev) => ({
+                                    ...prev,
                                     customer_id: company.id,
-                                  });
+                                  }));
                                   setMajorCustomerOpen(false);
                                 }}
                               >
@@ -679,10 +715,10 @@ export default function GeneratePurchaseInvoice() {
                   placeholder="₹"
                   value={tempMajorCustomer.amount}
                   onChange={(e) =>
-                    setTempMajorCustomer({
-                      ...tempMajorCustomer,
+                    setTempMajorCustomer((prev) => ({
+                      ...prev,
                       amount: e.target.value,
-                    })
+                    }))
                   }
                   className="h-10 bg-white"
                 />
@@ -697,10 +733,10 @@ export default function GeneratePurchaseInvoice() {
                   placeholder="#"
                   value={tempMajorCustomer.invoice_count}
                   onChange={(e) =>
-                    setTempMajorCustomer({
-                      ...tempMajorCustomer,
+                    setTempMajorCustomer((prev) => ({
+                      ...prev,
                       invoice_count: e.target.value,
-                    })
+                    }))
                   }
                   className="h-10 bg-white"
                 />
@@ -715,10 +751,10 @@ export default function GeneratePurchaseInvoice() {
                   placeholder="₹"
                   value={tempMajorCustomer.max_invoice_amount}
                   onChange={(e) =>
-                    setTempMajorCustomer({
-                      ...tempMajorCustomer,
+                    setTempMajorCustomer((prev) => ({
+                      ...prev,
                       max_invoice_amount: e.target.value,
-                    })
+                    }))
                   }
                   className="h-10 bg-white"
                 />
@@ -1278,6 +1314,39 @@ export default function GeneratePurchaseInvoice() {
                     </div>
                   )}
                 </div>
+
+                {/* Occurrence Total Live Validation Indicator */}
+                <div className="mt-4 p-3.5 rounded-lg border flex flex-col md:flex-row items-center justify-between gap-3 bg-slate-50 border-slate-200">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-xs uppercase tracking-wider text-slate-700">
+                      Occurrence Total:
+                    </span>
+                    <span
+                      className={cn(
+                        "font-mono font-bold text-sm px-2.5 py-0.5 rounded border",
+                        isOccurrence100Percent
+                          ? "bg-emerald-100 text-emerald-800 border-emerald-300"
+                          : "bg-rose-100 text-rose-800 border-rose-300",
+                      )}
+                    >
+                      {occurrenceTotal.toFixed(1)}%
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs font-semibold">
+                    {isOccurrence100Percent ? (
+                      <span className="flex items-center gap-1.5 text-emerald-700 bg-emerald-50 px-3 py-1 rounded-full border border-emerald-300 shadow-2xs">
+                        <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                        🟢 Generate Button Enabled
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1.5 text-rose-700 bg-rose-50 px-3 py-1 rounded-full border border-rose-300 shadow-2xs">
+                        <span className="inline-block w-2 h-2 rounded-full bg-rose-500" />
+                        🔴 Generate Button Disabled (Must equal 100%)
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -1595,9 +1664,11 @@ export default function GeneratePurchaseInvoice() {
           size="lg"
           className="px-8"
           type="button"
-          disabled={isValidating || isInvalid}
+          disabled={isValidating || isInvalid || !isOccurrence100Percent}
           title={
-            isInvalid
+            !isOccurrence100Percent
+              ? `Total Product Occurrence must equal 100%. Current total: ${occurrenceTotal.toFixed(1)}%`
+              : isInvalid
               ? "Purchase amount is outside the mathematically achievable range."
               : undefined
           }
@@ -1611,6 +1682,11 @@ export default function GeneratePurchaseInvoice() {
             "Generate Purchase Split-ups"
           )}
         </Button>
+        {!isOccurrence100Percent && (
+          <p className="text-xs text-rose-600 font-medium">
+            Total Product Occurrence Percentage must equal exactly 100%. Current Total: {occurrenceTotal.toFixed(1)}%.
+          </p>
+        )}
         {isInvalid && (
           <p className="text-xs text-red-600 font-medium">
             Purchase amount is outside the mathematically achievable range.

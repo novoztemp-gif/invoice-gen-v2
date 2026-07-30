@@ -366,6 +366,72 @@ export default function GenerateInvoice() {
           setStockSummary(summaryList);
           setPurchaseBatchDetails(result.batchDetails || null);
 
+          // Inherit Product Occurrence Distribution & Category Split from Purchase Batch
+          if (result.batchDetails && Array.isArray(result.batchDetails.products)) {
+            const batchProducts = result.batchDetails.products;
+            let meatSum = 0;
+            let fruitSum = 0;
+            for (const p of batchProducts) {
+              const occ = Number(p.occurrencePercentage || 0);
+              const cat = String(
+                p.category || p.category_name || "Meat",
+              ).toUpperCase();
+              if (cat.includes("FRUIT")) {
+                fruitSum += occ;
+              } else {
+                meatSum += occ;
+              }
+            }
+            meatSum = Math.round(meatSum * 100) / 100;
+            fruitSum = Math.round(fruitSum * 100) / 100;
+
+            const numericTotal = parseFloat(formData.totalAmount) || 0;
+            const meatAmt =
+              Math.round(numericTotal * (meatSum / 100) * 100) / 100;
+            const fruitAmt = Math.round((numericTotal - meatAmt) * 100) / 100;
+
+            setCategorySplits([
+              { category_name: "Meat", percentage: meatSum, amount: meatAmt },
+              {
+                category_name: "Fruits",
+                percentage: fruitSum,
+                amount: fruitAmt,
+              },
+            ]);
+
+            // Auto-populate selectedProducts with occurrence percentages from the Purchase Batch
+            const batchProdMap = new Map<string, any>();
+            for (const bp of batchProducts) {
+              const bpId = bp.product_id || bp.id;
+              if (bpId) batchProdMap.set(bpId, bp);
+            }
+
+            if (products && products.length > 0) {
+              const inheritedSelections = products
+                .filter((p) => batchProdMap.has(p.id))
+                .map((product) => {
+                  const rule = productRules.find((r) => r.product_id === product.id);
+                  const bp = batchProdMap.get(product.id);
+                  const occ = bp?.occurrencePercentage !== undefined && bp?.occurrencePercentage !== null
+                    ? String(bp.occurrencePercentage)
+                    : "0";
+
+                  return {
+                    product,
+                    perDayQtyMin: rule?.quantity_min?.toString() || "",
+                    perDayQtyMax: rule?.quantity_max?.toString() || "",
+                    perDayRateMin: rule?.rate_min?.toString() || "",
+                    perDayRateMax: rule?.rate_max?.toString() || "",
+                    occurrencePercentage: occ,
+                  };
+                });
+
+              if (inheritedSelections.length > 0) {
+                setSelectedProducts(inheritedSelections);
+              }
+            }
+          }
+
           // Synchronize Card TOTAL STOCK to match the exact sum of total_available in summary table
           const exactSum = summaryList.reduce(
             (sum: number, item: any) =>
@@ -401,6 +467,41 @@ export default function GenerateInvoice() {
 
     fetchStockSummary();
   }, [formData.stockSourceBatchId]);
+
+  // Live Category Monetary Split Calculation based on Total Amount & Category Percentages
+  useEffect(() => {
+    const numericTotal = parseFloat(formData.totalAmount) || 0;
+    setCategorySplits((prevSplits) => {
+      if (!prevSplits || prevSplits.length === 0) return prevSplits;
+
+      const meatItem = prevSplits.find((c) =>
+        c.category_name.toUpperCase().includes("MEAT"),
+      );
+      const fruitItem = prevSplits.find((c) =>
+        c.category_name.toUpperCase().includes("FRUIT"),
+      );
+
+      const meatPct = meatItem ? meatItem.percentage : 0;
+      const fruitPct = fruitItem ? fruitItem.percentage : 0;
+
+      let meatAmt = 0;
+      let fruitAmt = 0;
+
+      if (numericTotal > 0) {
+        meatAmt = Math.round(numericTotal * (meatPct / 100));
+        fruitAmt = Math.round(numericTotal - meatAmt);
+      }
+
+      if (meatItem?.amount === meatAmt && fruitItem?.amount === fruitAmt) {
+        return prevSplits; // Return same array reference if amounts haven't changed (0 re-renders)
+      }
+
+      return [
+        { category_name: "Meat", percentage: meatPct, amount: meatAmt },
+        { category_name: "Fruits", percentage: fruitPct, amount: fruitAmt },
+      ];
+    });
+  }, [formData.totalAmount]);
 
   return (
     <div className="space-y-4 pb-10">
@@ -927,10 +1028,10 @@ export default function GenerateInvoice() {
                                   key={company.id}
                                   value={`${company.company_name} ${company.gstin || ""} ${company.state || ""}`}
                                   onSelect={() => {
-                                    setTempMajorCustomer({
-                                      ...tempMajorCustomer,
+                                    setTempMajorCustomer((prev) => ({
+                                      ...prev,
                                       customer_id: company.id,
-                                    });
+                                    }));
                                     setMajorCustomerOpen(false);
                                   }}
                                 >
@@ -964,10 +1065,10 @@ export default function GenerateInvoice() {
                     placeholder="₹"
                     value={tempMajorCustomer.amount}
                     onChange={(e) =>
-                      setTempMajorCustomer({
-                        ...tempMajorCustomer,
+                      setTempMajorCustomer((prev) => ({
+                        ...prev,
                         amount: e.target.value,
-                      })
+                      }))
                     }
                     className="h-8 bg-white"
                   />
@@ -982,10 +1083,10 @@ export default function GenerateInvoice() {
                     placeholder="#"
                     value={tempMajorCustomer.invoice_count}
                     onChange={(e) =>
-                      setTempMajorCustomer({
-                        ...tempMajorCustomer,
+                      setTempMajorCustomer((prev) => ({
+                        ...prev,
                         invoice_count: e.target.value,
-                      })
+                      }))
                     }
                     className="h-8 bg-white"
                   />
@@ -1000,10 +1101,10 @@ export default function GenerateInvoice() {
                     placeholder="₹"
                     value={tempMajorCustomer.max_invoice_amount}
                     onChange={(e) =>
-                      setTempMajorCustomer({
-                        ...tempMajorCustomer,
+                      setTempMajorCustomer((prev) => ({
+                        ...prev,
                         max_invoice_amount: e.target.value,
-                      })
+                      }))
                     }
                     className="h-8 bg-white"
                   />
@@ -1254,6 +1355,13 @@ export default function GenerateInvoice() {
                                     const rule = productRules.find(
                                       (r) => r.product_id === product.id,
                                     );
+                                    const bp = purchaseBatchDetails?.products?.find(
+                                      (p: any) => (p.product_id || p.id) === product.id,
+                                    );
+                                    const occ = bp?.occurrencePercentage !== undefined && bp?.occurrencePercentage !== null
+                                      ? String(bp.occurrencePercentage)
+                                      : (product as any).occurrencePercentage || "0";
+
                                     setSelectedProducts([
                                       ...selectedProducts,
                                       {
@@ -1266,6 +1374,7 @@ export default function GenerateInvoice() {
                                           rule?.rate_min?.toString() || "",
                                         perDayRateMax:
                                           rule?.rate_max?.toString() || "",
+                                        occurrencePercentage: occ,
                                       },
                                     ]);
                                   }

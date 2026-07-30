@@ -211,70 +211,23 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
     setStatus?: (status: string) => void,
   ) => {
     try {
-      const supabase = createClient();
-
-      const { data: originalInvoice } = await supabase
-        .from("invoice")
-        .select("total_amount")
-        .eq("id", invoiceId)
-        .single();
-
-      const originalTotal = Number(originalInvoice?.total_amount || 0);
-      const newTotal = Number(updates.total_amount || 0);
-
-      if (setStatus) setStatus("Updating Invoice...");
-
-      const { error } = await supabase
-        .from("invoice")
-        .update({
-          ...updates,
-          is_edited: true,
-          edited_at: new Date().toISOString(),
-        })
-        .eq("id", invoiceId);
-
-      if (error) {
-        throw error;
-      }
-
-      setInvoices((prev) =>
-        prev.map((inv) =>
-          inv.id === invoiceId ? { ...inv, ...updates, is_edited: true } : inv,
-        ),
-      );
-
-      if (originalTotal !== newTotal) {
-        if (setStatus) setStatus("Rebalancing Batch...");
-
-        const balanceRes = await fetch("/api/auto-balance", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            batchId,
-            editedInvoiceId: invoiceId,
-            originalTotal,
-            newTotal,
-          }),
-        });
-
-        const balanceData = await balanceRes.json();
-
-        if (!balanceRes.ok) {
-          throw new Error(balanceData.message || "Auto-balancing failed");
-        }
-
-        if (setStatus) setStatus("Batch Successfully Balanced");
-
-        await fetchInvoices();
-
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-
-        alert(
-          `Invoice Updated.\nRemaining Invoices Adjusted: ${balanceData.modifiedInvoicesCount}\nNet Difference Applied: ₹${Math.abs(originalTotal - newTotal).toLocaleString("en-IN")}\n\nFinal Batch Total Verified!`,
+      if (setStatus) setStatus("Validating and rebalancing purchase batch...");
+      const balanceRes = await fetch("/api/auto-balance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batchId, editedInvoiceId: invoiceId, updates }),
+      });
+      const balanceData = await balanceRes.json();
+      if (!balanceRes.ok) {
+        throw new Error(
+          balanceData.message ||
+            "Unable to rebalance batch while preserving business rules.",
         );
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, 500));
       }
+
+      if (setStatus) setStatus("Purchase Batch Successfully Rebalanced");
+      await fetchInvoices();
+      return balanceData;
     } catch (err: any) {
       console.error("Save error:", err);
       throw err;

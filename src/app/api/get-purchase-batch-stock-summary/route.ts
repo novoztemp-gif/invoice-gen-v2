@@ -204,6 +204,7 @@ export async function GET(request: NextRequest) {
         invoice_date_from: primaryBatch.invoice_date_from,
         invoice_date_to: primaryBatch.invoice_date_to,
         products_count: summary.length,
+        products: Array.from(productMap.values()),
       },
     });
   } catch (error: any) {

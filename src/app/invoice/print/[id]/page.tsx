@@ -284,7 +284,10 @@ export default function PrintInvoicePage() {
                   <div className="flex-1 border-b border-dashed border-black pb-0.5 text-xs font-medium">
                     Purchase of{" "}
                     {invoice.products
-                      ?.map((p: any) => p.product_name)
+                      ?.map((p: any) => {
+                        const hsn = p.hsn_code ? String(p.hsn_code).trim() : "";
+                        return hsn ? `${p.product_name} - ${hsn}` : p.product_name;
+                      })
                       .join(", ") || "raw materials"}
                   </div>
                 </div>

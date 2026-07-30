@@ -11,6 +11,7 @@ import {
   type InvoiceSequencePreview,
   type InvoiceType,
 } from "@/lib/services/InvoiceNumberingService";
+import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 
 function formatDateForStorage(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -216,18 +217,26 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
   };
 
   const handleAddMajorCustomer = () => {
+    console.log("[Major Supplier/Customer] State before validation:", tempMajorCustomer);
+    console.log("[Major Supplier/Customer] Raw input value (amount):", tempMajorCustomer.amount);
     if (!tempMajorCustomer.customer_id) return;
     const amt = parseFloat(tempMajorCustomer.amount);
+    console.log("[Major Supplier/Customer] Parsed value (amount):", amt);
     if (!tempMajorCustomer.amount || isNaN(amt) || amt <= 0) {
+      console.log("[Major Supplier/Customer] Validation failed: Amount must be greater than 0");
       setErrorPopup("Amount must be greater than 0");
       return;
     }
     const invCount = parseInt(tempMajorCustomer.invoice_count, 10);
+    console.log("[Major Supplier/Customer] Raw input value (invoice_count):", tempMajorCustomer.invoice_count);
+    console.log("[Major Supplier/Customer] Parsed value (invoice_count):", invCount);
     if (!tempMajorCustomer.invoice_count || isNaN(invCount) || invCount < 1) {
       setErrorPopup("Invoices must be at least 1");
       return;
     }
     const maxAmt = parseFloat(tempMajorCustomer.max_invoice_amount);
+    console.log("[Major Supplier/Customer] Raw input value (max_invoice_amount):", tempMajorCustomer.max_invoice_amount);
+    console.log("[Major Supplier/Customer] Parsed value (max_invoice_amount):", maxAmt);
     if (!tempMajorCustomer.max_invoice_amount || isNaN(maxAmt) || maxAmt <= 0) {
       setErrorPopup(
         "Maximum amount per invoice is required and must be greater than 0",
@@ -242,11 +251,19 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       return;
     }
 
-    setMajorCustomers([...majorCustomers, { ...tempMajorCustomer }]);
+    const addedObj = { ...tempMajorCustomer };
+    console.log("[Major Supplier/Customer] Object passed to Add handler:", addedObj);
+    setMajorCustomers([...majorCustomers, addedObj]);
     setSelectedCustomers(
       selectedCustomers.filter((id) => id !== tempMajorCustomer.customer_id),
     );
     setTempMajorCustomer({
+      customer_id: "",
+      amount: "",
+      invoice_count: "1",
+      max_invoice_amount: "",
+    });
+    console.log("[Major Supplier/Customer] State after validation (reset):", {
       customer_id: "",
       amount: "",
       invoice_count: "1",
@@ -406,104 +423,108 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       }
 
       if (batchType === "SALES") {
+        console.log("[FLOW 1] Starting Sales Dry-Run validation process...");
         setIsValidating(true);
-        const res = await fetch("/api/generate-sales-dry-run", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            issuingCompanyId: selectedIssuingCompany?.id,
-            receivingCompanyId:
-              selectedCustomers[0] ||
-              (majorCustomers[0] ? majorCustomers[0].customer_id : null),
-            selectedCustomers: selectedCustomers,
-            majorCustomers: majorCustomers.map((m) => ({
-              customer_id: m.customer_id,
-              amount: parseFloat(m.amount) || 0,
-              invoice_count: parseInt(m.invoice_count, 10) || 1,
-              max_invoice_amount: m.max_invoice_amount
-                ? parseFloat(m.max_invoice_amount)
-                : undefined,
-            })),
-            transportMode: formData.transportMode,
-            vehicleNumber: formData.vehicleNumber || "",
-            dateOfSupply: formData.invoiceDateTo
-              ? formatDateForStorage(formData.invoiceDateTo)
-              : null,
-            invoiceDateFrom: formData.invoiceDateFrom
-              ? formatDateForStorage(formData.invoiceDateFrom)
-              : null,
-            invoiceDateTo: formData.invoiceDateTo
-              ? formatDateForStorage(formData.invoiceDateTo)
-              : null,
-            minimumInvoiceAmount: formData.minimumInvoiceAmount,
-            maximumInvoiceAmount: formData.maximumInvoiceAmount,
-            totalAmount: formData.totalAmount,
-            financialYearStart: formData.financialYearStart,
-            financialYearEnd: formData.financialYearEnd,
-            products: selectedProducts.map((item) => ({
-              product_id: item.product.id,
-              product_name: item.product.product_name,
-              category:
-                (item.product as any).category_name ||
-                (item.product as any).category ||
-                "Meat",
-              hsn_code: item.product.hsn_code,
-              unit_of_measure: item.product.unit_of_measure,
-              perDayQtyMin: item.perDayQtyMin,
-              perDayQtyMax: item.perDayQtyMax,
-              perDayRateMin: item.perDayRateMin,
-              perDayRateMax: item.perDayRateMax,
-            })),
-            recurringProducts: [],
-            stockSourceBatchId: formData.stockSourceBatchId,
-            userId: user.id,
-          }),
-        });
-
-        let result: any = {};
-        const resText = await res.text();
         try {
-          result = JSON.parse(resText);
-        } catch (e) {
-          result = { message: resText || `Server Error ${res.status}` };
-        }
-        setIsValidating(false);
+          console.log("[FLOW 2] Sending POST to /api/generate-sales-dry-run...");
+          const res = await fetch("/api/generate-sales-dry-run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              issuingCompanyId: selectedIssuingCompany?.id,
+              receivingCompanyId:
+                selectedCustomers[0] ||
+                (majorCustomers[0] ? majorCustomers[0].customer_id : null),
+              selectedCustomers: selectedCustomers,
+              majorCustomers: majorCustomers.map((m) => ({
+                customer_id: m.customer_id,
+                amount: parseFloat(m.amount) || 0,
+                invoice_count: parseInt(m.invoice_count, 10) || 1,
+                max_invoice_amount: m.max_invoice_amount
+                  ? parseFloat(m.max_invoice_amount)
+                  : undefined,
+              })),
+              transportMode: formData.transportMode,
+              vehicleNumber: formData.vehicleNumber || "",
+              dateOfSupply: formData.invoiceDateTo
+                ? formatDateForStorage(formData.invoiceDateTo)
+                : null,
+              invoiceDateFrom: formData.invoiceDateFrom
+                ? formatDateForStorage(formData.invoiceDateFrom)
+                : null,
+              invoiceDateTo: formData.invoiceDateTo
+                ? formatDateForStorage(formData.invoiceDateTo)
+                : null,
+              minimumInvoiceAmount: formData.minimumInvoiceAmount,
+              maximumInvoiceAmount: formData.maximumInvoiceAmount,
+              totalAmount: formData.totalAmount,
+              financialYearStart: formData.financialYearStart,
+              financialYearEnd: formData.financialYearEnd,
+              products: selectedProducts.map((item) => ({
+                product_id: item.product.id,
+                product_name: item.product.product_name,
+                category:
+                  (item.product as any).category_name ||
+                  (item.product as any).category ||
+                  "Meat",
+                hsn_code: item.product.hsn_code,
+                unit_of_measure: item.product.unit_of_measure,
+                perDayQtyMin: item.perDayQtyMin,
+                perDayQtyMax: item.perDayQtyMax,
+                perDayRateMin: item.perDayRateMin,
+                perDayRateMax: item.perDayRateMax,
+                occurrencePercentage: item.occurrencePercentage,
+              })),
+              recurringProducts: [],
+              stockSourceBatchId: formData.stockSourceBatchId,
+              userId: user.id,
+            }),
+          });
+          console.log("[FLOW 3] Received response status:", res.status);
 
-        if (!res.ok) {
-          setErrorPopup(result?.message || "Failed to run sales dry-run.");
-          return;
-        }
+          let result: any = {};
+          const resText = await res.text();
+          console.log("[FLOW 4] Response text length:", resText.length);
+          try {
+            result = JSON.parse(resText);
+          } catch (e) {
+            result = { message: resText || `Server Error ${res.status}` };
+          }
 
-        const invalidRow = (result.reviewRows || []).find(
-          (row: any) => row.remaining_stock > 15 || row.remaining_stock < 0,
-        );
-        if (invalidRow) {
-          console.error(
-            "VERIFICATION FAILED: Invalid remaining stock generated!",
-          );
-          console.error("Product:", invalidRow.product_name);
-          console.error("Date:", invalidRow.date);
-          console.error("Opening:", invalidRow.opening_stock);
-          console.error("Purchased:", invalidRow.purchased_quantity);
-          console.error(
-            "Available:",
-            invalidRow.opening_stock + invalidRow.purchased_quantity,
-          );
-          console.error("Proposed Sold:", invalidRow.proposed_sold);
-          console.error("Remaining:", invalidRow.remaining_stock);
-          console.error(
-            "Last modified by: InvoiceEngine.generateInvoiceSplitupsInternal",
-          );
+          if (!res.ok) {
+            console.error("[FLOW 5] Dry-run failed with error:", result?.message);
+            setErrorPopup(result?.message || "Failed to run sales dry-run.");
+            return;
+          }
 
+          console.log("[FLOW 6] Dry-run succeeded. Invoices count:", result.invoices?.length, "Review rows count:", result.reviewRows?.length);
+
+          const invalidRow = (result.reviewRows || []).find(
+            (row: any) => row.remaining_stock > 15 || row.remaining_stock < 0,
+          );
+          if (invalidRow) {
+            console.error(
+              "VERIFICATION FAILED: Invalid remaining stock generated!",
+            );
+            setErrorPopup(
+              `Verification failed: Invalid remaining stock generated for ${invalidRow.product_name} on ${invalidRow.date}. Remaining: ${invalidRow.remaining_stock}.`,
+            );
+            return;
+          }
+
+          setProposedInvoices(result.invoices || []);
+          setReviewRows(result.reviewRows || []);
+          setIsReviewOpen(true);
+          console.log("[FLOW 7] Opening review modal.");
+        } catch (err: any) {
+          console.error("[FLOW ERROR] Sales dry-run validation error:", err);
           setErrorPopup(
-            `Verification failed: Invalid remaining stock generated for ${invalidRow.product_name} on ${invalidRow.date}. Remaining: ${invalidRow.remaining_stock}. Check developer console for details.`,
+            `Sales validation error: ${err?.message || "An error occurred during validation"}`,
           );
-          return;
+        } finally {
+          console.log("[FLOW FINALLY] Resetting isValidating to false.");
+          setIsValidating(false);
         }
-
-        setProposedInvoices(result.invoices || []);
-        setReviewRows(result.reviewRows || []);
-        setIsReviewOpen(true);
         return;
       }
 
@@ -562,8 +583,10 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
               : null,
           })),
           recurring_products: [],
-          status: "generated",
-          batch_status: "FINALIZED",
+          // Purchase invoices must remain editable and balanceable until the
+          // user explicitly finalizes the batch from the batch-detail screen.
+          status: "pending",
+          batch_status: "REOPENED",
           created_by: user.id,
         })
         .select()
@@ -646,15 +669,53 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         );
         return;
       }
-      if (product.occurrencePercentage) {
-        const occPct = parseFloat(product.occurrencePercentage);
-        if (isNaN(occPct) || occPct < 0 || occPct > 100) {
+      if (
+        product.occurrencePercentage === undefined ||
+        product.occurrencePercentage === null ||
+        product.occurrencePercentage === ""
+      ) {
+        if (batchType === "SALES") {
+          const inherited =
+            (product as any).occurrencePercentage ??
+            (product.product as any).occurrencePercentage ??
+            "0";
+          product.occurrencePercentage = String(inherited);
+        } else {
           setErrorPopup(
-            `Product "${product.product.product_name}": Occurrence percentage must be a number between 0 and 100!`,
+            `Product "${product.product.product_name}": Please enter a valid Occurrence Percentage between 0% and 100%.`,
           );
           return;
         }
       }
+      const occPct = parseFloat(product.occurrencePercentage);
+      if (isNaN(occPct) || occPct < 0 || occPct > 100) {
+        setErrorPopup(
+          `Product "${product.product.product_name}": Occurrence percentage must be a number between 0 and 100!`,
+        );
+        return;
+      }
+    }
+
+    // Enforce 100% Total Product Occurrence Distribution
+    const formattedProductsForVal = selectedProducts.map((p) => ({
+      product_id: p.product.id,
+      product_name: p.product.product_name,
+      hsn_code: p.product.hsn_code,
+      unit_of_measure: p.product.unit_of_measure,
+      perDayQtyMin: p.perDayQtyMin,
+      perDayQtyMax: p.perDayQtyMax,
+      perDayRateMin: p.perDayRateMin,
+      perDayRateMax: p.perDayRateMax,
+      category: (p.product as any).category_name || (p.product as any).category || "Meat",
+      occurrencePercentage: parseFloat(p.occurrencePercentage || "0") || 0,
+    }));
+
+    const occValidation = InvoiceEngine.validateOccurrenceDistribution(
+      formattedProductsForVal,
+    );
+    if (!occValidation.isValid) {
+      setErrorPopup(occValidation.error || "Invalid Product Occurrence Distribution.");
+      return;
     }
 
     if (batchType === "SALES" && !formData.stockSourceBatchId) {

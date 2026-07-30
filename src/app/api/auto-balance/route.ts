@@ -1,41 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AutoBalanceEngine } from "@/lib/services/AutoBalanceEngine";
+import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import { createClient } from "@/lib/supabase/server";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { batchId, editedInvoiceId, originalTotal, newTotal } = body;
+    const { batchId, editedInvoiceId, updates } = body;
 
-    if (
-      !batchId ||
-      !editedInvoiceId ||
-      originalTotal === undefined ||
-      newTotal === undefined
-    ) {
+    if (!batchId || !editedInvoiceId || !updates) {
       return NextResponse.json(
-        { message: "Missing required parameters" },
+        { message: "batchId, editedInvoiceId, and updates are required" },
         { status: 400 },
       );
     }
-
-    const targetDiff = originalTotal - newTotal;
 
     const supabase = await createClient();
 
     // Get current user
     const {
       data: { user },
-      error: userError,
     } = await supabase.auth.getUser();
-    const userId = user?.id || "unknown";
+    if (!user) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
 
-    const engine = new AutoBalanceEngine(supabase);
-
-    // Check if finalized
+    // Check batch_type and batch_status
     const { data: batchCheck } = await supabase
       .from("invoice_batch")
-      .select("batch_status")
+      .select("batch_type, batch_status")
       .eq("id", batchId)
       .single();
 
@@ -46,11 +38,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = await engine.balanceBatch(
+    const result = await InvoiceEngine.saveInvoiceAndRebalance(
+      supabase,
       batchId,
       editedInvoiceId,
-      targetDiff,
-      userId,
+      updates,
+      user.id,
     );
 
     return NextResponse.json(result);
