@@ -1,6 +1,14 @@
 "use client";
 
-import { ArrowDown, ArrowUp, ArrowUpDown, Pencil, Search } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  Download,
+  Pencil,
+  Search,
+  Upload,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,6 +22,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { EditProductRuleDialog } from "./EditProductRuleDialog";
+import {
+  BulkUploadProductRulesDialog,
+  downloadProductRulesTemplate,
+} from "./BulkUploadProductRulesDialog";
 
 export function ProductRulesTable({
   productsWithRules,
@@ -24,6 +36,7 @@ export function ProductRulesTable({
   const [sortField, setSortField] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<"asc" | "desc" | null>(null);
   const [editingRule, setEditingRule] = useState<any | null>(null);
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -95,19 +108,44 @@ export function ProductRulesTable({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute left-2 top-2.5 h-4 w-4 text-slate-500" />
-          <Input
-            placeholder="Search products..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-8"
-          />
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex flex-1 items-center gap-2">
+          <div className="relative flex-1 max-w-sm">
+            <Search className="absolute left-2 top-2.5 h-4 w-4 text-slate-500" />
+            <Input
+              placeholder="Search products..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-8"
+            />
+          </div>
+          <p className="text-xs text-slate-500 shrink-0">
+            Showing {filteredAndSorted.length} products
+          </p>
         </div>
-        <p className="text-sm text-slate-600">
-          Showing {filteredAndSorted.length} products
-        </p>
+
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => downloadProductRulesTemplate(productsWithRules)}
+            className="gap-2 text-xs border-slate-200 text-slate-700 hover:bg-slate-50"
+          >
+            <Download className="h-3.5 w-3.5 text-indigo-600" />
+            Download Rules Template
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setIsUploadModalOpen(true)}
+            className="gap-2 text-xs bg-indigo-50 border-indigo-200 hover:bg-indigo-100 text-indigo-700 font-medium"
+          >
+            <Upload className="h-3.5 w-3.5" />
+            Bulk Upload Rules
+          </Button>
+        </div>
       </div>
 
       <div className="rounded-md border">
@@ -216,6 +254,12 @@ export function ProductRulesTable({
           onOpenChange={(open: boolean) => !open && setEditingRule(null)}
         />
       )}
+
+      <BulkUploadProductRulesDialog
+        isOpen={isUploadModalOpen}
+        onClose={() => setIsUploadModalOpen(false)}
+        productsWithRules={productsWithRules}
+      />
     </div>
   );
 }
