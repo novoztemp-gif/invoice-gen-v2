@@ -1111,9 +1111,27 @@ export class InvoiceEngine {
     }
 
     // Save generated invoices directly into database (manual previous_ending_sequence + 1 numbering)
+    const invoicesToInsert = invoices.map((inv: any) => ({
+      invoice_batch_id: inv.invoice_batch_id || batchId,
+      invoice_number: inv.invoice_number,
+      invoice_date: inv.invoice_date,
+      products: inv.products,
+      total_amount: inv.total_amount,
+      status: inv.status || "generated",
+      batch_type: inv.batch_type || typedBatch.batch_type || "PURCHASE",
+      customer_id: inv.customer_id || inv.supplier_id || null,
+      supplier_id: inv.supplier_id || inv.customer_id || null,
+      transport_mode: inv.transport_mode || null,
+      vehicle_number: inv.vehicle_number || null,
+      date_of_supply: inv.date_of_supply || null,
+      pdf_link: inv.pdf_link || null,
+      is_edited: inv.is_edited || false,
+      edited_at: inv.edited_at || null,
+    }));
+
     const { data: selectInvoices, error: insertError } = await supabase
       .from("invoice")
-      .insert(invoices)
+      .insert(invoicesToInsert)
       .select();
 
     if (insertError) {
