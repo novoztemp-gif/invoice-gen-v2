@@ -33,9 +33,45 @@ export class SalesCandidateSolver {
   ): SalesSolverResult {
     const startTime = Date.now();
 
-    // 1. Identify balancing invoices (all invoices in batch except edited invoice)
+    // 1. Determine edited products (product IDs whose quantity, rate, or amount changed)
+    const origEditedInv = context.invoices.find((i) => i.id === editedInvoice.id);
+    const editedProductIds = new Set<string>();
+
+    if (origEditedInv) {
+      for (const p of editedInvoice.products) {
+        const origLine = origEditedInv.products.find(
+          (lp) => lp.product_id === p.product_id,
+        );
+        if (!origLine) {
+          editedProductIds.add(p.product_id);
+        } else if (
+          Math.abs(p.quantity - origLine.quantity) > 0.001 ||
+          Math.abs(p.rate - origLine.rate) > 0.001 ||
+          Math.abs(p.amount - origLine.amount) > 0.01
+        ) {
+          editedProductIds.add(p.product_id);
+        }
+      }
+      for (const origP of origEditedInv.products) {
+        if (!editedInvoice.products.some((p) => p.product_id === origP.product_id)) {
+          editedProductIds.add(origP.product_id);
+        }
+      }
+    } else {
+      for (const p of editedInvoice.products) {
+        editedProductIds.add(p.product_id);
+      }
+    }
+
+    // 2. Build balancingInvoices using ONLY invoices containing at least one edited product
     const balancingInvoices = context.invoices
-      .filter((inv) => inv.id !== editedInvoice.id)
+      .filter((inv) => {
+        if (inv.id === editedInvoice.id) return false;
+        if (editedProductIds.size > 0) {
+          return inv.products.some((p) => editedProductIds.has(p.product_id));
+        }
+        return true;
+      })
       .sort((a, b) => {
         const dateCmp = a.invoice_date.localeCompare(b.invoice_date);
         if (dateCmp !== 0) return dateCmp;
@@ -50,6 +86,13 @@ export class SalesCandidateSolver {
         if (numCmp !== 0) return numCmp;
         return a.id.localeCompare(b.id);
       });
+
+    console.log("[SalesCandidateSolver] Scope Filtering Report:", {
+      originalBatchInvoiceCount: context.invoices.length,
+      filteredBalancingInvoiceCount: balancingInvoices.length,
+      editedProductsCount: editedProductIds.size,
+      editedProductsList: Array.from(editedProductIds),
+    });
 
     // 2. Compute target balancing total amount & target product quantities
     const targetBalancingAmount = roundMoney(
@@ -90,9 +133,6 @@ export class SalesCandidateSolver {
       };
     }
 
-    const origEditedInv = context.invoices.find(
-      (i) => i.id === editedInvoice.id,
-    );
     const affectedProductIds = new Set<string>();
     for (const [pid] of context.originalProductTotals.entries()) {
       affectedProductIds.add(pid);

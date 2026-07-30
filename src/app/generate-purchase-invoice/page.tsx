@@ -4,8 +4,10 @@ import {
   Check,
   CheckCircle2,
   ChevronsUpDown,
+  Download,
   Loader2,
   Plus,
+  Upload,
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -40,6 +42,10 @@ import { useInvoiceForm } from "@/lib/hooks/useInvoiceForm";
 import { createClient } from "@/lib/supabase/client";
 import { ValidationGuidanceModal } from "@/components/ValidationGuidanceModal";
 import { CategorySplitSection } from "@/components/CategorySplitSection";
+import {
+  OccurrenceExcelUploadModal,
+  downloadOccurrenceTemplate,
+} from "@/components/OccurrenceExcelUploadModal";
 import { cn } from "@/lib/utils";
 
 export default function GeneratePurchaseInvoice() {
@@ -90,6 +96,31 @@ export default function GeneratePurchaseInvoice() {
   const [occurrenceProductOpen, setOccurrenceProductOpen] = useState(false);
   const [selectedOccurProduct, setSelectedOccurProduct] = useState("");
   const [occurPercent, setOccurPercent] = useState("");
+  const [isExcelModalOpen, setIsExcelModalOpen] = useState(false);
+
+  const handleExcelImportSuccess = (
+    updates: { productId: string; occurrencePercentage: string }[],
+  ) => {
+    const updatesMap = new Map(
+      updates.map((u) => [u.productId, u.occurrencePercentage]),
+    );
+
+    setSelectedProducts((prev) =>
+      prev.map((item) => {
+        if (updatesMap.has(item.product.id)) {
+          return {
+            ...item,
+            occurrencePercentage: updatesMap.get(item.product.id),
+          };
+        }
+        return item;
+      }),
+    );
+
+    setErrorPopup(
+      `Successfully imported occurrence percentages for ${updates.length} product(s).`,
+    );
+  };
 
   // Live Purchase Value Calculator
   const calcValues = () => {
@@ -1098,8 +1129,32 @@ export default function GeneratePurchaseInvoice() {
         {/* Product Occurrence Configuration Card */}
         {selectedProducts.length > 0 && (
           <Card>
-            <CardHeader>
-              <CardTitle>Product Occurrence Configuration</CardTitle>
+            <CardHeader className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3">
+              <CardTitle className="text-base font-semibold">
+                Product Occurrence Configuration
+              </CardTitle>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => downloadOccurrenceTemplate(selectedProducts)}
+                  className="gap-2 text-xs border-slate-200 hover:bg-slate-50 text-slate-700"
+                >
+                  <Download className="h-3.5 w-3.5 text-indigo-600" />
+                  Download Template
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setIsExcelModalOpen(true)}
+                  className="gap-2 text-xs bg-indigo-50 border-indigo-200 hover:bg-indigo-100 text-indigo-700 font-medium"
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  Upload Excel
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="space-y-4">
@@ -1746,6 +1801,13 @@ export default function GeneratePurchaseInvoice() {
         data={validationGuidance}
         onClose={() => setValidationGuidance(null)}
         onApplySuggestedLimits={handleApplySuggestedLimits}
+      />
+
+      <OccurrenceExcelUploadModal
+        isOpen={isExcelModalOpen}
+        onClose={() => setIsExcelModalOpen(false)}
+        selectedProducts={selectedProducts}
+        onImportSuccess={handleExcelImportSuccess}
       />
     </div>
   );
