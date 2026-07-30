@@ -1121,6 +1121,15 @@ export class InvoiceEngine {
     }
     const savedInvoices = selectInvoices || [];
 
+    // Update daily stock ledger for Sales batch stock consumption
+    if (typedBatch.batch_type === "SALES" && typedBatch.stock_source_batch_id) {
+      await this.postSalesBatchStockLedger(
+        supabase,
+        batchId,
+        typedBatch.stock_source_batch_id,
+      );
+    }
+
     // Update batch status
     const { error: updateError } = await supabase
       .from("invoice_batch")
@@ -1132,6 +1141,119 @@ export class InvoiceEngine {
     }
 
     return invoices.length;
+  }
+
+  /**
+   * Posts daily_stock_ledger updates for a Sales Batch.
+   * Updates sold_quantity for the source purchase batch so that Purchased Quantity == Sold Quantity
+   * and no remaining stock is left after Sales generation.
+   */
+  public static async postSalesBatchStockLedger(
+    supabase: SupabaseClient,
+    salesBatchId: string,
+    stockSourceBatchId?: string,
+  ) {
+    if (!stockSourceBatchId) return;
+
+    const batchIds = stockSourceBatchId
+      .split(",")
+      .map((id: string) => id.trim())
+      .filter((id: string) => Boolean(id) && !id.startsWith("CARRY_FORWARD_"));
+
+    if (batchIds.length === 0) return;
+
+    const salesInvoices = await fetchAllInvoicesForBatch(supabase, salesBatchId);
+    if (!salesInvoices || salesInvoices.length === 0) return;
+
+    // Sum sold quantities per product and date
+    const soldByDateAndProduct = new Map<string, number>();
+    const soldByProductTotal = new Map<string, number>();
+
+    for (const inv of salesInvoices) {
+      const dateStr = inv.invoice_date;
+      for (const p of inv.products || []) {
+        if (p.product_id) {
+          const qty = Number(p.quantity || 0);
+          if (dateStr) {
+            const key = `${dateStr}_${p.product_id}`;
+            soldByDateAndProduct.set(
+              key,
+              (soldByDateAndProduct.get(key) || 0) + qty,
+            );
+          }
+          soldByProductTotal.set(
+            p.product_id,
+            (soldByProductTotal.get(p.product_id) || 0) + qty,
+          );
+        }
+      }
+    }
+
+    // Fetch existing daily_stock_ledger entries for the source purchase batch(es)
+    const { data: ledgerRows, error: fetchErr } = await supabase
+      .from("daily_stock_ledger")
+      .select("*")
+      .in("purchase_batch_id", batchIds)
+      .order("ledger_date", { ascending: true });
+
+    if (fetchErr || !ledgerRows || ledgerRows.length === 0) return;
+
+    // Group ledger rows by product_id
+    const rowsByProduct = new Map<string, any[]>();
+    for (const row of ledgerRows) {
+      if (!rowsByProduct.has(row.product_id)) {
+        rowsByProduct.set(row.product_id, []);
+      }
+      rowsByProduct.get(row.product_id)!.push(row);
+    }
+
+    for (const [productId, rows] of rowsByProduct.entries()) {
+      const dateQtyMap = new Map<string, number>();
+      for (const row of rows) {
+        const key = `${row.ledger_date}_${row.product_id}`;
+        if (soldByDateAndProduct.has(key)) {
+          dateQtyMap.set(row.id, soldByDateAndProduct.get(key)!);
+        }
+      }
+
+      const totalSoldForProd = soldByProductTotal.get(productId) || 0;
+      let remainingUnallocatedSold = totalSoldForProd;
+
+      for (const row of rows) {
+        const opening = Number(row.opening_stock || 0);
+        const purchased = Number(row.purchased_quantity || 0);
+        const totalPurchasedAvailable = opening + purchased;
+
+        let newSold = 0;
+        const dateSpecificQty = dateQtyMap.get(row.id);
+
+        if (dateSpecificQty !== undefined && dateSpecificQty > 0) {
+          newSold = Math.min(totalPurchasedAvailable, dateSpecificQty);
+        } else if (remainingUnallocatedSold > 0) {
+          newSold = Math.min(totalPurchasedAvailable, remainingUnallocatedSold);
+          remainingUnallocatedSold -= newSold;
+        }
+
+        // Rule: Sales generation completely consumes the allocated Purchase stock.
+        // After Sales generation: Purchased Quantity == Sold Quantity (remaining stock = 0).
+        const finalSoldQty = Math.max(
+          Number(row.sold_quantity || 0),
+          newSold > 0
+            ? newSold
+            : totalSoldForProd > 0
+            ? totalPurchasedAvailable
+            : Number(row.sold_quantity || 0),
+        );
+
+        await supabase
+          .from("daily_stock_ledger")
+          .update({
+            sold_quantity: Math.min(totalPurchasedAvailable, finalSoldQty),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", row.id);
+      }
+    }
   }
 
   private static formatDateString(dateStr: string): string {

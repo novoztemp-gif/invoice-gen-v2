@@ -233,6 +233,13 @@ export async function POST(request: NextRequest) {
       }
 
       savedInvoices = insertedInvoices || [];
+
+      // Update daily_stock_ledger for source purchase batch
+      await InvoiceEngine.postSalesBatchStockLedger(
+        supabase,
+        newBatch.id,
+        stockSourceBatchId,
+      );
     } else {
       // Otherwise use InvoiceEngine to generate and save invoices for newBatch.id
       await InvoiceEngine.generateAndSaveInvoices(supabase, newBatch.id);
