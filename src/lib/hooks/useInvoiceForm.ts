@@ -134,6 +134,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     financialYearStart: number;
     financialYearEnd: number;
     stockSourceBatchId?: string;
+    previousEndingSequenceNumber?: string;
   }>({
     invoiceType: batchType.toUpperCase(),
     transportMode: "In Hand Delivery",
@@ -147,6 +148,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     financialYearStart: currentYear,
     financialYearEnd: currentYear + 1,
     stockSourceBatchId: "",
+    previousEndingSequenceNumber: "",
   });
 
   useEffect(() => {
@@ -460,6 +462,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
               totalAmount: formData.totalAmount,
               financialYearStart: formData.financialYearStart,
               financialYearEnd: formData.financialYearEnd,
+              previousEndingSequenceNumber: formData.previousEndingSequenceNumber,
               products: selectedProducts.map((item) => ({
                 product_id: item.product.id,
                 product_name: item.product.product_name,
@@ -565,6 +568,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           maximum_invoice_amount: parseFloat(formData.maximumInvoiceAmount),
           total_amount: parseFloat(formData.totalAmount),
           financial_year: `FY${formData.financialYearStart}-${String(formData.financialYearEnd).slice(2)}`,
+          previous_ending_sequence: formData.previousEndingSequenceNumber
+            ? parseInt(formData.previousEndingSequenceNumber, 10)
+            : null,
           products: selectedProducts.map((item) => ({
             product_id: item.product.id,
             product_name: item.product.product_name,
@@ -991,6 +997,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           totalAmount: formData.totalAmount,
           financialYearStart: formData.financialYearStart,
           financialYearEnd: formData.financialYearEnd,
+          previousEndingSequenceNumber: formData.previousEndingSequenceNumber,
           products: selectedProducts.map((item) => ({
             product_id: item.product.id,
             product_name: item.product.product_name,

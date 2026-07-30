@@ -101,6 +101,9 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    const { previousEndingSequenceNumber, previousEndingSequence } = body;
+    const rawPrevSeq = previousEndingSequenceNumber ?? previousEndingSequence;
+
     // 1. Create the new Sales invoice_batch record first
     const { data: newBatch, error: batchError } = await supabase
       .from("invoice_batch")
@@ -119,6 +122,10 @@ export async function POST(request: NextRequest) {
         maximum_invoice_amount: parseFloat(maximumInvoiceAmount),
         total_amount: parseFloat(totalAmount),
         financial_year: `FY${financialYearStart}-${String(financialYearEnd).slice(2)}`,
+        previous_ending_sequence:
+          rawPrevSeq !== undefined && rawPrevSeq !== null && rawPrevSeq !== ""
+            ? Number(rawPrevSeq)
+            : null,
         batch_type: "SALES",
         status: "generated",
         batch_status: "DRAFT",
@@ -173,21 +180,30 @@ export async function POST(request: NextRequest) {
 
       let startingCounter = (seqRow ? Number(seqRow.last_sequence_number) : 0) + 1;
 
-      // Fallback check against existing invoice table for this exact company, FY, and invoice_type
-      const { data: latestInvs } = await supabase
-        .from("invoice")
-        .select("invoice_number")
-        .eq("batch_type", "SALES")
-        .like("invoice_number", `${companyAbbr}-${canonicalFy}-S-%`)
-        .order("invoice_number", { ascending: false })
-        .limit(1);
+      if (
+        rawPrevSeq !== undefined &&
+        rawPrevSeq !== null &&
+        rawPrevSeq !== "" &&
+        !isNaN(Number(rawPrevSeq))
+      ) {
+        startingCounter = Number(rawPrevSeq) + 1;
+      } else {
+        // Fallback check against existing invoice table for this exact company, FY, and invoice_type
+        const { data: latestInvs } = await supabase
+          .from("invoice")
+          .select("invoice_number")
+          .eq("batch_type", "SALES")
+          .like("invoice_number", `${companyAbbr}-${canonicalFy}-S-%`)
+          .order("invoice_number", { ascending: false })
+          .limit(1);
 
-      if (latestInvs && latestInvs.length > 0) {
-        const match = latestInvs[0].invoice_number?.match(/-(\d+)$/);
-        if (match) {
-          const dbSeq = parseInt(match[1], 10);
-          if (!isNaN(dbSeq) && dbSeq >= startingCounter) {
-            startingCounter = dbSeq + 1;
+        if (latestInvs && latestInvs.length > 0) {
+          const match = latestInvs[0].invoice_number?.match(/-(\d+)$/);
+          if (match) {
+            const dbSeq = parseInt(match[1], 10);
+            if (!isNaN(dbSeq) && dbSeq >= startingCounter) {
+              startingCounter = dbSeq + 1;
+            }
           }
         }
       }

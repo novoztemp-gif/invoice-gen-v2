@@ -900,8 +900,17 @@ export class InvoiceEngine {
     let startingCounter =
       (seqRow ? Number(seqRow.last_sequence_number) : 0) + 1;
 
-    // Fallback: If sequence row is not yet created, check existing invoice table for matching company, FY, and type
-    if (startingCounter === 1) {
+    // Feature 1: Manual Sequence Override from batch previous_ending_sequence
+    const prevEndingSeq = (typedBatch as any).previous_ending_sequence;
+    if (
+      prevEndingSeq !== undefined &&
+      prevEndingSeq !== null &&
+      prevEndingSeq !== "" &&
+      !isNaN(Number(prevEndingSeq))
+    ) {
+      startingCounter = Number(prevEndingSeq) + 1;
+    } else if (startingCounter === 1) {
+      // Fallback: If sequence row is not yet created, check existing invoice table for matching company, FY, and type
       const abbr = (typedBatch as any).issuing_company_abbreviation || "IC";
       const { data: allInvoices } = await supabase
         .from("invoice")

@@ -207,12 +207,44 @@ export async function POST(request: NextRequest) {
       .eq("invoice_type", "S")
       .maybeSingle();
 
+    const { previousEndingSequenceNumber, previousEndingSequence } = body;
+    const rawPrevSeq = previousEndingSequenceNumber ?? previousEndingSequence;
+
+    let companyAbbr = "IC";
+    if (issuingCompanyId) {
+      const { data: company } = await supabase
+        .from("issuing_companies")
+        .select("abbreviation, company_name")
+        .eq("id", issuingCompanyId)
+        .single();
+      if (company) {
+        companyAbbr =
+          company.abbreviation ||
+          company.company_name
+            .substring(0, 4)
+            .toUpperCase()
+            .replace(/[^A-Z0-9]/g, "");
+      }
+    }
+
     let startingCounter = (seqRow ? Number(seqRow.last_sequence_number) : 0) + 1;
+
+    if (
+      rawPrevSeq !== undefined &&
+      rawPrevSeq !== null &&
+      rawPrevSeq !== "" &&
+      !isNaN(Number(rawPrevSeq))
+    ) {
+      startingCounter = Number(rawPrevSeq) + 1;
+    }
 
     // Mock batch config for engine processing
     const mockBatch: any = {
       id: "placeholder",
       batch_type: "SALES",
+      issuing_company_id: issuingCompanyId,
+      issuing_company_abbreviation: companyAbbr,
+      previous_ending_sequence: rawPrevSeq,
       invoice_date_from: invoiceDateFrom,
       invoice_date_to: invoiceDateTo,
       minimum_invoice_amount: Number(minimumInvoiceAmount),

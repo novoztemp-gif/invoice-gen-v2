@@ -487,49 +487,87 @@ export default function GeneratePurchaseInvoice() {
                     />
                   </div>
 
-                  {sequencePreview && (
-                    <div className="md:col-span-2 pt-3 border-t border-slate-100 space-y-3">
-                      <Label className="text-sm font-semibold text-slate-900">
-                        Invoice Sequence Preview
-                      </Label>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                        <div className="space-y-2 md:col-span-2">
-                          <Label className="text-xs text-slate-500 font-medium">
-                            Invoice Number
-                          </Label>
-                          <Input
-                            value={sequencePreview.nextInvoiceNumber}
-                            disabled
-                            className="bg-slate-50 font-mono font-semibold text-slate-900"
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label className="text-xs text-slate-500 font-medium">
-                            Current Sequence
-                          </Label>
-                          <Input
-                            value={
-                              sequencePreview.currentSequenceNumber > 0
-                                ? sequencePreview.currentSequenceNumber
-                                : "—"
-                            }
-                            disabled
-                            className="bg-slate-50 font-mono text-slate-700"
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label className="text-xs text-slate-500 font-medium">
-                            Next Sequence
-                          </Label>
-                          <Input
-                            value={sequencePreview.nextSequenceNumber}
-                            disabled
-                            className="bg-slate-50 font-mono text-slate-700"
-                          />
+                  <div className="space-y-2 md:col-span-2 pt-2 border-t border-slate-100">
+                    <Label
+                      htmlFor="previous-ending-sequence"
+                      className="text-xs font-semibold text-slate-700"
+                    >
+                      Previous Ending Sequence Number (Optional)
+                    </Label>
+                    <Input
+                      id="previous-ending-sequence"
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder="e.g. 1250 (generation starts from 1251)"
+                      value={formData.previousEndingSequenceNumber || ""}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          previousEndingSequenceNumber: e.target.value,
+                        })
+                      }
+                      className="bg-white font-mono"
+                    />
+                    <p className="text-[11px] text-slate-500">
+                      If provided, invoice generation for this batch will start from this sequence number + 1 (e.g. 1250 → 1251). Leave blank to continue automatically.
+                    </p>
+                  </div>
+
+                  {sequencePreview && (() => {
+                    const parsedPrev = parseInt(formData.previousEndingSequenceNumber || "", 10);
+                    const hasPrev = !isNaN(parsedPrev) && parsedPrev >= 0;
+                    const displayNextSeq = hasPrev ? parsedPrev + 1 : sequencePreview.nextSequenceNumber;
+                    const displayNextInvNumber = hasPrev
+                      ? `${sequencePreview.abbreviation}-${sequencePreview.financialYear}-P-${String(displayNextSeq).padStart(7, "0")}`
+                      : sequencePreview.nextInvoiceNumber;
+
+                    return (
+                      <div className="md:col-span-2 pt-3 border-t border-slate-100 space-y-3">
+                        <Label className="text-sm font-semibold text-slate-900">
+                          Invoice Sequence Preview
+                        </Label>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                          <div className="space-y-2 md:col-span-2">
+                            <Label className="text-xs text-slate-500 font-medium">
+                              Invoice Number
+                            </Label>
+                            <Input
+                              value={displayNextInvNumber}
+                              disabled
+                              className="bg-slate-50 font-mono font-semibold text-slate-900"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label className="text-xs text-slate-500 font-medium">
+                              Current Sequence
+                            </Label>
+                            <Input
+                              value={
+                                hasPrev
+                                  ? parsedPrev
+                                  : sequencePreview.currentSequenceNumber > 0
+                                  ? sequencePreview.currentSequenceNumber
+                                  : "—"
+                              }
+                              disabled
+                              className="bg-slate-50 font-mono text-slate-700"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label className="text-xs text-slate-500 font-medium">
+                              Next Sequence
+                            </Label>
+                            <Input
+                              value={displayNextSeq}
+                              disabled
+                              className="bg-slate-50 font-mono text-slate-700"
+                            />
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </>
               )}
             </div>
