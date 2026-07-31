@@ -170,14 +170,49 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // Manual Sequence Override: The ONLY source of truth is rawPrevSeq
-      const startingCounter =
+      // Manual Sequence Override or Auto-Detection of Highest Existing Sequence Number
+      let startingCounter = 1;
+      if (
         rawPrevSeq !== undefined &&
         rawPrevSeq !== null &&
         rawPrevSeq !== "" &&
-        !isNaN(Number(rawPrevSeq))
-          ? Number(rawPrevSeq) + 1
-          : 1;
+        !isNaN(Number(rawPrevSeq)) &&
+        Number(rawPrevSeq) >= 0
+      ) {
+        startingCounter = Number(rawPrevSeq) + 1;
+      } else {
+        const prefix = `${companyAbbr}-${canonicalFy}-S`;
+        let maxSeq = 0;
+        let page = 0;
+        const pageSize = 1000;
+        let hasMore = true;
+
+        while (hasMore) {
+          const { data: pageInvoices } = await supabase
+            .from("invoice")
+            .select("invoice_number")
+            .like("invoice_number", `${prefix}-%`)
+            .range(page * pageSize, (page + 1) * pageSize - 1);
+
+          if (pageInvoices && pageInvoices.length > 0) {
+            for (const row of pageInvoices) {
+              const parts = (row.invoice_number || "").split("-");
+              const seqNum = parseInt(parts[parts.length - 1], 10);
+              if (!isNaN(seqNum) && seqNum > maxSeq) {
+                maxSeq = seqNum;
+              }
+            }
+            if (pageInvoices.length < pageSize) {
+              hasMore = false;
+            } else {
+              page++;
+            }
+          } else {
+            hasMore = false;
+          }
+        }
+        startingCounter = maxSeq + 1;
+      }
 
       let seqCounter = startingCounter;
       const invoicesToInsert = invoicesOverride.map((inv: any) => {
@@ -217,6 +252,70 @@ export async function POST(request: NextRequest) {
         };
       });
 
+      // Ensure 100% unique invoice numbers before insertion
+      const prefix = `${companyAbbr}-${canonicalFy}-S`;
+      const existingNumberSet = new Set<string>();
+      let highestSeqInDb = 0;
+      let invPage = 0;
+      const invPageSize = 1000;
+      let hasMoreInvoices = true;
+
+      while (hasMoreInvoices) {
+        const { data: pageInvoices } = await supabase
+          .from("invoice")
+          .select("invoice_number")
+          .neq("invoice_batch_id", newBatch.id)
+          .like("invoice_number", `${prefix}-%`)
+          .range(invPage * invPageSize, (invPage + 1) * invPageSize - 1);
+
+        if (pageInvoices && pageInvoices.length > 0) {
+          for (const row of pageInvoices) {
+            const num = row.invoice_number;
+            if (num) {
+              existingNumberSet.add(num);
+              const parts = num.split("-");
+              const seq = parseInt(parts[parts.length - 1], 10);
+              if (!isNaN(seq) && seq > highestSeqInDb) {
+                highestSeqInDb = seq;
+              }
+            }
+          }
+          if (pageInvoices.length < invPageSize) {
+            hasMoreInvoices = false;
+          } else {
+            invPage++;
+          }
+        } else {
+          hasMoreInvoices = false;
+        }
+      }
+
+      const usedNumberSet = new Set<string>();
+      let hasCollision = false;
+
+      for (const inv of invoicesToInsert) {
+        if (
+          existingNumberSet.has(inv.invoice_number) ||
+          usedNumberSet.has(inv.invoice_number)
+        ) {
+          hasCollision = true;
+          break;
+        }
+        usedNumberSet.add(inv.invoice_number);
+      }
+
+      if (hasCollision) {
+        let safeSeq = Math.max(startingCounter, highestSeqInDb + 1);
+        for (const inv of invoicesToInsert) {
+          inv.invoice_number = InvoiceNumberingService.formatInvoiceNumber(
+            companyAbbr,
+            canonicalFy,
+            "S",
+            safeSeq++,
+          );
+        }
+      }
+
       console.log("==========================================");
       console.log("[INSERT PATH B - create-sales-batch-transactional]");
       console.log("process.pid:", process.pid);
@@ -228,7 +327,7 @@ export async function POST(request: NextRequest) {
       const { data: insertedInvoices, error: invoiceInsertError } =
         await supabase
           .from("invoice")
-          .upsert(invoicesToInsert, { onConflict: "invoice_number" })
+          .insert(invoicesToInsert)
           .select();
 
       if (invoiceInsertError) {
