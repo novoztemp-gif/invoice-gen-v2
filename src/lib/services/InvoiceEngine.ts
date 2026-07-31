@@ -1793,6 +1793,40 @@ export class InvoiceEngine {
           batch_type: batch.batch_type,
         });
       }
+
+      // Major Customer Exact Balance Correction Guard
+      const mCustInvoices = invoices.filter(
+        (inv) =>
+          inv.customer_id === customerId ||
+          inv.products?.[0]?.customer_id === customerId,
+      );
+      if (mCustInvoices.length > 0) {
+        const generatedSum = Math.round(
+          mCustInvoices.reduce(
+            (s, i) => s + Math.round(i.total_amount || 0),
+            0,
+          ),
+        );
+        const mTarget = Math.round(mAmount);
+        const majorDrift = mTarget - generatedSum;
+
+        if (Math.abs(majorDrift) > 0) {
+          const lastInv = mCustInvoices[mCustInvoices.length - 1];
+          if (lastInv && lastInv.products && lastInv.products.length > 0) {
+            const lastProd = lastInv.products[lastInv.products.length - 1];
+            lastProd.amount = Math.round((lastProd.amount || 0) + majorDrift);
+            lastProd.rate = roundToWholeInteger(
+              lastProd.amount / (lastProd.quantity || 1),
+            );
+            lastInv.total_amount = Math.round(
+              lastInv.products.reduce(
+                (sum: number, item: any) => sum + Math.round(item.amount || 0),
+                0,
+              ),
+            );
+          }
+        }
+      }
     }
 
     // Mark Major Customers as fully satisfied so they are not picked again during normal customer assignment
@@ -3185,6 +3219,41 @@ export class InvoiceEngine {
           status: "generated",
           batch_type: "PURCHASE",
         });
+      }
+
+      // Major Customer Exact Balance Correction Guard
+      const mCustInvoices = invoices.filter(
+        (inv) =>
+          inv.customer_id === supplierId ||
+          inv.supplier_id === supplierId ||
+          inv.products?.[0]?.customer_id === supplierId,
+      );
+      if (mCustInvoices.length > 0) {
+        const generatedSum = Math.round(
+          mCustInvoices.reduce(
+            (s, i) => s + Math.round(i.total_amount || 0),
+            0,
+          ),
+        );
+        const mTarget = Math.round(mAmount);
+        const majorDrift = mTarget - generatedSum;
+
+        if (Math.abs(majorDrift) > 0) {
+          const lastInv = mCustInvoices[mCustInvoices.length - 1];
+          if (lastInv && lastInv.products && lastInv.products.length > 0) {
+            const lastProd = lastInv.products[lastInv.products.length - 1];
+            lastProd.amount = Math.round((lastProd.amount || 0) + majorDrift);
+            lastProd.rate = roundToWholeInteger(
+              lastProd.amount / (lastProd.quantity || 1),
+            );
+            lastInv.total_amount = Math.round(
+              lastInv.products.reduce(
+                (sum: number, item: any) => sum + Math.round(item.amount || 0),
+                0,
+              ),
+            );
+          }
+        }
       }
     }
 
