@@ -217,8 +217,19 @@ export async function POST(request: NextRequest) {
         };
       });
 
+      console.log("==========================================");
+      console.log("[INSERT PATH B - create-sales-batch-transactional]");
+      console.log("process.pid:", process.pid);
+      console.log("NODE_ENV:", process.env.NODE_ENV);
+      console.log("url:", request.url);
+      console.log("first 5 invoices to insert:", invoicesToInsert.slice(0, 5).map((i: any) => i.invoice_number));
+      console.log("==========================================");
+
       const { data: insertedInvoices, error: invoiceInsertError } =
-        await supabase.from("invoice").insert(invoicesToInsert).select();
+        await supabase
+          .from("invoice")
+          .upsert(invoicesToInsert, { onConflict: "invoice_number" })
+          .select();
 
       if (invoiceInsertError) {
         console.error("Error inserting sales invoices:", invoiceInsertError);

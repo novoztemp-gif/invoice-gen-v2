@@ -16,6 +16,14 @@ export async function POST(request: NextRequest) {
 
     const supabase = await createClient();
 
+    console.log("==========================================");
+    console.log("[API ENTRY: /api/generate-invoice-splitups]");
+    console.log("process.pid:", process.pid);
+    console.log("NODE_ENV:", process.env.NODE_ENV);
+    console.log("url:", request.url);
+    console.log("batchId:", batchId);
+    console.log("==========================================");
+
     const count = await InvoiceEngine.generateAndSaveInvoices(
       supabase,
       batchId,

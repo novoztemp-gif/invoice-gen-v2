@@ -166,6 +166,18 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    console.log("==========================================");
+    console.log("[STOCK SUMMARY ROUTE - purchasedSums Entries]");
+    for (const [prodId, sumQty] of purchasedSums.entries()) {
+      console.log({ product_id: prodId, purchased_quantity: sumQty });
+    }
+    const sumPurchasedSums = Array.from(purchasedSums.values()).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    console.log("SUM(purchasedSums.values()):", sumPurchasedSums);
+    console.log("==========================================");
+
     // Aggregate unique products across selected batches
     const productMap = new Map<string, any>();
     let totalCombinedAmount = 0;
@@ -181,12 +193,25 @@ export async function GET(request: NextRequest) {
 
     // 4. Group and format products details
     const summary = Array.from(productMap.values()).map((prod: any) => {
-      const carryForward = carryForwardStock.get(prod.product_id) || 0;
-      const purchased = purchasedSums.get(prod.product_id) || 0;
+      const pId = prod.product_id;
+      const hasKey = purchasedSums.has(pId);
+      const rawGet = purchasedSums.get(pId);
+      const carryForward = carryForwardStock.get(pId) || 0;
+      const purchased = purchasedSums.get(pId) || 0;
       const totalAvailable = carryForward + purchased;
 
+      console.log("[PRODUCT PROOF CHECK]", {
+        product_id: pId,
+        product_name: prod.product_name,
+        "purchasedSums.has": hasKey,
+        "purchasedSums.get": rawGet,
+        carryForward,
+        purchased,
+        totalAvailable,
+      });
+
       return {
-        product_id: prod.product_id,
+        product_id: pId,
         product_name: prod.product_name || "Unknown Product",
         carry_forward: carryForward,
         purchased: purchased,
@@ -194,6 +219,33 @@ export async function GET(request: NextRequest) {
         unit: prod.unit_of_measure || "kg",
       };
     });
+
+    const sumSummaryPurchased = summary.reduce(
+      (a, b) => a + Number(b.purchased || 0),
+      0,
+    );
+    const sumSummaryTotalAvailable = summary.reduce(
+      (a, b) => a + Number(b.total_available || 0),
+      0,
+    );
+
+    console.log("==========================================");
+    console.log("SUM(summary.map(x => x.purchased)):", sumSummaryPurchased);
+    console.log(
+      "SUM(summary.map(x => x.total_available)):",
+      sumSummaryTotalAvailable,
+    );
+    console.log("[STOCK SUMMARY ROUTE - Per Product Breakdown]");
+    for (const s of summary) {
+      console.log({
+        product_id: s.product_id,
+        product_name: s.product_name,
+        carry_forward: s.carry_forward,
+        purchased: s.purchased,
+        total_available: s.total_available,
+      });
+    }
+    console.log("==========================================");
 
     return NextResponse.json({
       success: true,

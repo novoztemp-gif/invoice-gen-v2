@@ -109,6 +109,7 @@ export default function GenerateInvoice() {
   const [finalizedPurchaseBatches, setFinalizedPurchaseBatches] = useState<
     any[]
   >([]);
+  const [finalizedSalesBatches, setFinalizedSalesBatches] = useState<any[]>([]);
   const [availableSources, setAvailableSources] = useState<
     InventorySourceItem[]
   >([]);
@@ -174,6 +175,7 @@ export default function GenerateInvoice() {
 
       const allBatches = batches || [];
       setFinalizedPurchaseBatches(allBatches);
+      setFinalizedSalesBatches(salesBatches || []);
 
       // Collect purchase batch IDs that have already been used by a finalized sales batch
       const usedPurchaseBatchIds = new Set<string>();
@@ -357,8 +359,36 @@ export default function GenerateInvoice() {
     const fetchStockSummary = async () => {
       setIsLoadingSummary(true);
       try {
+        const rawIds = (formData.stockSourceBatchId || "")
+          .split(",")
+          .map((id) => id.trim())
+          .filter(Boolean);
+
+        const realBatchIds = rawIds
+          .map((id) => {
+            if (id.startsWith("LEFTOVER_PREVIOUS_BATCH_")) {
+              const salesId = id.replace("LEFTOVER_PREVIOUS_BATCH_", "");
+              const salesBatch = (finalizedSalesBatches || []).find(
+                (s: any) => s.id === salesId,
+              );
+              return salesBatch?.stock_source_batch_id || id;
+            }
+            return id;
+          })
+          .filter(
+            (id) =>
+              id &&
+              !id.startsWith("LEFTOVER_") &&
+              !id.startsWith("CARRY_FORWARD_"),
+          );
+
+        const targetBatchIdParam =
+          realBatchIds.length > 0
+            ? realBatchIds.join(",")
+            : formData.stockSourceBatchId;
+
         const res = await fetch(
-          `/api/get-purchase-batch-stock-summary?batchId=${formData.stockSourceBatchId}`,
+          `/api/get-purchase-batch-stock-summary?batchId=${targetBatchIdParam}`,
         );
         const result = await res.json();
         if (res.ok) {
@@ -432,7 +462,7 @@ export default function GenerateInvoice() {
             }
           }
 
-          // Synchronize Card TOTAL STOCK to match the exact sum of total_available in summary table
+          // Synchronize Leftover Stock Card to match live total_available in summary table (preserving Purchase Batch cards)
           const exactSum = summaryList.reduce(
             (sum: number, item: any) =>
               sum + Number(item.total_available || item.purchased || 0),
@@ -442,6 +472,10 @@ export default function GenerateInvoice() {
           if (exactSum > 0) {
             setAvailableSources((prevSources) =>
               prevSources.map((src) => {
+                // Business Rule: Purchase Batch cards represent ORIGINAL purchased quantity and must NEVER be overwritten.
+                if (src.sourceType === "Purchase Batch") {
+                  return src;
+                }
                 if (
                   src.id === formData.stockSourceBatchId ||
                   formData.stockSourceBatchId?.includes(src.id)

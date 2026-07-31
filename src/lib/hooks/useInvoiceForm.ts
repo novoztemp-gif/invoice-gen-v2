@@ -538,67 +538,102 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         selectedCustomers[0] ||
         (majorCustomers[0] ? majorCustomers[0].customer_id : null);
 
-      const { data, error } = await supabase
-        .from("invoice_batch")
-        .insert({
-          issuing_company_id: selectedIssuingCompany?.id,
-          stock_source_batch_id: null,
-          supplier_id: selectedSupplierId,
-          receiving_company_id: null,
-          selected_customers: selectedCustomers,
-          major_customers: majorCustomers.map((m) => ({
-            customer_id: m.customer_id,
-            amount: parseFloat(m.amount) || 0,
-            invoice_count: parseInt(m.invoice_count, 10) || 1,
-            max_invoice_amount: m.max_invoice_amount
-              ? parseFloat(m.max_invoice_amount)
-              : undefined,
-          })),
-          batch_type: formData.invoiceType,
-          transport_mode: formData.transportMode,
-          vehicle_number: formData.vehicleNumber || "",
-          date_of_supply: formData.invoiceDateTo
-            ? formatDateForStorage(formData.invoiceDateTo)
-            : formatDateForStorage(new Date()),
-          invoice_date_from: formData.invoiceDateFrom
-            ? formatDateForStorage(formData.invoiceDateFrom)
-            : null,
-          invoice_date_to: formData.invoiceDateTo
-            ? formatDateForStorage(formData.invoiceDateTo)
-            : null,
-          minimum_invoice_amount: parseFloat(formData.minimumInvoiceAmount),
-          maximum_invoice_amount: parseFloat(formData.maximumInvoiceAmount),
-          total_amount: parseFloat(formData.totalAmount),
-          financial_year: `FY${formData.financialYearStart}-${String(formData.financialYearEnd).slice(2)}`,
-          previous_ending_sequence: formData.previousEndingSequenceNumber
+      // STEP 1: Immediately before frontend submit
+      console.log("=========================");
+      console.log("PURCHASE BATCH CREATION - STEP 1 (Frontend Submit)");
+      console.log("=========================");
+      console.log({
+        previousEndingSequenceNumber: formData.previousEndingSequenceNumber,
+        parsedPreviousEndingSequence: formData.previousEndingSequenceNumber
+          ? parseInt(formData.previousEndingSequenceNumber, 10)
+          : null,
+      });
+
+      const payloadToInsert = {
+        issuing_company_id: selectedIssuingCompany?.id,
+        stock_source_batch_id: null,
+        supplier_id: selectedSupplierId,
+        receiving_company_id: null,
+        selected_customers: selectedCustomers,
+        major_customers: majorCustomers.map((m) => ({
+          customer_id: m.customer_id,
+          amount: parseFloat(m.amount) || 0,
+          invoice_count: parseInt(m.invoice_count, 10) || 1,
+          max_invoice_amount: m.max_invoice_amount
+            ? parseFloat(m.max_invoice_amount)
+            : undefined,
+        })),
+        batch_type: formData.invoiceType,
+        transport_mode: formData.transportMode,
+        vehicle_number: formData.vehicleNumber || "",
+        date_of_supply: formData.invoiceDateTo
+          ? formatDateForStorage(formData.invoiceDateTo)
+          : formatDateForStorage(new Date()),
+        invoice_date_from: formData.invoiceDateFrom
+          ? formatDateForStorage(formData.invoiceDateFrom)
+          : null,
+        invoice_date_to: formData.invoiceDateTo
+          ? formatDateForStorage(formData.invoiceDateTo)
+          : null,
+        minimum_invoice_amount: parseFloat(formData.minimumInvoiceAmount),
+        maximum_invoice_amount: parseFloat(formData.maximumInvoiceAmount),
+        total_amount: parseFloat(formData.totalAmount),
+        financial_year: `FY${formData.financialYearStart}-${String(formData.financialYearEnd).slice(2)}`,
+        previous_ending_sequence:
+          formData.previousEndingSequenceNumber !== undefined &&
+          formData.previousEndingSequenceNumber !== null &&
+          formData.previousEndingSequenceNumber !== "" &&
+          !isNaN(Number(formData.previousEndingSequenceNumber))
             ? parseInt(formData.previousEndingSequenceNumber, 10)
             : null,
-          products: selectedProducts.map((item) => ({
-            product_id: item.product.id,
-            product_name: item.product.product_name,
-            category:
-              (item.product as any).category_name ||
-              (item.product as any).category ||
-              "Meat",
-            hsn_code: item.product.hsn_code,
-            unit_of_measure: item.product.unit_of_measure,
-            perDayQtyMin: item.perDayQtyMin,
-            perDayQtyMax: item.perDayQtyMax,
-            perDayRateMin: item.perDayRateMin,
-            perDayRateMax: item.perDayRateMax,
-            occurrencePercentage: item.occurrencePercentage
-              ? parseFloat(item.occurrencePercentage)
-              : null,
-          })),
-          recurring_products: [],
-          // Purchase invoices must remain editable and balanceable until the
-          // user explicitly finalizes the batch from the batch-detail screen.
-          status: "pending",
-          batch_status: "REOPENED",
-          created_by: user.id,
-        })
+        products: selectedProducts.map((item) => ({
+          product_id: item.product.id,
+          product_name: item.product.product_name,
+          category:
+            (item.product as any).category_name ||
+            (item.product as any).category ||
+            "Meat",
+          hsn_code: item.product.hsn_code,
+          unit_of_measure: item.product.unit_of_measure,
+          perDayQtyMin: item.perDayQtyMin,
+          perDayQtyMax: item.perDayQtyMax,
+          perDayRateMin: item.perDayRateMin,
+          perDayRateMax: item.perDayRateMax,
+          occurrencePercentage: item.occurrencePercentage
+            ? parseFloat(item.occurrencePercentage)
+            : null,
+        })),
+        recurring_products: [],
+        status: "pending",
+        batch_status: "REOPENED",
+        created_by: user.id,
+      };
+
+      // STEP 2 & STEP 3: Immediately before insert
+      console.log("=========================");
+      console.log("PURCHASE BATCH CREATION - STEP 2 & 3 (Before Insert)");
+      console.log("=========================");
+      console.log({
+        requestBodyPreviousEndingSequence: formData.previousEndingSequenceNumber,
+        payloadPreviousEndingSequence: payloadToInsert.previous_ending_sequence,
+        fullPayloadToInsert: payloadToInsert,
+      });
+
+      const { data, error } = await supabase
+        .from("invoice_batch")
+        .insert(payloadToInsert)
         .select()
         .single();
+
+      // STEP 4: Immediately after insert
+      console.log("=========================");
+      console.log("PURCHASE BATCH CREATION - STEP 4 (After Insert Read Back)");
+      console.log("=========================");
+      console.log({
+        insertedBatchId: data?.id,
+        insertedPreviousEndingSequence: data?.previous_ending_sequence,
+        fullInsertedBatchRow: data,
+      });
 
       if (error) {
         console.error("Error creating invoice batch:", error);

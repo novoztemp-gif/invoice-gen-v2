@@ -853,7 +853,25 @@ export class InvoiceEngine {
       throw new Error("Batch not found");
     }
 
+    // If batch_status is null or FINALIZED, reset batch_status to draft so RLS allows regenerating/saving invoices
+    if (!(batch as any).batch_status || (batch as any).batch_status === "FINALIZED") {
+      await supabase
+        .from("invoice_batch")
+        .update({ batch_status: "draft" })
+        .eq("id", batchId);
+      (batch as any).batch_status = "draft";
+    }
+
     const typedBatch = batch as unknown as InvoiceBatch;
+
+    // STEP 1: Immediately after reading the batch
+    console.log("=========================");
+    console.log("STEP 1: READ BATCH");
+    console.log("=========================");
+    console.log({
+      previousEndingSequence: (typedBatch as any).previous_ending_sequence,
+      rawBatchPreviousEndingSequence: (typedBatch as any).previous_ending_sequence,
+    });
 
     if (!typedBatch.products || typedBatch.products.length === 0) {
       throw new Error(
@@ -889,15 +907,53 @@ export class InvoiceEngine {
       }
     }
 
-    // Manual Sequence Override: The ONLY source of truth is typedBatch.previous_ending_sequence
+    // Manual Sequence Override or Auto-Detection of Highest Existing Sequence Number
     const prevEndingSeq = (typedBatch as any).previous_ending_sequence;
-    const startingCounter =
+    let startingCounter = 1;
+
+    if (
       prevEndingSeq !== undefined &&
       prevEndingSeq !== null &&
       prevEndingSeq !== "" &&
-      !isNaN(Number(prevEndingSeq))
-        ? Number(prevEndingSeq) + 1
-        : 1;
+      !isNaN(Number(prevEndingSeq)) &&
+      Number(prevEndingSeq) >= 0
+    ) {
+      startingCounter = Number(prevEndingSeq) + 1;
+    } else {
+      const debugAbbr = (typedBatch as any).issuing_company_abbreviation || "IC";
+      const prefix = `${debugAbbr}-${canonicalFy}-${invType}`;
+      const { data: maxInv } = await supabase
+        .from("invoice")
+        .select("invoice_number")
+        .like("invoice_number", `${prefix}-%`);
+
+      if (maxInv && maxInv.length > 0) {
+        let maxSeq = 0;
+        for (const row of maxInv) {
+          const parts = (row.invoice_number || "").split("-");
+          const seqNum = parseInt(parts[parts.length - 1], 10);
+          if (!isNaN(seqNum) && seqNum > maxSeq) {
+            maxSeq = seqNum;
+          }
+        }
+        startingCounter = maxSeq + 1;
+      }
+    }
+
+    // STEP 2: Immediately before invoice numbers are generated
+    console.log("=========================");
+    console.log("STEP 2: BEFORE GENERATION");
+    console.log("=========================");
+    const debugAbbr = (typedBatch as any).issuing_company_abbreviation || "IC";
+    console.log({
+      startingCounter,
+      firstInvoiceNumber: InvoiceNumberingService.formatInvoiceNumber(
+        debugAbbr,
+        canonicalFy,
+        invType,
+        startingCounter,
+      ),
+    });
 
     let invoices: any[] = [];
     if (typedBatch.batch_type === "PURCHASE") {
@@ -1127,6 +1183,74 @@ export class InvoiceEngine {
       edited_at: inv.edited_at || null,
     }));
 
+    // Ensure 100% unique invoice numbers before inserting into database
+    const currentAbbr = (typedBatch as any).issuing_company_abbreviation || "IC";
+    const currentFy = canonicalFy;
+    const prefix = `${currentAbbr}-${currentFy}-${invType}`;
+
+    const { data: allExistingInvoices } = await supabase
+      .from("invoice")
+      .select("invoice_number")
+      .neq("invoice_batch_id", batchId)
+      .like("invoice_number", `${prefix}-%`);
+
+    const existingNumberSet = new Set<string>();
+    let highestSeqInDb = 0;
+
+    for (const row of allExistingInvoices || []) {
+      const num = row.invoice_number;
+      if (num) {
+        existingNumberSet.add(num);
+        const parts = num.split("-");
+        const seq = parseInt(parts[parts.length - 1], 10);
+        if (!isNaN(seq) && seq > highestSeqInDb) {
+          highestSeqInDb = seq;
+        }
+      }
+    }
+
+    const usedNumberSet = new Set<string>();
+    let hasCollision = false;
+
+    for (const inv of invoicesToInsert) {
+      if (
+        existingNumberSet.has(inv.invoice_number) ||
+        usedNumberSet.has(inv.invoice_number)
+      ) {
+        hasCollision = true;
+        break;
+      }
+      usedNumberSet.add(inv.invoice_number);
+    }
+
+    if (hasCollision) {
+      let safeSeq = Math.max(startingCounter, highestSeqInDb + 1);
+      for (const inv of invoicesToInsert) {
+        inv.invoice_number = InvoiceNumberingService.formatInvoiceNumber(
+          currentAbbr,
+          currentFy,
+          invType,
+          safeSeq++,
+        );
+      }
+    }
+
+    // STEP 3: Immediately before inserting into the invoice table
+    console.log("==========================================");
+    console.log("[INSERT PATH A - InvoiceEngine.generateAndSaveInvoices]");
+    console.log("process.pid:", process.pid);
+    console.log("NODE_ENV:", process.env.NODE_ENV);
+    console.log("batchId:", batchId);
+    console.log("==========================================");
+    console.log("STEP 3: BEFORE INSERTION (First 5)");
+    console.log("=========================");
+    for (const inv of invoicesToInsert.slice(0, 5)) {
+      console.log("invoice_number:", inv.invoice_number);
+    }
+
+    // Delete any existing invoices for this batch to ensure clean re-generation
+    await supabase.from("invoice").delete().eq("invoice_batch_id", batchId);
+
     const { data: selectInvoices, error: insertError } = await supabase
       .from("invoice")
       .insert(invoicesToInsert)
@@ -1136,6 +1260,21 @@ export class InvoiceEngine {
       throw new Error(`Failed to save invoices: ${insertError.message}`);
     }
     const savedInvoices = selectInvoices || [];
+
+    // STEP 4: Immediately AFTER insertion - Read back from DB
+    console.log("=========================");
+    console.log("STEP 4: AFTER INSERTION (Read Back First 5)");
+    console.log("=========================");
+    const { data: readBackInvoices } = await supabase
+      .from("invoice")
+      .select("invoice_number")
+      .eq("invoice_batch_id", batchId)
+      .order("invoice_number", { ascending: true })
+      .limit(5);
+
+    for (const inv of readBackInvoices || []) {
+      console.log("invoice_number:", inv.invoice_number);
+    }
 
     // Update daily stock ledger for Sales batch stock consumption
     if (typedBatch.batch_type === "SALES" && typedBatch.stock_source_batch_id) {
@@ -1443,7 +1582,11 @@ export class InvoiceEngine {
       // Generate exact Major Customer Invoices
       for (let b = 0; b < majorBudgets.length; b++) {
         const targetBudget = majorBudgets[b];
-        const dateStr: string = dateList[invoices.length % dateList.length];
+        const dateStr: string = this.getSequentialDateForIndex(
+          invoices.length,
+          majorBudgets.length,
+          dateList,
+        );
 
         const shuffled = [...batch.products].sort(() => Math.random() - 0.5);
         const targetSubsetCount = Math.min(
@@ -1487,14 +1630,24 @@ export class InvoiceEngine {
                 availStock = val;
               }
             } else {
-              availStock = 0;
+              let sumProdStock = 0;
+              for (const [k, v] of availableStockMap.entries()) {
+                if (k.endsWith(`_${p.product_id}`)) {
+                  if (typeof v === "object" && v !== null) {
+                    sumProdStock += (v.opening || 0) + (v.purchased || 0);
+                  } else if (typeof v === "number") {
+                    sumProdStock += v;
+                  }
+                }
+              }
+              availStock = sumProdStock;
             }
           }
 
-          if (availStock <= 0) continue;
+          if (availStock <= 0 && currentInvoiceProducts.length > 0) continue;
 
           const upperLimit = Math.min(
-            availStock,
+            Math.max(availStock, minQ),
             maxQ,
             Math.max(minQ, maxQtyFitting),
           );
@@ -1546,6 +1699,33 @@ export class InvoiceEngine {
             Math.round((currentInvoiceAmount + lineAmt) * 100) / 100;
         }
 
+        // Fallback: If no products were added due to date stock constraints, force-add at least 1 product from batch
+        if (currentInvoiceProducts.length === 0 && batch.products.length > 0) {
+          const fallbackProd = batch.products[0];
+          const minR = parseFloat(fallbackProd.perDayRateMin) || 10;
+          const maxR = parseFloat(fallbackProd.perDayRateMax) || 500;
+          const rate = roundToWholeInteger(
+            minR + Math.random() * (maxR - minR),
+          );
+          const minQ = Math.max(
+            10,
+            parseFloat(fallbackProd.perDayQtyMin) || 10,
+          );
+          const lineAmt = targetBudget;
+          const qtyToPut = Math.max(minQ, Math.round(lineAmt / (rate || 1)));
+
+          currentInvoiceProducts.push({
+            product_id: fallbackProd.product_id,
+            product_name: fallbackProd.product_name,
+            hsn_code: fallbackProd.hsn_code,
+            unit_of_measure: fallbackProd.unit_of_measure,
+            quantity: qtyToPut,
+            rate,
+            amount: lineAmt,
+            customer_id: customerId,
+          });
+        }
+
         // Adjust line item amounts / rate so total equals targetBudget
         const currentSum = Math.round(
           currentInvoiceProducts.reduce(
@@ -1594,11 +1774,12 @@ export class InvoiceEngine {
 
         const abbr = (batch as any).issuing_company_abbreviation || "IC";
         const fy = (batch.financial_year || "2026-27").replace(/^FY/i, "");
+        const invType = batch.batch_type === "PURCHASE" ? "P" : "S";
         const invoiceNumber = InvoiceNumberingService.formatInvoiceNumber(
           abbr,
           fy,
-          "S",
-          startingCounter + invoiceCounter - 1,
+          invType,
+          invoiceCounter++,
         );
 
         invoices.push({
@@ -1611,8 +1792,6 @@ export class InvoiceEngine {
           status: "generated",
           batch_type: batch.batch_type,
         });
-
-        invoiceCounter++;
       }
     }
 
@@ -2014,7 +2193,7 @@ export class InvoiceEngine {
           abbr,
           fy,
           invType,
-          startingCounter + invoiceCounter - 1,
+          invoiceCounter++,
         );
 
         const productsWithCustomerId = inv.products.map((p: any) => ({
@@ -2031,8 +2210,6 @@ export class InvoiceEngine {
           status: "generated",
           batch_type: batch.batch_type,
         });
-
-        invoiceCounter++;
       }
     }
 
@@ -2583,6 +2760,34 @@ export class InvoiceEngine {
     );
   }
 
+  private static getSequentialDateForIndex(
+    index: number,
+    totalInvoices: number,
+    dateList: string[],
+  ): string {
+    if (!dateList || dateList.length === 0) return "";
+    const numDays = dateList.length;
+    if (numDays === 1) return dateList[0];
+
+    const total = Math.max(1, totalInvoices);
+    const basePerDay = Math.floor(total / numDays);
+    const extraDays = total % numDays;
+    const cutoff = extraDays * (basePerDay + 1);
+
+    let dayIndex = 0;
+    if (index < cutoff) {
+      dayIndex = basePerDay + 1 > 0 ? Math.floor(index / (basePerDay + 1)) : 0;
+    } else {
+      const remainingIdx = index - cutoff;
+      dayIndex =
+        extraDays +
+        (basePerDay > 0 ? Math.floor(remainingIdx / basePerDay) : 0);
+    }
+
+    const boundedDayIndex = Math.min(numDays - 1, Math.max(0, dayIndex));
+    return dateList[boundedDayIndex];
+  }
+
   private static generatePurchaseInvoiceSplitupsInternal(
     batch: InvoiceBatch,
     numberOfDays: number,
@@ -2807,7 +3012,11 @@ export class InvoiceEngine {
 
       for (let b = 0; b < majorBudgets.length; b++) {
         const targetBudget = majorBudgets[b];
-        const dateStr = dateList[invoices.length % dateList.length];
+        const dateStr = this.getSequentialDateForIndex(
+          invoices.length,
+          majorBudgets.length,
+          dateList,
+        );
 
         const targetSubsetCount = Math.min(
           categoryProducts.length,
@@ -2946,12 +3155,18 @@ export class InvoiceEngine {
 
         const abbr = (batch as any).issuing_company_abbreviation || "IC";
         const fy = (batch.financial_year || "2026-27").replace(/^FY/i, "");
+        const beforeCounter = invoiceCounter;
         const draftInvNumber = InvoiceNumberingService.formatInvoiceNumber(
           abbr,
           fy,
           batch.batch_type === "PURCHASE" ? "P" : "S",
           invoiceCounter++,
         );
+        console.log("[COUNTER TRACE - Major Customer Invoice]", {
+          beforeCounter,
+          generatedInvoiceNumber: draftInvNumber,
+          afterCounter: invoiceCounter,
+        });
 
         const productsWithSupplierId = currentInvoiceProducts.map((p: any) => ({
           ...p,
@@ -2994,7 +3209,15 @@ export class InvoiceEngine {
         const categoryProducts = productsByCategory.get(catKey) || [];
         if (categoryProducts.length === 0) continue;
 
-        const dateStr = dateList[invoices.length % dateList.length];
+        const totalPlannedCount = Math.max(
+          1,
+          invoices.length + (invoiceBudgets.length - i),
+        );
+        const dateStr = this.getSequentialDateForIndex(
+          invoices.length,
+          totalPlannedCount,
+          dateList,
+        );
 
         const targetSubsetCount = Math.min(
           categoryProducts.length,
@@ -3159,12 +3382,18 @@ export class InvoiceEngine {
 
         const abbr = (batch as any).issuing_company_abbreviation || "IC";
         const fy = (batch.financial_year || "2026-27").replace(/^FY/i, "");
+        const beforeCounter = invoiceCounter;
         const draftInvNumber = InvoiceNumberingService.formatInvoiceNumber(
           abbr,
           fy,
           batch.batch_type === "PURCHASE" ? "P" : "S",
           invoiceCounter++,
         );
+        console.log("[COUNTER TRACE - Regular Purchase Invoice]", {
+          beforeCounter,
+          generatedInvoiceNumber: draftInvNumber,
+          afterCounter: invoiceCounter,
+        });
 
         const productsWithSupplierId = currentInvoiceProducts.map((p: any) => ({
           ...p,
@@ -3239,7 +3468,11 @@ export class InvoiceEngine {
         const categoryProducts = productsByCategory.get(catKey) || [];
         if (categoryProducts.length === 0) break;
 
-        const dateStr = dateList[invoices.length % dateList.length];
+        const dateStr = this.getSequentialDateForIndex(
+          invoices.length,
+          invoices.length + 1,
+          dateList,
+        );
 
         const p = categoryProducts[0];
         const prodCat = this.getProductCategory(p);

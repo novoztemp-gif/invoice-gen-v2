@@ -830,8 +830,8 @@ export default function BatchDetail() {
                 ) : (
                   <div className="space-y-4">
                     {dateWiseSummary.map((summary) => {
-                    const isExpanded = expandedDates[summary.date];
-                    return (
+                      const isExpanded = expandedDates[summary.date] !== false;
+                      return (
                       <div
                         key={summary.date}
                         className="border rounded-lg overflow-hidden"
@@ -867,6 +867,14 @@ export default function BatchDetail() {
 
                         {isExpanded && (
                           <div className="p-4 space-y-4">
+                            {(() => {
+                              console.log("==========================================");
+                              console.log("[PAGE DEBUG] dateInvoices.length:", summary.invoices.length);
+                              console.log("[PAGE DEBUG] dateInvoices.map:", summary.invoices.map((i: any) => i.invoice_number));
+                              console.log("[PAGE DEBUG] filteredInvoices.map:", filteredInvoices.map((i: any) => i.invoice_number));
+                              console.log("==========================================");
+                              return null;
+                            })()}
                             {summary.invoices.map((invoice) => (
                               <div
                                 key={invoice.id}
