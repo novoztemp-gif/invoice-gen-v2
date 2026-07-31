@@ -922,22 +922,37 @@ export class InvoiceEngine {
     } else {
       const debugAbbr = (typedBatch as any).issuing_company_abbreviation || "IC";
       const prefix = `${debugAbbr}-${canonicalFy}-${invType}`;
-      const { data: maxInv } = await supabase
-        .from("invoice")
-        .select("invoice_number")
-        .like("invoice_number", `${prefix}-%`);
+      
+      let maxSeq = 0;
+      let page = 0;
+      const pageSize = 1000;
+      let hasMore = true;
 
-      if (maxInv && maxInv.length > 0) {
-        let maxSeq = 0;
-        for (const row of maxInv) {
-          const parts = (row.invoice_number || "").split("-");
-          const seqNum = parseInt(parts[parts.length - 1], 10);
-          if (!isNaN(seqNum) && seqNum > maxSeq) {
-            maxSeq = seqNum;
+      while (hasMore) {
+        const { data: pageInvoices } = await supabase
+          .from("invoice")
+          .select("invoice_number")
+          .like("invoice_number", `${prefix}-%`)
+          .range(page * pageSize, (page + 1) * pageSize - 1);
+
+        if (pageInvoices && pageInvoices.length > 0) {
+          for (const row of pageInvoices) {
+            const parts = (row.invoice_number || "").split("-");
+            const seqNum = parseInt(parts[parts.length - 1], 10);
+            if (!isNaN(seqNum) && seqNum > maxSeq) {
+              maxSeq = seqNum;
+            }
           }
+          if (pageInvoices.length < pageSize) {
+            hasMore = false;
+          } else {
+            page++;
+          }
+        } else {
+          hasMore = false;
         }
-        startingCounter = maxSeq + 1;
       }
+      startingCounter = maxSeq + 1;
     }
 
     // STEP 2: Immediately before invoice numbers are generated
@@ -1188,24 +1203,39 @@ export class InvoiceEngine {
     const currentFy = canonicalFy;
     const prefix = `${currentAbbr}-${currentFy}-${invType}`;
 
-    const { data: allExistingInvoices } = await supabase
-      .from("invoice")
-      .select("invoice_number")
-      .neq("invoice_batch_id", batchId)
-      .like("invoice_number", `${prefix}-%`);
-
     const existingNumberSet = new Set<string>();
     let highestSeqInDb = 0;
+    let invPage = 0;
+    const invPageSize = 1000;
+    let hasMoreInvoices = true;
 
-    for (const row of allExistingInvoices || []) {
-      const num = row.invoice_number;
-      if (num) {
-        existingNumberSet.add(num);
-        const parts = num.split("-");
-        const seq = parseInt(parts[parts.length - 1], 10);
-        if (!isNaN(seq) && seq > highestSeqInDb) {
-          highestSeqInDb = seq;
+    while (hasMoreInvoices) {
+      const { data: pageInvoices } = await supabase
+        .from("invoice")
+        .select("invoice_number")
+        .neq("invoice_batch_id", batchId)
+        .like("invoice_number", `${prefix}-%`)
+        .range(invPage * invPageSize, (invPage + 1) * invPageSize - 1);
+
+      if (pageInvoices && pageInvoices.length > 0) {
+        for (const row of pageInvoices) {
+          const num = row.invoice_number;
+          if (num) {
+            existingNumberSet.add(num);
+            const parts = num.split("-");
+            const seq = parseInt(parts[parts.length - 1], 10);
+            if (!isNaN(seq) && seq > highestSeqInDb) {
+              highestSeqInDb = seq;
+            }
+          }
         }
+        if (pageInvoices.length < invPageSize) {
+          hasMoreInvoices = false;
+        } else {
+          invPage++;
+        }
+      } else {
+        hasMoreInvoices = false;
       }
     }
 
