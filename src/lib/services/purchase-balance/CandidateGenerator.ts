@@ -15,10 +15,6 @@ import {
 
 const WEIGHT_UOMS = new Set(["KG", "KGS", "KILOGRAM", "KILOGRAMS"]);
 const TONNAGE_UOMS = new Set(["MT", "TON", "TONNE", "TONNES"]);
-const WHOLESALE_WEIGHT_BASES = [
-  10, 12, 15, 18, 20, 25, 30, 35, 40, 45, 50, 60, 75, 80, 100, 125, 150, 200,
-  250, 300, 400, 500, 750, 1000,
-];
 
 export class CandidateGenerator {
   /**
@@ -34,23 +30,12 @@ export class CandidateGenerator {
     const allStepCandidates: number[] = [];
 
     if (WEIGHT_UOMS.has(uom)) {
-      if (constraint.quantityMax < 10) {
-        const minQ = Math.ceil(constraint.quantityMin * 4) / 4;
-        const maxQ = Math.floor(constraint.quantityMax * 4) / 4;
-        for (let q = minQ; q <= maxQ + MONEY_TOLERANCE; q += 0.25) {
-          const val = roundMoney(q);
-          if (this.isCommercialQuantity(val, constraint)) {
-            allStepCandidates.push(val);
-          }
-        }
-      } else {
-        for (const base of WHOLESALE_WEIGHT_BASES) {
-          for (const variant of [base, base + 0.25, base + 0.5, base + 0.75]) {
-            const val = roundMoney(variant);
-            if (this.isCommercialQuantity(val, constraint)) {
-              allStepCandidates.push(val);
-            }
-          }
+      const minQ = Math.ceil(constraint.quantityMin * 4) / 4;
+      const maxQ = Math.floor(constraint.quantityMax * 4) / 4;
+      for (let q = minQ; q <= maxQ + MONEY_TOLERANCE; q += 0.25) {
+        const val = roundMoney(q);
+        if (this.isCommercialQuantity(val, constraint)) {
+          allStepCandidates.push(val);
         }
       }
     } else if (TONNAGE_UOMS.has(uom)) {
@@ -319,17 +304,12 @@ export class CandidateGenerator {
 
     const uom = (constraint.unitOfMeasure || "").trim().toUpperCase();
 
+    // Weight quantities just need to be a valid quarter-kg increment within
+    // range — not restricted to the curated wholesale base list, so manual
+    // edits (and rebalancing) can use any reasonable quantity like 65kg.
     if (WEIGHT_UOMS.has(uom)) {
-      if (constraint.quantityMax < 10) {
-        return (
-          Math.abs(quantity * 4 - Math.round(quantity * 4)) < MONEY_TOLERANCE
-        );
-      }
-      if (quantity < 10 - MONEY_TOLERANCE) return false;
-      return WHOLESALE_WEIGHT_BASES.some((base) =>
-        [base, base + 0.25, base + 0.5, base + 0.75].some(
-          (variant) => Math.abs(variant - quantity) < MONEY_TOLERANCE,
-        ),
+      return (
+        Math.abs(quantity * 4 - Math.round(quantity * 4)) < MONEY_TOLERANCE
       );
     }
 

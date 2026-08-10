@@ -6,6 +6,11 @@ import {
 import { SalesCandidateGenerator } from "./SalesCandidateGenerator";
 import { SalesCandidateScorer } from "./SalesCandidateScorer";
 import {
+  buildProductTemplates,
+  diffEditedProductIds,
+  SalesAllocationTracker,
+} from "./SalesLineCapacity";
+import {
   roundMoney,
   SALES_BALANCE_LIMITS,
   SalesBalanceContext,
@@ -15,12 +20,95 @@ import {
   SalesSolverResult,
 } from "./types";
 
+// `chosen` links back to the parent state instead of eagerly spreading a new
+// array on every push (`[...current.chosenInvoices, nextInvoice]`) — that
+// copy is O(invoiceIndex) and ran on every single state expansion, which
+// made the whole search scale quadratically with the number of balancing
+// invoices in a batch. The real array is built only when a state actually
+// reaches the terminal depth and needs to be reported as a plan.
+type ChosenChainNode = {
+  invoice: SalesInvoice;
+  parent: ChosenChainNode | null;
+};
+
+function buildChosenInvoices(chain: ChosenChainNode | null): SalesInvoice[] {
+  const invoices: SalesInvoice[] = [];
+  for (let node = chain; node; node = node.parent) {
+    invoices.push(node.invoice);
+  }
+  invoices.reverse();
+  return invoices;
+}
+
 interface SearchState {
   invoiceIndex: number;
   productTotals: Map<string, number>;
+  tracker: SalesAllocationTracker;
   accumulatedAmount: number;
   accumulatedCost: number;
-  chosenInvoices: SalesInvoice[];
+  chosenChain: ChosenChainNode | null;
+}
+
+// Sorting the entire frontier array on every single pop (as this search
+// used to) costs O(n log n) per pop — with up to maxSearchStates (20,000)
+// pops, that is effectively O(n^2 log n) overall. A binary min-heap keeps
+// both push and pop at O(log n).
+class SearchQueue {
+  private heap: SearchState[] = [];
+
+  get length(): number {
+    return this.heap.length;
+  }
+
+  push(state: SearchState): void {
+    this.heap.push(state);
+    let i = this.heap.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (this.compare(this.heap[i], this.heap[parent]) < 0) {
+        [this.heap[i], this.heap[parent]] = [this.heap[parent], this.heap[i]];
+        i = parent;
+      } else {
+        break;
+      }
+    }
+  }
+
+  pop(): SearchState | undefined {
+    if (this.heap.length === 0) return undefined;
+    const top = this.heap[0];
+    const last = this.heap.pop() as SearchState;
+    if (this.heap.length > 0) {
+      this.heap[0] = last;
+      let i = 0;
+      const n = this.heap.length;
+      for (;;) {
+        const left = 2 * i + 1;
+        const right = 2 * i + 2;
+        let smallest = i;
+        if (left < n && this.compare(this.heap[left], this.heap[smallest]) < 0)
+          smallest = left;
+        if (
+          right < n &&
+          this.compare(this.heap[right], this.heap[smallest]) < 0
+        )
+          smallest = right;
+        if (smallest === i) break;
+        [this.heap[i], this.heap[smallest]] = [
+          this.heap[smallest],
+          this.heap[i],
+        ];
+        i = smallest;
+      }
+    }
+    return top;
+  }
+
+  // Pop state with deepest invoiceIndex first, then lowest accumulated cost.
+  private compare(a: SearchState, b: SearchState): number {
+    if (a.invoiceIndex !== b.invoiceIndex) return b.invoiceIndex - a.invoiceIndex;
+    return a.accumulatedCost - b.accumulatedCost;
+  }
 }
 
 export class SalesCandidateSolver {
@@ -34,42 +122,25 @@ export class SalesCandidateSolver {
     const startTime = Date.now();
 
     // 1. Determine edited products (product IDs whose quantity, rate, or amount changed)
-    const origEditedInv = context.invoices.find((i) => i.id === editedInvoice.id);
-    const editedProductIds = new Set<string>();
+    const origEditedInv = context.invoices.find(
+      (i) => i.id === editedInvoice.id,
+    );
+    const editedProductIds = diffEditedProductIds(
+      origEditedInv?.products,
+      editedInvoice.products,
+    );
 
-    if (origEditedInv) {
-      for (const p of editedInvoice.products) {
-        const origLine = origEditedInv.products.find(
-          (lp) => lp.product_id === p.product_id,
-        );
-        if (!origLine) {
-          editedProductIds.add(p.product_id);
-        } else if (
-          Math.abs(p.quantity - origLine.quantity) > 0.001 ||
-          Math.abs(p.rate - origLine.rate) > 0.001 ||
-          Math.abs(p.amount - origLine.amount) > 0.01
-        ) {
-          editedProductIds.add(p.product_id);
-        }
-      }
-      for (const origP of origEditedInv.products) {
-        if (!editedInvoice.products.some((p) => p.product_id === origP.product_id)) {
-          editedProductIds.add(origP.product_id);
-        }
-      }
-    } else {
-      for (const p of editedInvoice.products) {
-        editedProductIds.add(p.product_id);
-      }
-    }
-
-    // 2. Build balancingInvoices using ONLY invoices containing at least one edited product
+    // 2. Build balancingInvoices from ANY invoice in the batch — balancing
+    // is not restricted to invoices that already carry the edited product;
+    // an invoice with no existing line for it is still eligible to have
+    // that product added as a brand-new line (see productTemplates below).
+    // Only exclusion: the edited invoice itself, and any invoice belonging
+    // to a major customer (never touched by rebalancing).
     const balancingInvoices = context.invoices
       .filter((inv) => {
         if (inv.id === editedInvoice.id) return false;
-        if (editedProductIds.size > 0) {
-          return inv.products.some((p) => editedProductIds.has(p.product_id));
-        }
+        const partyId = inv.products?.[0]?.customer_id;
+        if (partyId && context.majorCustomerIds.has(partyId)) return false;
         return true;
       })
       .sort((a, b) => {
@@ -94,13 +165,36 @@ export class SalesCandidateSolver {
       editedProductsList: Array.from(editedProductIds),
     });
 
-    // 2. Compute target balancing total amount & target product quantities
+    // 2. Compute target balancing total amount & target product quantities.
+    // `balancingInvoices` is only the small subset of the batch that
+    // actually holds an edited product — every other invoice in the batch
+    // is untouched and contributes a fixed, unchanging amount to
+    // context.batchTotal. The subset must therefore sum to whatever it
+    // originally summed to, adjusted by however much the edited invoice's
+    // own total changed — NOT to "the whole batch total minus the edited
+    // invoice," which conflates the untouched invoices' total in as if it
+    // still needed to be accounted for here.
+    const originalEditedTotal = origEditedInv ? origEditedInv.total_amount : 0;
+    const originalSubsetTotal = balancingInvoices.reduce(
+      (sum, inv) => sum + inv.total_amount,
+      0,
+    );
     const targetBalancingAmount = roundMoney(
-      context.batchTotal - editedInvoice.total_amount,
+      originalEditedTotal + originalSubsetTotal - editedInvoice.total_amount,
     );
 
+    // Only edited products need a balancing target at all — every other
+    // product is locked to its original quantity by generateInvoiceLineCandidates
+    // and therefore trivially conserved. Scoring ALL batch products here
+    // used to compare each one's batch-WIDE total against a sum accumulated
+    // only across `balancingInvoices` (the invoices actually holding an
+    // edited product, a small subset of the whole batch) — a scope
+    // mismatch that made nearly every product look like it had a huge
+    // "delta" even though nothing about it had changed, and made an exact
+    // match essentially unreachable.
     const targetProductTotals = new Map<string, number>();
-    for (const [pid, origTotal] of context.originalProductTotals.entries()) {
+    for (const pid of editedProductIds) {
+      const origTotal = context.originalProductTotals.get(pid) || 0;
       const editedQty =
         editedInvoice.products.find((p) => p.product_id === pid)?.quantity || 0;
       targetProductTotals.set(
@@ -110,8 +204,11 @@ export class SalesCandidateSolver {
     }
 
     if (balancingInvoices.length === 0) {
+      // No other invoice to redistribute money with — the only way the
+      // batch total can stay exact is if the edited invoice's own total
+      // didn't actually change at all.
       if (
-        Math.abs(editedInvoice.total_amount - context.batchTotal) < 0.01 &&
+        Math.abs(editedInvoice.total_amount - originalEditedTotal) < 0.01 &&
         Array.from(targetProductTotals.values()).every(
           (q) => Math.abs(q) < 0.001,
         )
@@ -133,10 +230,17 @@ export class SalesCandidateSolver {
       };
     }
 
-    const affectedProductIds = new Set<string>();
-    for (const [pid] of context.originalProductTotals.entries()) {
-      affectedProductIds.add(pid);
-    }
+    // Only the products actually edited may vary at all — reusing
+    // editedProductIds here (computed above) rather than every product in
+    // the batch is what keeps redistribution same-product-only AND keeps
+    // the search space tractable. Locking every unaffected product to its
+    // original line was the whole point of passing affectedProductIds into
+    // generateInvoiceLineCandidates below; populating it with ALL products
+    // (as this used to do) made every single line on every balancing
+    // invoice free to vary, which both violates "never touch a different
+    // product" and blows the search space up so badly that batches with
+    // many invoices never converge before hitting maxSearchStates.
+    const affectedProductIds = editedProductIds;
 
     const originalTotalBalancingMap = new Map<string, number>();
     for (const inv of balancingInvoices) {
@@ -151,6 +255,42 @@ export class SalesCandidateSolver {
         }
       }
     }
+
+    // Per-line candidate generation only caps a SINGLE line against the
+    // date/product's shared stock ceiling — it has no visibility into other
+    // balancing invoices on the same date also being free to grow the same
+    // product. Two invoices can each individually stay under the ceiling
+    // while their combined total exceeds it, which previously only got
+    // caught (rejecting the whole plan) by SalesFinalValidator's Rule 8,
+    // after the search had already committed to that combination. One
+    // shared tracker (also used by SalesCandidateGenerator's candidate
+    // ceilings, SalesResidualRepair, and SalesNewInvoiceCreator) records a
+    // running per-date/product total as invoices are chosen during the
+    // search itself, so an over-allocating combination is never selected.
+    const touchedOriginalInvoices = origEditedInv
+      ? [origEditedInv, ...balancingInvoices]
+      : balancingInvoices;
+    const rootTracker = SalesAllocationTracker.build(
+      context,
+      touchedOriginalInvoices,
+      editedProductIds,
+    );
+    for (const p of editedInvoice.products) {
+      if (editedProductIds.has(p.product_id)) {
+        rootTracker.record(editedInvoice.invoice_date, p.product_id, p.quantity);
+      }
+    }
+
+    // Template lines for synthesizing a brand-new product line on a
+    // balancing invoice that doesn't currently carry an edited product at
+    // all — needed now that balancingInvoices is the whole batch, not just
+    // invoices that already hold the product.
+    const productTemplates = buildProductTemplates(
+      context,
+      editedInvoice,
+      origEditedInv,
+      editedProductIds,
+    );
 
     // 3. Pre-generate invoice line candidates for each balancing invoice
     const candidatesPerInvoice: {
@@ -167,10 +307,12 @@ export class SalesCandidateSolver {
         SalesCandidateGenerator.generateInvoiceLineCandidates(
           inv,
           context.constraints,
-          context.availableStockMap,
+          rootTracker,
           targetProductTotals,
           affectedProductIds,
           originalTotalBalancingMap,
+          context.thresholdMax,
+          productTemplates,
         );
 
       // Cartesian product of line candidates for this invoice
@@ -206,15 +348,15 @@ export class SalesCandidateSolver {
       initialProductTotals.set(pid, 0);
     }
 
-    const initialQueue: SearchState[] = [
-      {
-        invoiceIndex: 0,
-        productTotals: initialProductTotals,
-        accumulatedAmount: 0,
-        accumulatedCost: 0,
-        chosenInvoices: [],
-      },
-    ];
+    const initialQueue = new SearchQueue();
+    initialQueue.push({
+      invoiceIndex: 0,
+      productTotals: initialProductTotals,
+      tracker: rootTracker,
+      accumulatedAmount: 0,
+      accumulatedCost: 0,
+      chosenChain: null,
+    });
 
     let closestPlan: SalesSolverPlan | null = null;
     let minStateDiff = Number.POSITIVE_INFINITY;
@@ -249,13 +391,7 @@ export class SalesCandidateSolver {
       }
 
       // Pop state with deepest index and lowest accumulated cost
-      initialQueue.sort((a, b) => {
-        if (a.invoiceIndex !== b.invoiceIndex) {
-          return b.invoiceIndex - a.invoiceIndex;
-        }
-        return a.accumulatedCost - b.accumulatedCost;
-      });
-      const current = initialQueue.shift()!;
+      const current = initialQueue.pop() as SearchState;
 
       if (current.invoiceIndex === balancingInvoices.length) {
         completeStatesReached++;
@@ -278,11 +414,22 @@ export class SalesCandidateSolver {
           }
         }
 
-        const stateDiff =
-          Array.from(productDeltas.values()).reduce(
-            (sum, d) => sum + Math.abs(d),
-            0,
-          ) + amountDiff;
+        // Quantity conservation is a hard invariant with no fallback (money
+        // residuals get one more chance via the rate-nudge safety net
+        // downstream; a real KG conservation gap does not). Summing raw KG
+        // and raw ₹ together used to let the search prefer a candidate that
+        // closed money tightly while letting quantity drift by hundreds of
+        // KG, since rupee figures are numerically much larger than kilogram
+        // figures — the "closest" plan was optimizing the wrong thing.
+        // Weighting KG heavily makes any nonzero product-quantity diff
+        // dominate the score over a realistic money residual, so "closest"
+        // actually means closest to true product conservation first.
+        const KG_DOMINANCE_WEIGHT = 100000;
+        const productDiffSum = Array.from(productDeltas.values()).reduce(
+          (sum, d) => sum + Math.abs(d),
+          0,
+        );
+        const stateDiff = productDiffSum * KG_DOMINANCE_WEIGHT + amountDiff;
 
         console.log(
           `[SalesCandidateSolver] Reached Complete State #${completeStatesReached} (Explored #${statesExplored}):`,
@@ -296,10 +443,10 @@ export class SalesCandidateSolver {
               !isAmountMatched && !isProductsMatched
                 ? `Amount diff (₹${amountDiff}) & Product diffs non-zero`
                 : !isAmountMatched
-                ? `Amount diff (₹${amountDiff}) non-zero`
-                : !isProductsMatched
-                ? `Product diffs non-zero`
-                : "None (Exact Match)",
+                  ? `Amount diff (₹${amountDiff}) non-zero`
+                  : !isProductsMatched
+                    ? `Product diffs non-zero`
+                    : "None (Exact Match)",
           },
         );
 
@@ -307,7 +454,7 @@ export class SalesCandidateSolver {
           minStateDiff = stateDiff;
           closestPlan = {
             editedInvoice,
-            balancingInvoices: current.chosenInvoices,
+            balancingInvoices: buildChosenInvoices(current.chosenChain),
             totalCost: current.accumulatedCost,
             batchDelta,
             productDeltas,
@@ -320,7 +467,7 @@ export class SalesCandidateSolver {
         if (isAmountMatched && isProductsMatched) {
           bestPlan = {
             editedInvoice,
-            balancingInvoices: current.chosenInvoices,
+            balancingInvoices: buildChosenInvoices(current.chosenChain),
             totalCost: current.accumulatedCost,
             batchDelta: 0,
             productDeltas,
@@ -348,7 +495,26 @@ export class SalesCandidateSolver {
         continue;
       }
 
-      for (const cand of candidates) {
+      candidateLoop: for (const cand of candidates) {
+        // Reject this candidate outright if it would push the running
+        // per-date/product total (across every invoice the search has
+        // chosen so far, plus the edited invoice's own fixed contribution)
+        // past the real shared ceiling for that date/product.
+        const nextTracker = current.tracker.fork();
+        for (const p of cand.products) {
+          if (!editedProductIds.has(p.product_id)) continue;
+          const ceiling = nextTracker.ceilingFor(
+            invoice.invoice_date,
+            p.product_id,
+          );
+          if (ceiling === Number.POSITIVE_INFINITY) continue;
+          const used = nextTracker.usedFor(invoice.invoice_date, p.product_id);
+          if (roundToQuarterIncrement(used + p.quantity) > ceiling + 0.01) {
+            continue candidateLoop;
+          }
+          nextTracker.record(invoice.invoice_date, p.product_id, p.quantity);
+        }
+
         const nextInvoice: SalesInvoice = {
           ...invoice,
           products: cand.products,
@@ -367,11 +533,12 @@ export class SalesCandidateSolver {
         initialQueue.push({
           invoiceIndex: current.invoiceIndex + 1,
           productTotals: nextProductTotals,
+          tracker: nextTracker,
           accumulatedAmount: roundMoney(
             current.accumulatedAmount + cand.totalAmount,
           ),
           accumulatedCost: current.accumulatedCost + cand.cost,
-          chosenInvoices: [...current.chosenInvoices, nextInvoice],
+          chosenChain: { invoice: nextInvoice, parent: current.chosenChain },
         });
       }
     }
@@ -424,41 +591,79 @@ export class SalesCandidateSolver {
     targetProductTotals?: Map<string, number>,
     balancingInvoiceCount = 1,
   ): { products: SalesLine[]; totalAmount: number; cost: number }[] {
+    // Combine per-line candidates using bounded beam search instead of a
+    // full cartesian product. With up to maxLineCandidates per line and
+    // maxInvoiceLines lines on an invoice, an exhaustive cartesian product
+    // can reach billions of combinations and exhaust process memory — this
+    // caps memory to O(lines * BEAM_WIDTH * candidatesPerLine). The true
+    // per-invoice cost (SalesCandidateScorer) requires the complete active
+    // line set, so during the beam we prune using the cheap, additive
+    // |delta| sum as a proxy, then compute the real cost only for the
+    // bounded set of survivors.
+    // Only a small, bounded slice of these survivors is ever used downstream
+    // (generateInvoiceCombinations further dedupes/sorts to top ~64+64), so
+    // a wide beam buys diversity nothing downstream uses — kept small to
+    // bound cost across many balancing invoices in one batch.
+    const BEAM_WIDTH = 48;
+    // Beam entries link to their parent instead of copying the whole
+    // `lines` array on every push (`[...state.lines, cand.line]` costs
+    // O(lineIndex) per candidate) — that made this step scale quadratically
+    // with line count and, multiplied across every balancing invoice in a
+    // batch, was enough to blow the solver's time budget on batches with
+    // many invoices. Full arrays are reconstructed once, for survivors only.
+    type BeamNode = {
+      line: SalesLine | null;
+      parent: BeamNode | null;
+      deltaCostSum: number;
+    };
+    const root: BeamNode = { line: null, parent: null, deltaCostSum: 0 };
+    let beam: BeamNode[] = [root];
+
+    for (const { candidates } of lineCandidates) {
+      const next: BeamNode[] = [];
+      for (const state of beam) {
+        for (const cand of candidates) {
+          next.push({
+            line: cand.line,
+            parent: state,
+            deltaCostSum: state.deltaCostSum + Math.abs(cand.delta),
+          });
+        }
+      }
+      next.sort((a, b) => a.deltaCostSum - b.deltaCostSum);
+      beam = next.slice(0, BEAM_WIDTH);
+    }
+
     const results: {
       products: SalesLine[];
       totalAmount: number;
       cost: number;
     }[] = [];
 
-    const generateCombo = (lineIndex: number, currentLines: SalesLine[]) => {
-      if (lineIndex === lineCandidates.length) {
-        const activeLines = currentLines.filter((l) => l.quantity > 0);
-        if (activeLines.length === 0) return; // Do not generate empty invoice candidates
-
-        const totalAmount = roundMoney(
-          activeLines.reduce((sum, l) => sum + l.amount, 0),
-        );
-        const cost = SalesCandidateScorer.scoreInvoiceCandidate(
-          invoice.products,
-          activeLines,
-          context.constraints,
-        );
-
-        results.push({
-          products: activeLines,
-          totalAmount,
-          cost,
-        });
-        return;
+    for (const leaf of beam) {
+      const lines: SalesLine[] = [];
+      for (let node: BeamNode | null = leaf; node && node.line; node = node.parent) {
+        lines.push(node.line);
       }
+      lines.reverse();
+      const activeLines = lines.filter((l) => l.quantity > 0);
+      if (activeLines.length === 0) continue; // Do not generate empty invoice candidates
 
-      const { candidates } = lineCandidates[lineIndex];
-      for (const cand of candidates) {
-        generateCombo(lineIndex + 1, [...currentLines, cand.line]);
-      }
-    };
+      const totalAmount = roundMoney(
+        activeLines.reduce((sum, l) => sum + l.amount, 0),
+      );
+      const cost = SalesCandidateScorer.scoreInvoiceCandidate(
+        invoice.products,
+        activeLines,
+        context.constraints,
+      );
 
-    generateCombo(0, []);
+      results.push({
+        products: activeLines,
+        totalAmount,
+        cost,
+      });
+    }
 
     const uniqueCombos = new Map<
       string,

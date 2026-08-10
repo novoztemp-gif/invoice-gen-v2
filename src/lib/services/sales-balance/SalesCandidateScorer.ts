@@ -74,9 +74,16 @@ export class SalesCandidateScorer {
     let totalCost = 0;
     let hasAnyLineChanged = false;
 
-    for (let i = 0; i < originalInvoiceProducts.length; i++) {
-      const orig = originalInvoiceProducts[i];
-      const cand = candidateInvoiceProducts[i] || orig;
+    // Match by product_id, not array index — a candidate that drops a
+    // line's quantity to 0 (removed from the invoice) shrinks the
+    // candidate array, which would otherwise shift every later line's
+    // index and compare the wrong pairs of lines against each other.
+    const candidateByProductId = new Map(
+      candidateInvoiceProducts.map((p) => [p.product_id, p]),
+    );
+
+    for (const orig of originalInvoiceProducts) {
+      const cand = candidateByProductId.get(orig.product_id) || orig;
       const constraint = constraints.get(orig.product_id);
 
       const lineCost = this.scoreLineCandidate(orig, cand, constraint);

@@ -497,7 +497,7 @@ export async function GET(request: NextRequest) {
     const sheet2 = workbook.addWorksheet("Invoice Summary");
     configurePage(sheet2, "3:3");
 
-    sheet2.mergeCells("A1:J1");
+    sheet2.mergeCells("A1:K1");
     const s2Title = sheet2.getCell("A1");
     s2Title.value = "INVOICE SUMMARY";
     s2Title.font = {
@@ -524,13 +524,14 @@ export async function GET(request: NextRequest) {
       "Customer / Supplier",
       "GSTIN",
       "Number Of Products",
+      "Products",
       "Invoice Amount",
       "Transport Mode",
       "Vehicle Number",
       "Status",
     ]);
     headerRow2.height = 25;
-    for (let c = 1; c <= 10; c++) {
+    for (let c = 1; c <= 11; c++) {
       styleHeaderCell(headerRow2.getCell(c));
     }
 
@@ -549,6 +550,9 @@ export async function GET(request: NextRequest) {
         company.company_name || company.supplier_name || "Unknown Company";
       const gstin = company.gstin || "N/A";
       const isOdd = index % 2 === 1;
+      const productsList = (inv.products || [])
+        .map((p: any) => `${p.product_name}${p.hsn_code ? ` - ${p.hsn_code}` : ""}`)
+        .join(", ");
 
       const row = sheet2.addRow([
         index + 1,
@@ -557,6 +561,7 @@ export async function GET(request: NextRequest) {
         companyName,
         gstin,
         inv.products?.length || 0,
+        productsList,
         Number(inv.total_amount || 0),
         inv.transport_mode || batch.transport_mode || "In hand Delivery",
         inv.vehicle_number || batch.vehicle_number || "NA",
@@ -570,10 +575,11 @@ export async function GET(request: NextRequest) {
       styleDataCell(row.getCell(4), isOdd, "left");
       styleDataCell(row.getCell(5), isOdd, "center");
       styleDataCell(row.getCell(6), isOdd, "right");
-      styleDataCell(row.getCell(7), isOdd, "right", "₹#,##0.00");
-      styleDataCell(row.getCell(8), isOdd, "left");
-      styleDataCell(row.getCell(9), isOdd, "center");
+      styleDataCell(row.getCell(7), isOdd, "left");
+      styleDataCell(row.getCell(8), isOdd, "right", "₹#,##0.00");
+      styleDataCell(row.getCell(9), isOdd, "left");
       styleDataCell(row.getCell(10), isOdd, "center");
+      styleDataCell(row.getCell(11), isOdd, "center");
     });
 
     const totalsRowIndex2 = invoices.length + 4;
@@ -584,24 +590,25 @@ export async function GET(request: NextRequest) {
       "",
       "",
       "",
-      { formula: `=SUM(G4:G${totalsRowIndex2 - 1})` },
+      "",
+      { formula: `=SUM(H4:H${totalsRowIndex2 - 1})` },
       "",
       "",
       "",
     ]);
     totalsRow2.height = 22;
-    for (let c = 1; c <= 10; c++) {
+    for (let c = 1; c <= 11; c++) {
       styleTotalCell(
         totalsRow2.getCell(c),
-        c === 7 ? "right" : "center",
-        c === 7 ? "₹#,##0.00" : undefined,
+        c === 8 ? "right" : "center",
+        c === 8 ? "₹#,##0.00" : undefined,
       );
     }
-    sheet2.mergeCells(`A${totalsRowIndex2}:F${totalsRowIndex2}`);
-    for (let c = 2; c <= 6; c++) totalsRow2.getCell(c).value = "";
+    sheet2.mergeCells(`A${totalsRowIndex2}:G${totalsRowIndex2}`);
+    for (let c = 2; c <= 7; c++) totalsRow2.getCell(c).value = "";
     sheet2.getCell(`A${totalsRowIndex2}`).value = "TOTAL";
 
-    sheet2.autoFilter = { from: "A3", to: "J3" };
+    sheet2.autoFilter = { from: "A3", to: "K3" };
     sheet2.views = [{ state: "frozen", ySplit: 3 }];
     autoFitWidths(sheet2);
 

@@ -44,12 +44,16 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ message: "Batch not found" }, { status: 404 });
   }
 
-  // 3. Fetch receiving customer
-  const customerId =
-    inv.products?.[0]?.customer_id || batch.receiving_company_id;
+  // 3. Fetch the counterparty: a supplier for PURCHASE invoices, a receiving
+  // company for SALES invoices. Purchase invoice product lines store the
+  // supplier's id in both `customer_id` and `supplier_id`.
+  const isPurchaseBatch = batch.batch_type === "PURCHASE";
+  const customerId = isPurchaseBatch
+    ? batch.supplier_id || inv.products?.[0]?.customer_id
+    : inv.products?.[0]?.customer_id || batch.receiving_company_id;
 
   const { data: customer } = await supabase
-    .from("receiving_companies")
+    .from(isPurchaseBatch ? "suppliers" : "receiving_companies")
     .select("*")
     .eq("id", customerId)
     .single();
@@ -187,7 +191,7 @@ export async function GET(request: NextRequest) {
 
     ws.mergeCells("A2:H2");
     const cellTitle = ws.getCell("A2");
-    cellTitle.value = "PURCHASE INVOICE";
+    cellTitle.value = "CASH VOUCHER";
     cellTitle.font = { bold: true, size: 18, underline: true };
     cellTitle.alignment = { horizontal: "center", vertical: "middle" };
 

@@ -2,16 +2,20 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
-import { MAX_INVOICES_PER_BATCH } from "@/lib/constants/invoice";
-import type { ValidationGuidanceData } from "@/components/ValidationGuidanceModal";
 import type { CategorySplitItem } from "@/components/CategorySplitSection";
+import type { ValidationGuidanceData } from "@/components/ValidationGuidanceModal";
+import { MAX_INVOICES_PER_BATCH } from "@/lib/constants/invoice";
+import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import {
   InvoiceNumberingService,
   type InvoiceSequencePreview,
   type InvoiceType,
 } from "@/lib/services/InvoiceNumberingService";
-import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
+import { createClient } from "@/lib/supabase/client";
+import {
+  enforceMinimumInvoiceAmount,
+  reconcileInvoicesToTargets,
+} from "@/lib/utils/reconcile-invoice-quantities";
 
 function formatDateForStorage(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -80,6 +84,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     { category_name: "Fruits", percentage: 30, amount: 0 },
   ]);
   const [errorPopup, setErrorPopup] = useState<string | null>(null);
+  const [errorField, setErrorField] = useState<string | null>(null);
   const [validationGuidance, setValidationGuidance] =
     useState<ValidationGuidanceData | null>(null);
 
@@ -198,14 +203,46 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       selectedIssuingCompany.id,
       fyString,
       invType,
-      formData.previousEndingSequenceNumber,
     ).then((res) => setSequencePreview(res));
   }, [
     selectedIssuingCompany?.id,
     formData.financialYearStart,
     formData.financialYearEnd,
-    formData.previousEndingSequenceNumber,
     batchType,
+  ]);
+
+  // Clear the red-border error highlight on a field as soon as the user
+  // fixes it, without waiting for another submit attempt.
+  useEffect(() => {
+    if (!errorField) return;
+    const isNowValid: Record<string, boolean> = {
+      "issuing-company": !!selectedIssuingCompany,
+      customers: selectedCustomers.length > 0 || majorCustomers.length > 0,
+      products: selectedProducts.length > 0,
+      "stock-source": !!formData.stockSourceBatchId,
+      "transport-mode": !!formData.transportMode,
+      "invoice-date-from": !!formData.invoiceDateFrom,
+      "invoice-date-to": !!formData.invoiceDateTo,
+      "minimum-invoice-amount": !!formData.minimumInvoiceAmount,
+      "maximum-invoice-amount": !!formData.maximumInvoiceAmount,
+      "total-amount": !!formData.totalAmount,
+    };
+    if (isNowValid[errorField]) {
+      setErrorField(null);
+    }
+  }, [
+    errorField,
+    selectedIssuingCompany,
+    selectedCustomers,
+    majorCustomers,
+    selectedProducts,
+    formData.stockSourceBatchId,
+    formData.transportMode,
+    formData.invoiceDateFrom,
+    formData.invoiceDateTo,
+    formData.minimumInvoiceAmount,
+    formData.maximumInvoiceAmount,
+    formData.totalAmount,
   ]);
 
   const handleIssuingCompanyChange = (companyId: string) => {
@@ -221,26 +258,46 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
   };
 
   const handleAddMajorCustomer = () => {
-    console.log("[Major Supplier/Customer] State before validation:", tempMajorCustomer);
-    console.log("[Major Supplier/Customer] Raw input value (amount):", tempMajorCustomer.amount);
+    console.log(
+      "[Major Supplier/Customer] State before validation:",
+      tempMajorCustomer,
+    );
+    console.log(
+      "[Major Supplier/Customer] Raw input value (amount):",
+      tempMajorCustomer.amount,
+    );
     if (!tempMajorCustomer.customer_id) return;
     const amt = parseFloat(tempMajorCustomer.amount);
     console.log("[Major Supplier/Customer] Parsed value (amount):", amt);
     if (!tempMajorCustomer.amount || isNaN(amt) || amt <= 0) {
-      console.log("[Major Supplier/Customer] Validation failed: Amount must be greater than 0");
+      console.log(
+        "[Major Supplier/Customer] Validation failed: Amount must be greater than 0",
+      );
       setErrorPopup("Amount must be greater than 0");
       return;
     }
     const invCount = parseInt(tempMajorCustomer.invoice_count, 10);
-    console.log("[Major Supplier/Customer] Raw input value (invoice_count):", tempMajorCustomer.invoice_count);
-    console.log("[Major Supplier/Customer] Parsed value (invoice_count):", invCount);
+    console.log(
+      "[Major Supplier/Customer] Raw input value (invoice_count):",
+      tempMajorCustomer.invoice_count,
+    );
+    console.log(
+      "[Major Supplier/Customer] Parsed value (invoice_count):",
+      invCount,
+    );
     if (!tempMajorCustomer.invoice_count || isNaN(invCount) || invCount < 1) {
       setErrorPopup("Invoices must be at least 1");
       return;
     }
     const maxAmt = parseFloat(tempMajorCustomer.max_invoice_amount);
-    console.log("[Major Supplier/Customer] Raw input value (max_invoice_amount):", tempMajorCustomer.max_invoice_amount);
-    console.log("[Major Supplier/Customer] Parsed value (max_invoice_amount):", maxAmt);
+    console.log(
+      "[Major Supplier/Customer] Raw input value (max_invoice_amount):",
+      tempMajorCustomer.max_invoice_amount,
+    );
+    console.log(
+      "[Major Supplier/Customer] Parsed value (max_invoice_amount):",
+      maxAmt,
+    );
     if (!tempMajorCustomer.max_invoice_amount || isNaN(maxAmt) || maxAmt <= 0) {
       setErrorPopup(
         "Maximum amount per invoice is required and must be greater than 0",
@@ -256,7 +313,10 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     }
 
     const addedObj = { ...tempMajorCustomer };
-    console.log("[Major Supplier/Customer] Object passed to Add handler:", addedObj);
+    console.log(
+      "[Major Supplier/Customer] Object passed to Add handler:",
+      addedObj,
+    );
     setMajorCustomers([...majorCustomers, addedObj]);
     setSelectedCustomers(
       selectedCustomers.filter((id) => id !== tempMajorCustomer.customer_id),
@@ -430,7 +490,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         console.log("[FLOW 1] Starting Sales Dry-Run validation process...");
         setIsValidating(true);
         try {
-          console.log("[FLOW 2] Sending POST to /api/generate-sales-dry-run...");
+          console.log(
+            "[FLOW 2] Sending POST to /api/generate-sales-dry-run...",
+          );
           const res = await fetch("/api/generate-sales-dry-run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -464,7 +526,8 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
               totalAmount: formData.totalAmount,
               financialYearStart: formData.financialYearStart,
               financialYearEnd: formData.financialYearEnd,
-              previousEndingSequenceNumber: formData.previousEndingSequenceNumber,
+              previousEndingSequenceNumber:
+                formData.previousEndingSequenceNumber,
               products: selectedProducts.map((item) => ({
                 product_id: item.product.id,
                 product_name: item.product.product_name,
@@ -497,12 +560,20 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           }
 
           if (!res.ok) {
-            console.error("[FLOW 5] Dry-run failed with error:", result?.message);
+            console.error(
+              "[FLOW 5] Dry-run failed with error:",
+              result?.message,
+            );
             setErrorPopup(result?.message || "Failed to run sales dry-run.");
             return;
           }
 
-          console.log("[FLOW 6] Dry-run succeeded. Invoices count:", result.invoices?.length, "Review rows count:", result.reviewRows?.length);
+          console.log(
+            "[FLOW 6] Dry-run succeeded. Invoices count:",
+            result.invoices?.length,
+            "Review rows count:",
+            result.reviewRows?.length,
+          );
 
           const invalidRow = (result.reviewRows || []).find(
             (row: any) => row.remaining_stock > 15 || row.remaining_stock < 0,
@@ -614,7 +685,8 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       console.log("PURCHASE BATCH CREATION - STEP 2 & 3 (Before Insert)");
       console.log("=========================");
       console.log({
-        requestBodyPreviousEndingSequence: formData.previousEndingSequenceNumber,
+        requestBodyPreviousEndingSequence:
+          formData.previousEndingSequenceNumber,
         payloadPreviousEndingSequence: payloadToInsert.previous_ending_sequence,
         fullPayloadToInsert: payloadToInsert,
       });
@@ -660,8 +732,11 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
   };
 
   const handleSubmit = () => {
+    setErrorField(null);
+
     if (!selectedIssuingCompany) {
       setErrorPopup("Please select an issuing company!");
+      setErrorField("issuing-company");
       return;
     }
 
@@ -669,11 +744,13 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       setErrorPopup(
         "Please select at least one customer or configure a major customer!",
       );
+      setErrorField("customers");
       return;
     }
 
     if (selectedProducts.length === 0) {
       setErrorPopup("Please add at least one product!");
+      setErrorField("products");
       return;
     }
 
@@ -749,7 +826,10 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       perDayQtyMax: p.perDayQtyMax,
       perDayRateMin: p.perDayRateMin,
       perDayRateMax: p.perDayRateMax,
-      category: (p.product as any).category_name || (p.product as any).category || "Meat",
+      category:
+        (p.product as any).category_name ||
+        (p.product as any).category ||
+        "Meat",
       occurrencePercentage: parseFloat(p.occurrencePercentage || "0") || 0,
     }));
 
@@ -757,7 +837,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       formattedProductsForVal,
     );
     if (!occValidation.isValid) {
-      setErrorPopup(occValidation.error || "Invalid Product Occurrence Distribution.");
+      setErrorPopup(
+        occValidation.error || "Invalid Product Occurrence Distribution.",
+      );
       return;
     }
 
@@ -978,16 +1060,54 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     finalReviewRows: any[],
   ) => {
     try {
-      console.log("adjustedInvoices length:", adjustedInvoices?.length);
-      const stringifiedInvoices = JSON.stringify(adjustedInvoices);
+      // Reconcile the dry-run invoices against the user's final Daily Stock
+      // Ledger selections (Null / Auto Allocate / manual per-cell edits) so
+      // that what gets saved actually reflects what was reviewed & approved.
+      const targetQtyMap = new Map<string, number>();
+      for (const row of finalReviewRows || []) {
+        targetQtyMap.set(
+          `${row.date}_${row.product_id}`,
+          Number(row.proposed_sold || 0),
+        );
+      }
+      const productConfigs = selectedProducts.map((item) => ({
+        product_id: item.product.id,
+        product_name: item.product.product_name,
+        hsn_code: item.product.hsn_code,
+        unit_of_measure: item.product.unit_of_measure,
+        perDayRateMin: item.perDayRateMin,
+        perDayRateMax: item.perDayRateMax,
+        category:
+          (item.product as any).category_name ||
+          (item.product as any).category ||
+          undefined,
+      }));
+      const fallbackCustomerId =
+        selectedCustomers[0] ||
+        (majorCustomers[0] ? majorCustomers[0].customer_id : null);
+      const reconciledInvoicesRaw = reconcileInvoicesToTargets(
+        JSON.parse(JSON.stringify(adjustedInvoices || [])),
+        targetQtyMap,
+        productConfigs,
+        fallbackCustomerId,
+        parseFloat(formData.maximumInvoiceAmount) || undefined,
+      );
+      const reconciledInvoices = enforceMinimumInvoiceAmount(
+        reconciledInvoicesRaw,
+        parseFloat(formData.minimumInvoiceAmount) || 0,
+        parseFloat(formData.maximumInvoiceAmount) || Infinity,
+      );
+
+      console.log("reconciledInvoices length:", reconciledInvoices?.length);
+      const stringifiedInvoices = JSON.stringify(reconciledInvoices);
       console.log(
-        "adjustedInvoices stringified length:",
+        "reconciledInvoices stringified length:",
         stringifiedInvoices?.length,
       );
-      if (adjustedInvoices && adjustedInvoices.length > 0) {
+      if (reconciledInvoices && reconciledInvoices.length > 0) {
         console.log(
           "Sample Invoice:",
-          JSON.stringify(adjustedInvoices[0]).slice(0, 1000),
+          JSON.stringify(reconciledInvoices[0]).slice(0, 1000),
         );
       }
 
@@ -1052,7 +1172,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           recurringProducts: [],
           stockSourceBatchId: formData.stockSourceBatchId,
           userId: user.id,
-          invoicesOverride: adjustedInvoices,
+          invoicesOverride: reconciledInvoices,
         }),
       });
 
@@ -1073,7 +1193,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       }
 
       setIsReviewOpen(false);
-      setErrorPopup("Sales batch and invoices created atomically!");
+      setErrorPopup("Sales batch and invoices created successfully!");
       resetForm();
       router.push("/invoice-batches");
     } catch (err: any) {
@@ -1090,6 +1210,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     productRules,
     errorPopup,
     setErrorPopup,
+    errorField,
     selectedIssuingCompany,
     selectedCustomers,
     majorCustomers,

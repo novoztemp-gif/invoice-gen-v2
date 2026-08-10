@@ -114,20 +114,16 @@ export class CandidateScorer {
     scoredLines: LineCandidate[],
     originalInvoice: PurchaseInvoice,
   ): InvoiceCandidate {
-    const originalLinesMap = new Map(
-      originalInvoice.products.map((line) => [line.product_id, line]),
-    );
-
+    // scoreLineCandidate only ever returns cost 0 when a line's quantity
+    // and rate are both unchanged from the original, so a cost>0 scan is
+    // an equivalent, much cheaper substitute for rebuilding a product-id
+    // lookup map on every call — this runs once per beam survivor per
+    // balancing invoice, so avoiding the map allocation matters at scale.
     let hasLineChanges = false;
     let totalLineCost = 0;
 
     const clonedLines: PurchaseLine[] = scoredLines.map((scored) => {
-      const orig = originalLinesMap.get(scored.line.product_id);
-      if (
-        orig &&
-        (Math.abs(scored.line.quantity - orig.quantity) > MONEY_TOLERANCE ||
-          Math.abs(scored.line.rate - orig.rate) > MONEY_TOLERANCE)
-      ) {
+      if (scored.cost > 0) {
         hasLineChanges = true;
       }
       totalLineCost += scored.cost;

@@ -7,7 +7,7 @@ export const BALANCE_LIMITS = {
   maxSolverStates: 20_000,
   residualInvoiceCount: 3,
   maxResidualCombinations: 4_096,
-  plannerTimeMs: 2_000,
+  plannerTimeMs: 8_000,
 } as const;
 
 export const BALANCE_COST = {
@@ -61,6 +61,8 @@ export type ProductConstraint = {
   quantityMax: number;
   rateMin: number;
   rateMax: number;
+  hsnCode?: string;
+  productName?: string;
 };
 
 export type PurchaseBalanceContext = {
@@ -69,6 +71,7 @@ export type PurchaseBalanceContext = {
   supplierCategory: string;
   invoices: PurchaseInvoice[];
   constraints: Map<string, ProductConstraint>;
+  majorCustomerIds: Set<string>;
 };
 
 export type LineCandidate = {

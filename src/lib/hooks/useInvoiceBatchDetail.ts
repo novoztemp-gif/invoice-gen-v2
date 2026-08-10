@@ -211,7 +211,9 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
     setStatus?: (status: string) => void,
   ) => {
     try {
-      if (setStatus) setStatus("Validating and rebalancing purchase batch...");
+      const partyLabel = batch?.batch_type === "SALES" ? "sales" : "purchase";
+      if (setStatus)
+        setStatus(`Validating and rebalancing ${partyLabel} batch...`);
       const balanceRes = await fetch("/api/auto-balance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -225,7 +227,10 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
         );
       }
 
-      if (setStatus) setStatus("Purchase Batch Successfully Rebalanced");
+      if (setStatus)
+        setStatus(
+          `${partyLabel === "sales" ? "Sales" : "Purchase"} Batch Successfully Rebalanced`,
+        );
       await fetchInvoices();
       return balanceData;
     } catch (err: any) {
@@ -237,7 +242,16 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
   const handleGenerateSplitups = async () => {
     setGenerating(true);
     try {
-      const response = await fetch("/api/generate-invoice-splitups", {
+      // Sales batches already have their (ledger-reviewed) invoices staged
+      // as "pending" at creation time — Generate Splitup here just reveals
+      // them, it never regenerates. Purchase/Expense batches still
+      // generate from scratch at this point.
+      const endpoint =
+        batch?.batch_type === "SALES"
+          ? "/api/reveal-sales-batch-splitup"
+          : "/api/generate-invoice-splitups";
+
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

@@ -56,6 +56,7 @@ export default function GeneratePurchaseInvoice() {
     productRules,
     errorPopup,
     setErrorPopup,
+    errorField,
     selectedIssuingCompany,
     selectedCustomers,
     majorCustomers,
@@ -92,6 +93,8 @@ export default function GeneratePurchaseInvoice() {
     setCategorySplits,
     sequencePreview,
   } = useInvoiceForm({ batchType: "PURCHASE" });
+
+  const errorBorderClass = "border-red-500 ring-1 ring-red-500";
 
   const [occurrenceProductOpen, setOccurrenceProductOpen] = useState(false);
   const [selectedOccurProduct, setSelectedOccurProduct] = useState("");
@@ -355,7 +358,10 @@ export default function GeneratePurchaseInvoice() {
                       variant="outline"
                       role="combobox"
                       aria-expanded={issuingCompanyOpen}
-                      className="w-full justify-between"
+                      className={cn(
+                        "w-full justify-between",
+                        errorField === "issuing-company" && errorBorderClass,
+                      )}
                     >
                       {selectedIssuingCompany
                         ? selectedIssuingCompany.company_name
@@ -487,87 +493,54 @@ export default function GeneratePurchaseInvoice() {
                     />
                   </div>
 
-                  <div className="space-y-2 md:col-span-2 pt-2 border-t border-slate-100">
-                    <Label
-                      htmlFor="previous-ending-sequence"
-                      className="text-xs font-semibold text-slate-700"
-                    >
-                      Previous Ending Sequence Number (Optional)
-                    </Label>
-                    <Input
-                      id="previous-ending-sequence"
-                      type="number"
-                      min="0"
-                      step="1"
-                      placeholder="e.g. 1250 (generation starts from 1251)"
-                      value={formData.previousEndingSequenceNumber || ""}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          previousEndingSequenceNumber: e.target.value,
-                        })
-                      }
-                      className="bg-white font-mono"
-                    />
-                    <p className="text-[11px] text-slate-500">
-                      If provided, invoice generation for this batch will start from this sequence number + 1 (e.g. 1250 → 1251). Leave blank to continue automatically.
-                    </p>
-                  </div>
-
-                  {sequencePreview && (() => {
-                    const parsedPrev = parseInt(formData.previousEndingSequenceNumber || "", 10);
-                    const hasPrev = !isNaN(parsedPrev) && parsedPrev >= 0;
-                    const displayNextSeq = hasPrev ? parsedPrev + 1 : sequencePreview.nextSequenceNumber;
-                    const displayNextInvNumber = hasPrev
-                      ? `${sequencePreview.abbreviation}-${sequencePreview.financialYear}-P-${String(displayNextSeq).padStart(7, "0")}`
-                      : sequencePreview.nextInvoiceNumber;
-
-                    return (
-                      <div className="md:col-span-2 pt-3 border-t border-slate-100 space-y-3">
-                        <Label className="text-sm font-semibold text-slate-900">
-                          Invoice Sequence Preview
-                        </Label>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                          <div className="space-y-2 md:col-span-2">
-                            <Label className="text-xs text-slate-500 font-medium">
-                              Invoice Number
-                            </Label>
-                            <Input
-                              value={displayNextInvNumber}
-                              disabled
-                              className="bg-slate-50 font-mono font-semibold text-slate-900"
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label className="text-xs text-slate-500 font-medium">
-                              Current Sequence
-                            </Label>
-                            <Input
-                              value={
-                                hasPrev
-                                  ? parsedPrev
-                                  : sequencePreview.currentSequenceNumber > 0
-                                  ? sequencePreview.currentSequenceNumber
-                                  : "—"
-                              }
-                              disabled
-                              className="bg-slate-50 font-mono text-slate-700"
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label className="text-xs text-slate-500 font-medium">
-                              Next Sequence
-                            </Label>
-                            <Input
-                              value={displayNextSeq}
-                              disabled
-                              className="bg-slate-50 font-mono text-slate-700"
-                            />
-                          </div>
+                  {sequencePreview && (
+                    <div className="md:col-span-2 pt-3 border-t border-slate-100 space-y-3">
+                      <Label className="text-sm font-semibold text-slate-900">
+                        Invoice Sequence Preview
+                      </Label>
+                      <p className="text-[11px] text-slate-500">
+                        Numbering continues automatically from the last
+                        invoice generated for this company, financial year,
+                        and invoice type.
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="space-y-2 md:col-span-2">
+                          <Label className="text-xs text-slate-500 font-medium">
+                            Next Invoice Number
+                          </Label>
+                          <Input
+                            value={sequencePreview.nextInvoiceNumber}
+                            disabled
+                            className="bg-slate-50 font-mono font-semibold text-slate-900"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs text-slate-500 font-medium">
+                            Current Sequence
+                          </Label>
+                          <Input
+                            value={
+                              sequencePreview.currentSequenceNumber > 0
+                                ? sequencePreview.currentSequenceNumber
+                                : "—"
+                            }
+                            disabled
+                            className="bg-slate-50 font-mono text-slate-700"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs text-slate-500 font-medium">
+                            Next Sequence
+                          </Label>
+                          <Input
+                            value={sequencePreview.nextSequenceNumber}
+                            disabled
+                            className="bg-slate-50 font-mono text-slate-700"
+                          />
                         </div>
                       </div>
-                    );
-                  })()}
+                    </div>
+                  )}
                 </>
               )}
             </div>
@@ -602,7 +575,10 @@ export default function GeneratePurchaseInvoice() {
                   variant="outline"
                   role="combobox"
                   aria-expanded={customerOpen}
-                  className="w-full justify-between"
+                  className={cn(
+                    "w-full justify-between",
+                    errorField === "customers" && errorBorderClass,
+                  )}
                 >
                   Search & Select Suppliers...
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
@@ -917,6 +893,11 @@ export default function GeneratePurchaseInvoice() {
                       }
                       placeholder="Select from date"
                       required
+                      className={
+                        errorField === "invoice-date-from"
+                          ? errorBorderClass
+                          : undefined
+                      }
                     />
                   </div>
                   <div className="space-y-2">
@@ -936,6 +917,11 @@ export default function GeneratePurchaseInvoice() {
                       }
                       placeholder="Select to date"
                       required
+                      className={
+                        errorField === "invoice-date-to"
+                          ? errorBorderClass
+                          : undefined
+                      }
                     />
                   </div>
                 </div>
@@ -960,6 +946,11 @@ export default function GeneratePurchaseInvoice() {
                       })
                     }
                     required
+                    className={
+                      errorField === "minimum-invoice-amount"
+                        ? errorBorderClass
+                        : undefined
+                    }
                   />
                 </div>
                 <div className="space-y-2">
@@ -980,6 +971,11 @@ export default function GeneratePurchaseInvoice() {
                       })
                     }
                     required
+                    className={
+                      errorField === "maximum-invoice-amount"
+                        ? errorBorderClass
+                        : undefined
+                    }
                   />
                 </div>
 
@@ -999,6 +995,11 @@ export default function GeneratePurchaseInvoice() {
                       })
                     }
                     required
+                    className={
+                      errorField === "total-amount"
+                        ? errorBorderClass
+                        : undefined
+                    }
                   />
                 </div>
               </div>
@@ -1030,7 +1031,10 @@ export default function GeneratePurchaseInvoice() {
                       variant="outline"
                       role="combobox"
                       aria-expanded={productOpen}
-                      className="flex-1 justify-between h-10"
+                      className={cn(
+                        "flex-1 justify-between h-10",
+                        errorField === "products" && errorBorderClass,
+                      )}
                     >
                       Search & Select Products...
                       <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
@@ -1603,7 +1607,13 @@ export default function GeneratePurchaseInvoice() {
             <CardContent className="space-y-4">
               {/* Desktop Table View */}
               <div className="hidden sm:block overflow-x-auto border rounded-lg border-slate-200">
-                <table className="w-full text-xs text-left text-slate-600 border-collapse">
+                {/* content-visibility skips layout/paint for off-screen rows —
+                    this table can run to 40-50+ rows on a large product
+                    catalogue, the heaviest single chunk of DOM on this page,
+                    so a fast scroll through the form doesn't outrun the
+                    browser's paint budget and show blank/unpainted content. */}
+                <table
+                  className="w-full text-xs text-left text-slate-600 border-collapse [content-visibility:auto] [contain-intrinsic-size:auto_1200px]">
                   <thead className="bg-slate-50 font-medium text-slate-500 border-b border-slate-200">
                     <tr>
                       <th className="px-4 py-2.5">Product Name</th>

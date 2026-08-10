@@ -16,7 +16,7 @@ export interface ImpactSummary {
   editedInvoice: {
     id: string;
     invoice_number: string;
-    supplier?: string;
+    party?: string;
     original_total: number;
     updated_total: number;
     original_quantity: number;
@@ -25,7 +25,7 @@ export interface ImpactSummary {
   rebalancedInvoices: Array<{
     id: string;
     invoice_number: string;
-    supplier?: string;
+    party?: string;
     previous_total: number;
     updated_total: number;
     amount_difference: number;
@@ -49,34 +49,44 @@ export interface ImpactSummary {
 interface PurchaseAutoBalanceSummaryModalProps {
   summary: ImpactSummary | null;
   onClose: () => void;
-  supplierNameMap?: Record<string, string>;
+  partyNameMap?: Record<string, string>;
+  title?: string;
+  partyLabel?: string;
 }
 
 export function PurchaseAutoBalanceSummaryModal({
   summary,
   onClose,
-  supplierNameMap = {},
+  partyNameMap = {},
+  title = "Purchase Auto Balance Summary",
+  partyLabel = "Supplier",
 }: PurchaseAutoBalanceSummaryModalProps) {
   if (!summary) return null;
 
-  const { editedInvoice, rebalancedInvoices, productQuantityChanges, batchSummary } = summary;
+  const {
+    editedInvoice,
+    rebalancedInvoices,
+    productQuantityChanges,
+    batchSummary,
+  } = summary;
 
-  const resolveSupplier = (invNumber: string, fallback?: string) => {
+  const resolveParty = (invNumber: string, fallback?: string) => {
     if (fallback && fallback.trim()) return fallback;
-    return supplierNameMap[invNumber] || "Supplier";
+    return partyNameMap[invNumber] || partyLabel;
   };
 
   return (
     <Dialog open={!!summary} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto bg-slate-50 p-6 flex flex-col gap-6">
+      <DialogContent className="max-w-4xl lg:max-w-[92vw] xl:max-w-[1700px] max-h-[92vh] overflow-y-auto bg-slate-50 p-6 flex flex-col gap-6">
         {/* Header */}
         <DialogHeader className="pb-4 border-b border-slate-200">
           <DialogTitle className="text-xl font-bold text-slate-900 flex items-center gap-2">
             <Scale className="h-6 w-6 text-indigo-600" />
-            Purchase Auto Balance Summary
+            {title}
           </DialogTitle>
           <p className="text-xs text-slate-500 mt-1">
-            Automatic batch rebalancing completed successfully. Summary of all changes below.
+            Automatic batch rebalancing completed successfully. Summary of all
+            changes below.
           </p>
         </DialogHeader>
 
@@ -87,7 +97,10 @@ export function PurchaseAutoBalanceSummaryModal({
               <FileText className="h-4 w-4 text-indigo-500" />
               SECTION 1: Edited Invoice
             </h3>
-            <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200 text-xs">
+            <Badge
+              variant="outline"
+              className="bg-indigo-50 text-indigo-700 border-indigo-200 text-xs"
+            >
               Directly Edited
             </Badge>
           </div>
@@ -103,10 +116,13 @@ export function PurchaseAutoBalanceSummaryModal({
             </div>
             <div>
               <span className="text-slate-400 block font-medium uppercase tracking-wider text-[10px]">
-                Supplier
+                {partyLabel}
               </span>
               <span className="font-semibold text-slate-700 text-xs mt-0.5 block truncate">
-                {resolveSupplier(editedInvoice.invoice_number, editedInvoice.supplier)}
+                {resolveParty(
+                  editedInvoice.invoice_number,
+                  editedInvoice.party,
+                )}
               </span>
             </div>
             <div>
@@ -114,7 +130,10 @@ export function PurchaseAutoBalanceSummaryModal({
                 Original Total
               </span>
               <span className="font-mono text-slate-600 mt-0.5 block">
-                ₹{editedInvoice.original_total.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                ₹
+                {editedInvoice.original_total.toLocaleString("en-IN", {
+                  minimumFractionDigits: 2,
+                })}
               </span>
             </div>
             <div>
@@ -122,7 +141,10 @@ export function PurchaseAutoBalanceSummaryModal({
                 Updated Total
               </span>
               <span className="font-mono font-bold text-slate-900 mt-0.5 block">
-                ₹{editedInvoice.updated_total.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                ₹
+                {editedInvoice.updated_total.toLocaleString("en-IN", {
+                  minimumFractionDigits: 2,
+                })}
               </span>
             </div>
             <div>
@@ -157,40 +179,52 @@ export function PurchaseAutoBalanceSummaryModal({
             </div>
           ) : (
             <div className="overflow-x-auto border rounded-lg border-slate-200">
-              <table className="w-full text-xs text-left text-slate-600 border-collapse">
+              <table className="w-full text-sm text-left text-slate-600 border-collapse">
                 <thead className="bg-slate-50 font-medium text-slate-500 border-b border-slate-200">
                   <tr>
-                    <th className="px-3.5 py-2.5">Invoice Number</th>
-                    <th className="px-3.5 py-2.5">Supplier</th>
-                    <th className="px-3.5 py-2.5 text-right">Previous Total</th>
-                    <th className="px-3.5 py-2.5 text-right">Updated Total</th>
-                    <th className="px-3.5 py-2.5 text-right">Amount Difference</th>
+                    <th className="px-4 py-3">Invoice Number</th>
+                    <th className="px-4 py-3">{partyLabel}</th>
+                    <th className="px-4 py-3 text-right">Previous Total</th>
+                    <th className="px-4 py-3 text-right">Updated Total</th>
+                    <th className="px-4 py-3 text-right">
+                      Amount Difference
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {rebalancedInvoices.map((inv) => (
                     <tr key={inv.id} className="hover:bg-slate-50/80">
-                      <td className="px-3.5 py-2.5 font-semibold text-slate-800">
+                      <td className="px-4 py-3 font-semibold text-slate-800">
                         {inv.invoice_number}
                       </td>
-                      <td className="px-3.5 py-2.5 text-slate-600">
-                        {resolveSupplier(inv.invoice_number, inv.supplier)}
+                      <td className="px-4 py-3 text-slate-600">
+                        {resolveParty(inv.invoice_number, inv.party)}
                       </td>
-                      <td className="px-3.5 py-2.5 text-right font-mono">
-                        ₹{inv.previous_total.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                      <td className="px-4 py-3 text-right font-mono">
+                        ₹
+                        {inv.previous_total.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                        })}
                       </td>
-                      <td className="px-3.5 py-2.5 text-right font-mono font-semibold text-slate-900">
-                        ₹{inv.updated_total.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                      <td className="px-4 py-3 text-right font-mono font-semibold text-slate-900">
+                        ₹
+                        {inv.updated_total.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                        })}
                       </td>
-                      <td className={`px-3.5 py-2.5 text-right font-mono font-semibold ${
-                        inv.amount_difference > 0
-                          ? "text-emerald-600"
-                          : inv.amount_difference < 0
-                          ? "text-rose-600"
-                          : "text-slate-500"
-                      }`}>
-                        {inv.amount_difference > 0 ? "+" : ""}
-                        ₹{inv.amount_difference.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                      <td
+                        className={`px-4 py-3 text-right font-mono font-semibold ${
+                          inv.amount_difference > 0
+                            ? "text-emerald-600"
+                            : inv.amount_difference < 0
+                              ? "text-rose-600"
+                              : "text-slate-500"
+                        }`}
+                      >
+                        {inv.amount_difference > 0 ? "+" : ""}₹
+                        {inv.amount_difference.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                        })}
                       </td>
                     </tr>
                   ))}
@@ -212,38 +246,47 @@ export function PurchaseAutoBalanceSummaryModal({
             </div>
           ) : (
             <div className="overflow-x-auto border rounded-lg border-slate-200 max-h-48 overflow-y-auto">
-              <table className="w-full text-xs text-left text-slate-600 border-collapse">
+              <table className="w-full text-sm text-left text-slate-600 border-collapse">
                 <thead className="bg-slate-50 font-medium text-slate-500 border-b border-slate-200 sticky top-0">
                   <tr>
-                    <th className="px-3.5 py-2.5">Invoice Number</th>
-                    <th className="px-3.5 py-2.5">Product Name</th>
-                    <th className="px-3.5 py-2.5 text-right">Previous Quantity</th>
-                    <th className="px-3.5 py-2.5 text-right">Updated Quantity</th>
-                    <th className="px-3.5 py-2.5 text-right">Difference</th>
+                    <th className="px-4 py-3">Invoice Number</th>
+                    <th className="px-4 py-3">Product Name</th>
+                    <th className="px-4 py-3 text-right">
+                      Previous Quantity
+                    </th>
+                    <th className="px-4 py-3 text-right">
+                      Updated Quantity
+                    </th>
+                    <th className="px-4 py-3 text-right">Difference</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {productQuantityChanges.map((change, idx) => (
-                    <tr key={`${change.invoice_id}-${change.product_id}-${idx}`} className="hover:bg-slate-50/80">
-                      <td className="px-3.5 py-2.5 font-medium text-slate-800">
+                    <tr
+                      key={`${change.invoice_id}-${change.product_id}-${idx}`}
+                      className="hover:bg-slate-50/80"
+                    >
+                      <td className="px-4 py-3 font-medium text-slate-800">
                         {change.invoice_number}
                       </td>
-                      <td className="px-3.5 py-2.5 text-slate-700 font-medium">
+                      <td className="px-4 py-3 text-slate-700 font-medium">
                         {change.product_name}
                       </td>
-                      <td className="px-3.5 py-2.5 text-right font-mono">
+                      <td className="px-4 py-3 text-right font-mono">
                         {change.previous_quantity.toLocaleString()}
                       </td>
-                      <td className="px-3.5 py-2.5 text-right font-mono font-semibold text-slate-900">
+                      <td className="px-4 py-3 text-right font-mono font-semibold text-slate-900">
                         {change.updated_quantity.toLocaleString()}
                       </td>
-                      <td className={`px-3.5 py-2.5 text-right font-mono font-semibold ${
-                        change.difference > 0
-                          ? "text-emerald-600"
-                          : change.difference < 0
-                          ? "text-rose-600"
-                          : "text-slate-500"
-                      }`}>
+                      <td
+                        className={`px-4 py-3 text-right font-mono font-semibold ${
+                          change.difference > 0
+                            ? "text-emerald-600"
+                            : change.difference < 0
+                              ? "text-rose-600"
+                              : "text-slate-500"
+                        }`}
+                      >
                         {change.difference > 0 ? "+" : ""}
                         {change.difference.toLocaleString()}
                       </td>
@@ -262,21 +305,30 @@ export function PurchaseAutoBalanceSummaryModal({
           </h3>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
             <div className="bg-indigo-950/60 p-3 rounded-lg border border-indigo-800/50">
-              <span className="text-indigo-300 block text-[11px]">Invoices Rebalanced</span>
+              <span className="text-indigo-300 block text-[11px]">
+                Invoices Rebalanced
+              </span>
               <span className="text-lg font-bold mt-0.5 block">
                 {batchSummary.invoices_rebalanced_count} Invoices
               </span>
             </div>
             <div className="bg-indigo-950/60 p-3 rounded-lg border border-indigo-800/50">
-              <span className="text-indigo-300 block text-[11px]">Total Quantity Adjusted</span>
+              <span className="text-indigo-300 block text-[11px]">
+                Total Quantity Adjusted
+              </span>
               <span className="text-lg font-bold font-mono mt-0.5 block">
                 {batchSummary.total_quantity_adjusted.toLocaleString()} units
               </span>
             </div>
             <div className="bg-indigo-950/60 p-3 rounded-lg border border-indigo-800/50">
-              <span className="text-indigo-300 block text-[11px]">Total Amount Adjusted</span>
+              <span className="text-indigo-300 block text-[11px]">
+                Total Amount Adjusted
+              </span>
               <span className="text-lg font-bold font-mono mt-0.5 block">
-                ₹{batchSummary.total_amount_adjusted.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                ₹
+                {batchSummary.total_amount_adjusted.toLocaleString("en-IN", {
+                  minimumFractionDigits: 2,
+                })}
               </span>
             </div>
           </div>
@@ -284,7 +336,11 @@ export function PurchaseAutoBalanceSummaryModal({
 
         {/* Footer */}
         <DialogFooter className="pt-2 border-t border-slate-200">
-          <Button onClick={onClose} size="default" className="px-6 font-medium text-xs">
+          <Button
+            onClick={onClose}
+            size="default"
+            className="px-6 font-medium text-xs"
+          >
             Close Summary
           </Button>
         </DialogFooter>

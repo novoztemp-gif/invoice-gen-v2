@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import { InvoiceNumberingService } from "@/lib/services/InvoiceNumberingService";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 import { createClient } from "@/lib/supabase/server";
 import { roundToQuarterIncrement } from "@/lib/utils/quantity-rate-utils";
 
@@ -40,29 +41,74 @@ export async function POST(request: NextRequest) {
 
     const supabase = await createClient();
 
+    // The client-supplied `products` payload carries whatever category
+    // value was on the SOURCE PURCHASE batch's stored config — which is
+    // frequently missing or wrong, and generation's category-purity logic
+    // (keeping fruit and meat off the same invoice) silently defaults an
+    // unrecognized product to "Meat" instead of erroring, so a wrong or
+    // missing category here doesn't fail loudly, it just quietly mixes
+    // categories. Override every product's category with a fresh lookup
+    // from the products table — the actual source of truth — before
+    // anything downstream uses it.
+    if (Array.isArray(products) && products.length > 0) {
+      const productIds = Array.from(
+        new Set(
+          products.map((p: any) => p.product_id || p.id).filter(Boolean),
+        ),
+      );
+      if (productIds.length > 0) {
+        const { data: realProducts } = await supabase
+          .from("products")
+          .select("id, category")
+          .in("id", productIds);
+        const categoryById = new Map(
+          (realProducts || []).map((p: any) => [String(p.id), p.category]),
+        );
+        for (const p of products) {
+          const pid = String(p.product_id || p.id || "");
+          const realCategory = categoryById.get(pid);
+          if (realCategory) {
+            p.category = realCategory;
+          }
+        }
+      }
+    }
+
     // Support single or comma-separated batch IDs
     const batchIds = stockSourceBatchId
       .split(",")
       .map((id: string) => id.trim())
-      .filter((id: string) => Boolean(id) && !id.startsWith("CARRY_FORWARD_"));
+      .filter((id: string) => Boolean(id));
 
     const primaryBatchId = batchIds[0] || stockSourceBatchId.split(",")[0];
 
-    // 1. Fetch daily stock ledger for the selected stock source purchase batch(es)
-    let ledgerQuery = supabase
-      .from("daily_stock_ledger")
-      .select(
-        "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
-      )
-      .order("ledger_date", { ascending: true });
-
-    if (batchIds.length > 0) {
-      ledgerQuery = ledgerQuery.in("purchase_batch_id", batchIds);
-    } else {
-      ledgerQuery = ledgerQuery.eq("purchase_batch_id", primaryBatchId);
+    // 1. Fetch daily stock ledger for the selected stock source purchase
+    // batch(es). Paginated — a source batch with many products/days easily
+    // exceeds PostgREST's default 1000-row cap.
+    let ledgerData: any[] = [];
+    let ledgerError: any = null;
+    try {
+      ledgerData = await fetchAllQueryRows((from, to) => {
+        let q = supabase
+          .from("daily_stock_ledger")
+          .select(
+            "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
+          )
+          // Secondary sort key makes pagination deterministic — ordering by
+          // ledger_date alone lets Postgres break same-date ties
+          // differently per paginated page, duplicating or dropping rows
+          // once the ledger exceeds a page size.
+          .order("ledger_date", { ascending: true })
+          .order("product_id", { ascending: true });
+        q =
+          batchIds.length > 0
+            ? q.in("purchase_batch_id", batchIds)
+            : q.eq("purchase_batch_id", primaryBatchId);
+        return q.range(from, to);
+      });
+    } catch (err: any) {
+      ledgerError = err;
     }
-
-    const { data: ledgerData, error: ledgerError } = await ledgerQuery;
 
     if (ledgerError) {
       return NextResponse.json(
@@ -127,7 +173,7 @@ export async function POST(request: NextRequest) {
             ? Number(rawPrevSeq)
             : null,
         batch_type: "SALES",
-        status: "generated",
+        status: "pending",
         batch_status: "DRAFT",
         products: products,
         created_by: userId,
@@ -172,13 +218,14 @@ export async function POST(request: NextRequest) {
 
       // Manual Sequence Override or Auto-Detection of Highest Existing Sequence Number
       let startingCounter = 1;
-      if (
+      const isManualSequenceOverride =
         rawPrevSeq !== undefined &&
         rawPrevSeq !== null &&
         rawPrevSeq !== "" &&
         !isNaN(Number(rawPrevSeq)) &&
-        Number(rawPrevSeq) >= 0
-      ) {
+        Number(rawPrevSeq) >= 0;
+
+      if (isManualSequenceOverride) {
         startingCounter = Number(rawPrevSeq) + 1;
       } else {
         const prefix = `${companyAbbr}-${canonicalFy}-S`;
@@ -247,88 +294,39 @@ export async function POST(request: NextRequest) {
           invoice_date: inv.invoice_date,
           total_amount: totalAmt,
           products: normalizedProducts,
-          status: inv.status || "generated",
+          // The leftover/sold split was already decided and confirmed by
+          // the user in the Daily Stock Review modal (Null or Auto
+          // Allocate) — that confirmation IS the commitment, not a later
+          // "Generate Splitup" click. Insert directly as "generated" so
+          // the source purchase batch's daily_stock_ledger gets updated
+          // immediately below, and the leftover is correct for the very
+          // next sales batch right away, independent of whatever happens
+          // to this batch afterward (edited, finalized, or left alone).
+          status: "generated",
           batch_type: "SALES",
         };
       });
 
-      // Ensure 100% unique invoice numbers before insertion
-      const prefix = `${companyAbbr}-${canonicalFy}-S`;
-      const existingNumberSet = new Set<string>();
-      let highestSeqInDb = 0;
-      let invPage = 0;
-      const invPageSize = 1000;
-      let hasMoreInvoices = true;
-
-      while (hasMoreInvoices) {
-        const { data: pageInvoices } = await supabase
-          .from("invoice")
-          .select("invoice_number")
-          .neq("invoice_batch_id", newBatch.id)
-          .like("invoice_number", `${prefix}-%`)
-          .range(invPage * invPageSize, (invPage + 1) * invPageSize - 1);
-
-        if (pageInvoices && pageInvoices.length > 0) {
-          for (const row of pageInvoices) {
-            const num = row.invoice_number;
-            if (num) {
-              existingNumberSet.add(num);
-              const parts = num.split("-");
-              const seq = parseInt(parts[parts.length - 1], 10);
-              if (!isNaN(seq) && seq > highestSeqInDb) {
-                highestSeqInDb = seq;
-              }
-            }
-          }
-          if (pageInvoices.length < invPageSize) {
-            hasMoreInvoices = false;
-          } else {
-            invPage++;
-          }
-        } else {
-          hasMoreInvoices = false;
-        }
-      }
-
-      const usedNumberSet = new Set<string>();
-      let hasCollision = false;
-
-      for (const inv of invoicesToInsert) {
-        if (
-          existingNumberSet.has(inv.invoice_number) ||
-          usedNumberSet.has(inv.invoice_number)
-        ) {
-          hasCollision = true;
-          break;
-        }
-        usedNumberSet.add(inv.invoice_number);
-      }
-
-      if (hasCollision) {
-        let safeSeq = Math.max(startingCounter, highestSeqInDb + 1);
-        for (const inv of invoicesToInsert) {
-          inv.invoice_number = InvoiceNumberingService.formatInvoiceNumber(
-            companyAbbr,
-            canonicalFy,
-            "S",
-            safeSeq++,
-          );
-        }
-      }
+      // Invoice numbers are assigned strictly from the user-provided
+      // Previous Ending Sequence Number + 1, with no auto-detection or
+      // collision-based renumbering against existing invoices. If the
+      // numbers collide with something already in the database, the insert
+      // below fails on the table's own uniqueness constraint rather than
+      // silently reassigning numbers the user didn't ask for.
 
       console.log("==========================================");
       console.log("[INSERT PATH B - create-sales-batch-transactional]");
       console.log("process.pid:", process.pid);
       console.log("NODE_ENV:", process.env.NODE_ENV);
       console.log("url:", request.url);
-      console.log("first 5 invoices to insert:", invoicesToInsert.slice(0, 5).map((i: any) => i.invoice_number));
+      console.log(
+        "first 5 invoices to insert:",
+        invoicesToInsert.slice(0, 5).map((i: any) => i.invoice_number),
+      );
       console.log("==========================================");
 
       const { data: insertedInvoices, error: invoiceInsertError } =
-        await supabase
-          .from("invoice")
-          .insert(invoicesToInsert)
-          .select();
+        await supabase.from("invoice").insert(invoicesToInsert).select();
 
       if (invoiceInsertError) {
         console.error("Error inserting sales invoices:", invoiceInsertError);
@@ -344,12 +342,24 @@ export async function POST(request: NextRequest) {
 
       savedInvoices = insertedInvoices || [];
 
-      // Update daily_stock_ledger for source purchase batch
-      await InvoiceEngine.postSalesBatchStockLedger(
-        supabase,
-        newBatch.id,
-        stockSourceBatchId,
-      );
+      // Commit the leftover decision to the ledger right now — this is the
+      // moment the user actually confirmed how much of the purchased stock
+      // stays as leftover vs. gets sold. Also flip the batch's own status
+      // to "generated" so /api/reveal-sales-batch-splitup (guarded on
+      // status === "pending") correctly treats this as already revealed
+      // and never runs postSalesBatchStockLedger a second time — it's not
+      // idempotent (it ADDS to whatever's already recorded).
+      if (stockSourceBatchId) {
+        await InvoiceEngine.postSalesBatchStockLedger(
+          supabase,
+          newBatch.id,
+          stockSourceBatchId,
+        );
+      }
+      await supabase
+        .from("invoice_batch")
+        .update({ status: "generated" })
+        .eq("id", newBatch.id);
     } else {
       // Otherwise use InvoiceEngine to generate and save invoices for newBatch.id
       await InvoiceEngine.generateAndSaveInvoices(supabase, newBatch.id);

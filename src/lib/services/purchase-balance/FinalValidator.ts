@@ -25,6 +25,9 @@ export class FinalValidator {
     expectedBatchTotal: number,
     supplierCategory: string,
     constraints: Map<string, ProductConstraint>,
+    editedInvoiceId: string,
+    majorCustomerIds: Set<string> = new Set(),
+    productConservedInvoiceIds: Set<string> = new Set(),
   ): FinalValidationResult {
     const errors: string[] = [];
 
@@ -59,6 +62,9 @@ export class FinalValidator {
         supplierCategory,
         constraints,
         errors,
+        editedInvoiceId,
+        majorCustomerIds,
+        productConservedInvoiceIds,
       );
       calculatedBatchTotal = roundMoney(
         calculatedBatchTotal + plannedInv.total_amount,
@@ -92,8 +98,29 @@ export class FinalValidator {
     supplierCategory: string,
     constraints: Map<string, ProductConstraint>,
     errors: string[],
+    editedInvoiceId: string,
+    majorCustomerIds: Set<string>,
+    productConservedInvoiceIds: Set<string>,
   ) {
     const invNumber = plannedInvoice.invoice_number || plannedInvoice.id;
+    const isEditedInvoice = plannedInvoice.id === editedInvoiceId;
+    // Invoices the product-quantity-conservation pass (Stage 1) legitimately
+    // added/adjusted a line on to keep some other product's batch-wide total
+    // conserved — these are allowed the same product-set flexibility as the
+    // directly-edited invoice, since the solver itself never touches them
+    // this way (CandidateGenerator only varies existing lines' qty/rate).
+    const isProductConservedInvoice = productConservedInvoiceIds.has(
+      plannedInvoice.id,
+    );
+    const allowsProductSetChange = isEditedInvoice || isProductConservedInvoice;
+    // Major customer invoices are never part of the balancing solver's
+    // combinatorial candidate search (CandidateSolver excludes them
+    // entirely), so the maxInvoiceLines cap — which exists purely to bound
+    // that search — doesn't need to apply to them. They can also
+    // legitimately need far more than 8 lines to reach a large configured
+    // amount within realistic per-product rate/quantity limits.
+    const partyId = (plannedInvoice.products?.[0] as any)?.customer_id;
+    const isMajorCustomerInvoice = !!partyId && majorCustomerIds.has(partyId);
 
     // 1. Immutable invoice details check
     if (
@@ -109,11 +136,17 @@ export class FinalValidator {
       return;
     }
 
-    if (plannedInvoice.products.length !== originalInvoice.products.length) {
+    if (
+      !allowsProductSetChange &&
+      plannedInvoice.products.length !== originalInvoice.products.length
+    ) {
       errors.push(`Product count is immutable for invoice ${invNumber}.`);
     }
 
-    if (plannedInvoice.products.length > BALANCE_LIMITS.maxInvoiceLines) {
+    if (
+      !isMajorCustomerInvoice &&
+      plannedInvoice.products.length > BALANCE_LIMITS.maxInvoiceLines
+    ) {
       errors.push(
         `Invoice ${invNumber} contains ${plannedInvoice.products.length} products, exceeding maximum allowed limit of ${BALANCE_LIMITS.maxInvoiceLines}.`,
       );
@@ -133,6 +166,14 @@ export class FinalValidator {
     const originalLinesMap = new Map(
       originalInvoice.products.map((line) => [line.product_id, line]),
     );
+    // Compare new/changed lines against the category this invoice was
+    // actually built with (its own stored, untouched lines), not the
+    // supplier's live category record — see the matching note in
+    // PurchaseInvoiceValidator.validateInvoice.
+    const invoiceBaselineCategory =
+      originalInvoice.products?.[0]?.category !== undefined
+        ? normaliseCategory(originalInvoice.products[0].category)
+        : normaliseCategory(supplierCategory);
 
     const seenProducts = new Set<string>();
     const invoiceCategories = new Set<string>();
@@ -148,20 +189,29 @@ export class FinalValidator {
 
       const origLine = originalLinesMap.get(line.product_id);
       const constraint = constraints.get(line.product_id);
+      // A product with no origLine is only legitimate if it's being added
+      // for the first time to the invoice actually being edited, or to an
+      // invoice the product-quantity-conservation pass legitimately added
+      // it to — every other invoice's product set must stay strictly
+      // immutable, since the solver itself never adds/removes products from
+      // balancing invoices.
+      const isNewLineAllowed = !origLine && allowsProductSetChange;
 
-      if (!origLine || !constraint) {
+      if (!constraint || (!origLine && !isNewLineAllowed)) {
         errors.push(
           `Product set is immutable; unauthorized product ${line.product_name || line.product_id} on invoice ${invNumber}.`,
         );
         continue;
       }
 
-      // Check product metadata preservation
+      // Check product metadata preservation (nothing to preserve for a
+      // brand-new line — there's no prior value to compare against).
       if (
-        (line.product_name && line.product_name !== origLine.product_name) ||
-        (line.hsn_code && line.hsn_code !== origLine.hsn_code) ||
-        (line.unit_of_measure &&
-          line.unit_of_measure !== origLine.unit_of_measure)
+        origLine &&
+        ((line.product_name && line.product_name !== origLine.product_name) ||
+          (line.hsn_code && line.hsn_code !== origLine.hsn_code) ||
+          (line.unit_of_measure &&
+            line.unit_of_measure !== origLine.unit_of_measure))
       ) {
         errors.push(
           `Product metadata altered for ${line.product_name || line.product_id} on invoice ${invNumber}.`,
@@ -185,8 +235,23 @@ export class FinalValidator {
         );
       }
 
+      // Product rule bounds (quantity/rate) can be tightened after an
+      // invoice is saved. Lines that weren't actually changed by this edit
+      // or by the rebalance solver keep whatever value was already valid
+      // at save time — otherwise a rule change would permanently block
+      // editing/rebalancing of every older invoice touching that product.
+      const quantityUnchanged =
+        origLine !== undefined &&
+        Math.abs(origLine.quantity - line.quantity) < MONEY_TOLERANCE;
+      const rateUnchanged =
+        origLine !== undefined &&
+        Math.abs(origLine.rate - line.rate) < MONEY_TOLERANCE;
+
       // Commercial quantity check
-      if (!CandidateGenerator.isCommercialQuantity(line.quantity, constraint)) {
+      if (
+        !quantityUnchanged &&
+        !CandidateGenerator.isCommercialQuantity(line.quantity, constraint)
+      ) {
         errors.push(
           `Commercial quantity is invalid for ${line.product_name || line.product_id} on invoice ${invNumber}.`,
         );
@@ -194,25 +259,45 @@ export class FinalValidator {
 
       // Whole-number rate check
       if (
-        !isValidWholeNumber(line.rate) ||
-        line.rate < constraint.rateMin - MONEY_TOLERANCE ||
-        line.rate > constraint.rateMax + MONEY_TOLERANCE
+        !rateUnchanged &&
+        (!isValidWholeNumber(line.rate) ||
+          line.rate < constraint.rateMin - MONEY_TOLERANCE ||
+          line.rate > constraint.rateMax + MONEY_TOLERANCE)
       ) {
         errors.push(
           `Rate is invalid or outside allowed range [${constraint.rateMin}, ${constraint.rateMax}] for ${line.product_name || line.product_id} on invoice ${invNumber}.`,
         );
       }
 
-      // Exact line amount check (quantity × rate rounded to rupee)
-      const expectedAmount = computeLineAmount(line.quantity, line.rate);
-      if (Math.abs(line.amount - expectedAmount) > MONEY_TOLERANCE) {
-        errors.push(
-          `Line amount must equal quantity × rate for ${line.product_name || line.product_id} on invoice ${invNumber}.`,
-        );
+      // Exact line amount check (quantity × rate rounded to rupee). Any
+      // newly generated/changed candidate is arithmetically exact by
+      // construction (CandidateGenerator always derives amount this way),
+      // so this only ever matters for genuinely touched lines. Skipping it
+      // for untouched lines grandfathers pre-existing rounding drift in
+      // older stored data — the batch/invoice totals below are summed from
+      // the stored `amount` either way, so this drift doesn't affect
+      // downstream money correctness, only this line's internal display
+      // consistency.
+      if (!quantityUnchanged || !rateUnchanged) {
+        const expectedAmount = computeLineAmount(line.quantity, line.rate);
+        if (Math.abs(line.amount - expectedAmount) > MONEY_TOLERANCE) {
+          errors.push(
+            `Line amount must equal quantity × rate for ${line.product_name || line.product_id} on invoice ${invNumber}.`,
+          );
+        }
       }
 
       calculatedInvoiceTotal += line.amount;
-      invoiceCategories.add(normaliseCategory(constraint.category));
+      // Category is derived live from the product's current master-data
+      // category, which (like rate/quantity bounds) can be reclassified
+      // after an invoice is saved. Only count lines actually touched by
+      // this edit/rebalance toward the category check — an untouched
+      // line's category may have drifted from what it was when the
+      // invoice was originally validated, and that drift shouldn't block
+      // editing an unrelated field or rebalancing other invoices.
+      if (!quantityUnchanged || !rateUnchanged) {
+        invoiceCategories.add(normaliseCategory(constraint.category));
+      }
     }
 
     // Invoice total sum check
@@ -227,16 +312,17 @@ export class FinalValidator {
       );
     }
 
-    // Category homogeneity check
-    if (invoiceCategories.size !== 1) {
+    // Category homogeneity check (only meaningful when at least one line
+    // actually changed — see grandfathering note above).
+    if (invoiceCategories.size > 1) {
       errors.push(
         `Invoice ${invNumber} contains products from multiple categories.`,
       );
-    } else {
+    } else if (invoiceCategories.size === 1) {
       const invoiceCategory = Array.from(invoiceCategories)[0];
-      if (normaliseCategory(supplierCategory) !== invoiceCategory) {
+      if (invoiceBaselineCategory !== invoiceCategory) {
         errors.push(
-          `Supplier category (${supplierCategory}) is incompatible with invoice category (${invoiceCategory}) for invoice ${invNumber}.`,
+          `Product category (${invoiceCategory}) does not match invoice ${invNumber}'s existing category (${invoiceBaselineCategory}).`,
         );
       }
     }

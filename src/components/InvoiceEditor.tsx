@@ -12,8 +12,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { numberToWords } from "@/lib/numberToWords";
+import { BALANCE_LIMITS } from "@/lib/services/purchase-balance/types";
 import {
-  isValidQuarterIncrement,
+  computeLineAmount,
   isValidWholeNumber,
 } from "@/lib/utils/quantity-rate-utils";
 
@@ -44,6 +45,42 @@ export default function InvoiceEditor({
   const [dateOfSupply, setDateOfSupply] = useState("");
   const [products, setProducts] = useState<any[]>([]);
 
+  // Read-only "how much of this product could be added cleanly right now"
+  // estimate per batch product, shown on the Quick Add buttons so a
+  // shortfall (like adding a product with nowhere for its cost to come
+  // from) is visible before Save instead of surfacing as a surprise
+  // cross-invoice change afterward. Undefined while loading, present once
+  // fetched; a missing key just renders no badge for that product.
+  const [capacities, setCapacities] = useState<Record<string, number>>({});
+  const [capacitiesLoading, setCapacitiesLoading] = useState(false);
+
+  const refreshCapacities = async (draftProducts?: any[]) => {
+    if (!batch?.id || !invoice?.id) return;
+    setCapacitiesLoading(true);
+    try {
+      const endpoint =
+        batch?.batch_type === "SALES"
+          ? "/api/sales-invoice-product-capacity"
+          : "/api/purchase-invoice-product-capacity";
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchId: batch.id,
+          invoiceId: invoice.id,
+          draftProducts,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.capacities) setCapacities(data.capacities);
+    } catch {
+      // Purely advisory — a failed fetch just means no badges are shown.
+      // Save-time validation is the real safety net either way.
+    } finally {
+      setCapacitiesLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (invoice && isOpen) {
       setTransportMode(
@@ -54,17 +91,37 @@ export default function InvoiceEditor({
       setProducts(
         invoice.products ? JSON.parse(JSON.stringify(invoice.products)) : [],
       );
+      setCapacities({});
+      refreshCapacities();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invoice, batch, isOpen]);
 
   if (!invoice) return null;
+
+  // Major customer invoices are exempt from the max-products-per-invoice
+  // cap (see FinalValidator/PurchaseInvoiceValidator) since they're never
+  // part of the balancing solver's combinatorial search and can
+  // legitimately need many more lines to reach a large configured amount.
+  const invoicePartyId =
+    invoice.customer_id || invoice.products?.[0]?.customer_id;
+  const isMajorCustomerInvoice = !!(
+    invoicePartyId &&
+    batch?.major_customers?.some(
+      (m: any) => m.customer_id === invoicePartyId,
+    )
+  );
 
   // Live Calculations
   let totalAmountBeforeTax = 0;
   const productRows = products.map((p) => {
     const qty = Number(p.quantity) || 0;
     const rate = Number(p.rate) || 0;
-    const amount = qty * rate;
+    // Whole-rupee, matching computeLineAmount used server-side — a raw
+    // qty*rate here can show e.g. 2,251.50 while the backend actually
+    // persists/validates 2,252, confusing users and (for Sales) tripping
+    // the line-amount validation rule.
+    const amount = computeLineAmount(qty, rate);
     totalAmountBeforeTax += amount;
     return { ...p, amount };
   });
@@ -80,16 +137,41 @@ export default function InvoiceEditor({
   };
 
   const handleAddProduct = (batchProduct: any) => {
+    if (products.some((p) => p.product_id === batchProduct.product_id)) {
+      alert(
+        `${batchProduct.product_name} is already on this invoice — edit its Quantity field directly instead of adding it again.`,
+      );
+      return;
+    }
+    if (
+      !isMajorCustomerInvoice &&
+      products.length >= BALANCE_LIMITS.maxInvoiceLines
+    ) {
+      alert(
+        `A purchase invoice can contain at most ${BALANCE_LIMITS.maxInvoiceLines} products. Remove a product before adding another.`,
+      );
+      return;
+    }
+    const capacity = capacities[batchProduct.product_id];
+    if (capacity === 0) {
+      const proceed = window.confirm(
+        batch?.batch_type === "SALES"
+          ? `${batchProduct.product_name} was never allocated any quantity in this batch — there's nothing to reallocate, saving will likely fail. Add it anyway?`
+          : `${batchProduct.product_name} currently has no available room in this batch to add cleanly — saving may require rebalancing an unrelated invoice, or fail if there's genuinely no capacity anywhere. Add it anyway?`,
+      );
+      if (!proceed) return;
+    }
     const newProducts = [...products];
     newProducts.push({
       product_id: batchProduct.product_id,
       product_name: batchProduct.product_name,
       hsn_code: batchProduct.hsn_code,
-      quantity: 1,
+      quantity: capacity && capacity > 0 ? Math.min(1, capacity) : 1,
       rate: Number(batchProduct.perDayRateMin) || 0,
       amount: 0,
     });
     setProducts(newProducts);
+    refreshCapacities(newProducts);
   };
 
   const handleRemoveProduct = (index: number) => {
@@ -97,11 +179,20 @@ export default function InvoiceEditor({
       const newProducts = [...products];
       newProducts.splice(index, 1);
       setProducts(newProducts);
+      refreshCapacities(newProducts);
     }
   };
 
   const handleSave = async () => {
     if (!products.length) return alert("At least one product is required.");
+    if (
+      !isMajorCustomerInvoice &&
+      products.length > BALANCE_LIMITS.maxInvoiceLines
+    ) {
+      return alert(
+        `This invoice has ${products.length} products, exceeding the maximum of ${BALANCE_LIMITS.maxInvoiceLines}. Remove products before saving.`,
+      );
+    }
     for (const p of products) {
       const qty = Number(p.quantity);
       const rate = Number(p.rate);
@@ -110,6 +201,14 @@ export default function InvoiceEditor({
       if (!isValidWholeNumber(rate)) {
         return alert(
           "Rate must be a whole number.\n\nDecimal rates are not permitted.",
+        );
+      }
+      const uom = String(p.unit_of_measure || "kg").toLowerCase();
+      const isWeight = /kg|ton|g/.test(uom);
+      const isQuarterStep = Math.abs(qty * 4 - Math.round(qty * 4)) < 0.001;
+      if (isWeight && !isQuarterStep) {
+        return alert(
+          `Quantity for "${p.product_name}" must be in quarter-kg steps (e.g. 0.25, 0.50, 0.75, 1.00).`,
         );
       }
     }
@@ -151,7 +250,7 @@ export default function InvoiceEditor({
       open={isOpen}
       onOpenChange={(open) => !open && !isSaving && onClose()}
     >
-      <DialogContent className="max-w-5xl sm:max-w-5xl md:max-w-6xl p-0 overflow-hidden bg-slate-50 flex flex-col h-[90vh]">
+      <DialogContent className="max-w-5xl sm:max-w-5xl md:max-w-6xl lg:max-w-[90vw] xl:max-w-[1600px] p-0 overflow-hidden bg-slate-50 flex flex-col h-[95vh]">
         <DialogHeader className="p-6 border-b bg-white shrink-0">
           <DialogTitle className="text-2xl font-semibold">
             Edit Invoice: {invoice.invoice_number}
@@ -200,20 +299,64 @@ export default function InvoiceEditor({
             <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
               <h3 className="text-lg font-semibold text-slate-800">Products</h3>
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-sm font-medium text-slate-500">
-                  Quick Add:
-                </span>
-                {batch?.products?.map((bp: any) => (
-                  <Button
-                    key={bp.product_id}
-                    variant="outline"
-                    size="sm"
-                    className="border-dashed border-2 hover:border-solid"
-                    onClick={() => handleAddProduct(bp)}
-                  >
-                    <Plus className="h-3 w-3 mr-1" /> {bp.product_name}
-                  </Button>
-                ))}
+                {!isMajorCustomerInvoice &&
+                products.length >= BALANCE_LIMITS.maxInvoiceLines ? (
+                  <span className="text-sm font-medium text-amber-600">
+                    Maximum of {BALANCE_LIMITS.maxInvoiceLines} products
+                    reached. Remove one to add another.
+                  </span>
+                ) : (
+                  <>
+                    <span className="text-sm font-medium text-slate-500">
+                      Quick Add:
+                    </span>
+                    {batch?.products?.map((bp: any) => {
+                      const capacity = capacities[bp.product_id];
+                      const hasNoRoom = capacity === 0;
+                      return (
+                        <Button
+                          key={bp.product_id}
+                          variant="outline"
+                          size="sm"
+                          className={
+                            hasNoRoom
+                              ? "border-dashed border-2 border-amber-300 text-amber-700 hover:border-solid"
+                              : "border-dashed border-2 hover:border-solid"
+                          }
+                          title={
+                            hasNoRoom
+                              ? batch?.batch_type === "SALES"
+                                ? `${bp.product_name} was never allocated any quantity in this batch — nothing to reallocate from.`
+                                : `${bp.product_name} currently has no room to be added cleanly without rebalancing an unrelated invoice.`
+                              : capacity !== undefined
+                                ? batch?.batch_type === "SALES"
+                                  ? `${capacity} allocated to this product across the batch — adding here reallocates it from other invoices.`
+                                  : `Up to ~${capacity} available to add cleanly right now.`
+                                : undefined
+                          }
+                          onClick={() => handleAddProduct(bp)}
+                        >
+                          <Plus className="h-3 w-3 mr-1" /> {bp.product_name}
+                          {capacitiesLoading && capacity === undefined ? (
+                            <span className="ml-1.5 text-slate-400">
+                              &hellip;
+                            </span>
+                          ) : capacity !== undefined ? (
+                            <span
+                              className={
+                                hasNoRoom
+                                  ? "ml-1.5 text-amber-600 font-normal"
+                                  : "ml-1.5 text-emerald-600 font-normal"
+                              }
+                            >
+                              ({capacity})
+                            </span>
+                          ) : null}
+                        </Button>
+                      );
+                    })}
+                  </>
+                )}
               </div>
             </div>
 
@@ -274,8 +417,9 @@ export default function InvoiceEditor({
                         />
                       </td>
                       <td className="px-4 py-3 text-right font-medium text-slate-900">
-                        {(
-                          Number(p.quantity) * Number(p.rate) || 0
+                        {computeLineAmount(
+                          Number(p.quantity) || 0,
+                          Number(p.rate) || 0,
                         ).toLocaleString("en-IN", {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,

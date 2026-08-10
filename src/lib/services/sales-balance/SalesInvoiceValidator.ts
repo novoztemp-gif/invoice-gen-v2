@@ -1,5 +1,5 @@
 import { SupabaseClient } from "@supabase/supabase-js";
-import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
+import { fetchAllInvoicesForBatch, fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 import {
   computeLineAmount,
   isValidQuarterIncrement,
@@ -123,7 +123,14 @@ export class SalesInvoiceValidator {
           productId: pid,
           category: String(p?.category || p?.category_id || "Meat"),
           unitOfMeasure: String(p?.unit_of_measure || "kg"),
-          quantityMin: r?.quantity_min ? Number(r.quantity_min) : 0,
+          // A minimum commercial order quantity only matters at GENERATION
+          // time (enforced separately in InvoiceEngine.ts) — it must never
+          // block EDITING/balancing an already-generated batch. The only
+          // invariants balancing has to hold are the batch's total amount
+          // and each product's total quantity staying exactly conserved;
+          // individual lines are free to carry any fractional quantity
+          // (down to the 0.25kg commercial step) while redistributing.
+          quantityMin: 0,
           quantityMax: r?.quantity_max ? Number(r.quantity_max) : 1000,
           rateMin: r?.rate_min ? Number(r.rate_min) : 1,
           rateMax: r?.rate_max ? Number(r.rate_max) : 10000,
@@ -133,24 +140,30 @@ export class SalesInvoiceValidator {
 
     // Load stock ledger for available stock
     const availableStockMap = new Map<string, number>();
+    const totalPurchasedByProduct = new Map<string, number>();
     const stockSourceStr = batch.stock_source_batch_id;
 
     if (stockSourceStr) {
       const stockBatchIds = stockSourceStr
         .split(",")
         .map((id: string) => id.trim())
-        .filter(
-          (id: string) => Boolean(id) && !id.startsWith("CARRY_FORWARD_"),
-        );
+        .filter((id: string) => Boolean(id));
 
       if (stockBatchIds.length > 0) {
-        const { data: ledgerRows } = await supabase
-          .from("daily_stock_ledger")
-          .select(
-            "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
-          )
-          .in("purchase_batch_id", stockBatchIds)
-          .order("ledger_date", { ascending: true });
+        // Paginated — a source batch with many products/days easily
+        // exceeds PostgREST's default 1000-row cap, which would silently
+        // drop whichever products' rows fell past the cutoff.
+        const ledgerRows = await fetchAllQueryRows((from, to) =>
+          supabase
+            .from("daily_stock_ledger")
+            .select(
+              "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
+            )
+            .in("purchase_batch_id", stockBatchIds)
+            .order("ledger_date", { ascending: true })
+            .order("product_id", { ascending: true })
+            .range(from, to),
+        );
 
         if (ledgerRows && ledgerRows.length > 0) {
           const productGroups = new Map<string, any[]>();
@@ -166,6 +179,20 @@ export class SalesInvoiceValidator {
               a.ledger_date.localeCompare(b.ledger_date),
             );
             let carryForward = Number(rows[0].opening_stock) || 0;
+
+            // True physical ceiling for this product, batch-wide, ignoring
+            // date: opening stock of the very first ledger row plus every
+            // day's purchased_quantity. Balancing no longer cares which day
+            // a unit lands on, but it must never — in aggregate — sell more
+            // of a product than was ever actually purchased.
+            totalPurchasedByProduct.set(
+              pId,
+              (Number(rows[0].opening_stock) || 0) +
+                rows.reduce(
+                  (s: number, r: any) => s + Number(r.purchased_quantity || 0),
+                  0,
+                ),
+            );
 
             for (const row of rows) {
               const opening = carryForward;
@@ -186,14 +213,24 @@ export class SalesInvoiceValidator {
       }
     }
 
+    const majorCustomerIds = new Set<string>(
+      (batch.major_customers || [])
+        .map((m: any) => m.customer_id)
+        .filter(Boolean),
+    );
+
     return {
       batchId: String(batch.id),
       batchTotal: Number(batch.total_amount || 0),
+      thresholdMin: Number(batch.minimum_invoice_amount || 0),
+      thresholdMax: Number(batch.maximum_invoice_amount || 0),
       stockSourceBatchId: stockSourceStr ? String(stockSourceStr) : null,
       originalProductTotals,
       availableStockMap,
+      totalPurchasedByProduct,
       invoices,
       constraints,
+      majorCustomerIds,
     };
   }
 
@@ -226,9 +263,9 @@ export class SalesInvoiceValidator {
         const productName = originalLine?.product_name || rawLine.product_name;
         const hsnCode = originalLine?.hsn_code || rawLine.hsn_code;
         const uom =
-          constraint?.unitOfMeasure ||
           originalLine?.unit_of_measure ||
           rawLine.unit_of_measure ||
+          constraint?.unitOfMeasure ||
           "kg";
         const category =
           constraint?.category || originalLine?.category || rawLine.category;
@@ -271,7 +308,23 @@ export class SalesInvoiceValidator {
   public static validateInvoice(
     invoice: SalesInvoice,
     constraints?: Map<string, SalesProductConstraint>,
+    original?: SalesInvoice,
   ): { valid: boolean; message?: string } {
+    // A product can legitimately appear more than once on the same invoice
+    // (two lines for the same product, e.g. under different customers). A
+    // flat Map keyed by product_id would collapse duplicates down to just
+    // the LAST original line, so comparing an EARLIER duplicate's current
+    // value against it produces a false "changed" reading — incorrectly
+    // subjecting an untouched line to today's bounds instead of grandfathering
+    // it. Keep every original line per product_id, matched back up by
+    // occurrence order (preserved end-to-end for untouched duplicates).
+    const originalLinesByPid = new Map<string, SalesLine[]>();
+    for (const line of original?.products || []) {
+      const arr = originalLinesByPid.get(line.product_id) || [];
+      arr.push(line);
+      originalLinesByPid.set(line.product_id, arr);
+    }
+    const occurrenceSeen = new Map<string, number>();
     if (!invoice || invoice.total_amount <= 0) {
       return {
         valid: false,
@@ -288,9 +341,10 @@ export class SalesInvoiceValidator {
       };
     }
 
-    const seenPids = new Set<string>();
-
     for (const p of invoice.products) {
+      const occIdx = occurrenceSeen.get(p.product_id) || 0;
+      occurrenceSeen.set(p.product_id, occIdx + 1);
+
       // Rule 10: Missing mandatory fields
       if (
         !p.product_id ||
@@ -304,14 +358,21 @@ export class SalesInvoiceValidator {
         };
       }
 
-      // Rule 10: Duplicate products check
-      if (seenPids.has(p.product_id)) {
+      // Rule 10: Duplicate products check — grandfathered the same way rate/
+      // quantity bounds are: a duplicate that already existed before this
+      // edit (this occurrence count doesn't exceed what the original invoice
+      // already had) isn't something this edit introduced or can silently
+      // fix, so it must not block editing an unrelated product on the same
+      // batch. A NEW duplicate (no original invoice, or more occurrences
+      // than the original had) is still rejected outright.
+      const originalOccurrenceCount =
+        originalLinesByPid.get(p.product_id)?.length || 0;
+      if (occIdx > 0 && occIdx >= originalOccurrenceCount) {
         return {
           valid: false,
           message: `Duplicate Product Error: Product "${p.product_name}" appears multiple times on invoice ${invoice.invoice_number || invoice.id}.`,
         };
       }
-      seenPids.add(p.product_id);
 
       // Rule 9: Positive values check
       if (p.quantity <= 0) {
@@ -335,8 +396,17 @@ export class SalesInvoiceValidator {
         };
       }
 
-      // Rule 5: Line Amount validation
-      if (p.amount <= 0 || roundMoney(p.quantity * p.rate) !== p.amount) {
+      // Rule 5: Line Amount validation — amounts are whole-rupee (see
+      // computeLineAmount, which is what actually sets p.amount upstream in
+      // normaliseEditedInvoice/the solver/repair). Comparing against a
+      // 2-decimal roundMoney here instead would spuriously reject any line
+      // whose quantity × rate isn't already an exact whole rupee (e.g.
+      // 14.25 × 158 = 2251.5 rounds to 2252, which 2-decimal rounding would
+      // never match).
+      if (
+        p.amount <= 0 ||
+        computeLineAmount(p.quantity, p.rate) !== p.amount
+      ) {
         return {
           valid: false,
           message: `Line Amount Mismatch: Product "${p.product_name}" line amount (${p.amount}) does not equal quantity × rate.`,
@@ -364,19 +434,33 @@ export class SalesInvoiceValidator {
       }
 
       // Rule 2: Product Rule Validation (Min/Max Quantity & Rate)
+      // Bounds can be tightened after an invoice is saved. A line the user
+      // didn't actually change (same quantity/rate as originally saved)
+      // keeps whatever value was already valid at save time — otherwise a
+      // rule change would permanently block editing older invoices.
       if (constraints) {
         const constraint = constraints.get(p.product_id);
+        const origLine = originalLinesByPid.get(p.product_id)?.[occIdx];
+        const quantityUnchanged =
+          origLine !== undefined &&
+          Math.abs(origLine.quantity - p.quantity) < 0.001;
+        const rateUnchanged =
+          origLine !== undefined && Math.abs(origLine.rate - p.rate) < 0.001;
         if (constraint) {
           if (
-            p.quantity < constraint.quantityMin ||
-            p.quantity > constraint.quantityMax
+            !quantityUnchanged &&
+            (p.quantity < constraint.quantityMin ||
+              p.quantity > constraint.quantityMax)
           ) {
             return {
               valid: false,
               message: `Product Rule Violation: Product "${p.product_name}" quantity (${p.quantity}) is outside allowed bounds [${constraint.quantityMin}, ${constraint.quantityMax}].`,
             };
           }
-          if (p.rate < constraint.rateMin || p.rate > constraint.rateMax) {
+          if (
+            !rateUnchanged &&
+            (p.rate < constraint.rateMin || p.rate > constraint.rateMax)
+          ) {
             return {
               valid: false,
               message: `Product Rule Violation: Product "${p.product_name}" rate (₹${p.rate}) is outside allowed bounds [₹${constraint.rateMin}, ₹${constraint.rateMax}].`,

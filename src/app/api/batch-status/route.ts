@@ -65,6 +65,38 @@ export async function POST(request: NextRequest) {
           { status: 400 },
         );
       }
+
+      // A SALES batch's source purchase batch only ever gets its
+      // daily_stock_ledger.sold_quantity updated by the "Generate
+      // Splitup"/reveal step — if the user finalizes without ever clicking
+      // that (e.g. going straight from Auto Allocate save to Finalize),
+      // the ledger never learns this stock was sold, so it keeps showing
+      // as fully available/no-leftover for the NEXT sales batch even
+      // though this one is now locked in. Post it here too if it's still
+      // pending — postSalesBatchStockLedger ADDS to whatever's already
+      // recorded, so this must only run once; "pending" is the same
+      // never-revealed signal /api/reveal-sales-batch-splitup itself relies on.
+      const stillPending = invoices.some((inv: any) => inv.status === "pending");
+      if (stillPending) {
+        const { data: batchRow } = await supabase
+          .from("invoice_batch")
+          .select("batch_type, stock_source_batch_id")
+          .eq("id", batchId)
+          .single();
+
+        if (batchRow?.batch_type === "SALES" && batchRow.stock_source_batch_id) {
+          await InvoiceEngine.postSalesBatchStockLedger(
+            supabase,
+            batchId,
+            batchRow.stock_source_batch_id,
+          );
+        }
+
+        await supabase
+          .from("invoice")
+          .update({ status: "generated" })
+          .eq("invoice_batch_id", batchId);
+      }
     }
 
     await InvoiceEngine.updateBatchStatus(supabase, batchId, action, user.id);

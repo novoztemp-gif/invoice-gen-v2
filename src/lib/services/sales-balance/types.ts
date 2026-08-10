@@ -70,11 +70,16 @@ export interface SalesInvoiceUpdate {
 export interface SalesBalanceContext {
   batchId: string;
   batchTotal: number;
+  thresholdMin?: number;
+  thresholdMax?: number;
   stockSourceBatchId: string | null;
   originalProductTotals: Map<string, number>;
   availableStockMap: Map<string, number>;
+  /** Total ever purchased per product (opening stock + all purchased_quantity, batch-wide, ignoring date) — the true physical ceiling regardless of which day it landed on. */
+  totalPurchasedByProduct: Map<string, number>;
   invoices: SalesInvoice[];
   constraints: Map<string, SalesProductConstraint>;
+  majorCustomerIds: Set<string>;
 }
 
 export interface SalesGeneratedLineCandidate {
@@ -112,6 +117,10 @@ export interface SalesSolverPlan {
   totalCost: number;
   batchDelta: number;
   productDeltas: Map<string, number>;
+  // Brand-new invoices created as a last resort by SalesNewInvoiceCreator
+  // when no existing invoice had room to absorb a product's quantity
+  // surplus. Absent/empty means nothing needed to be created.
+  newInvoices?: SalesInvoice[];
 }
 
 export interface SalesSolverResult {

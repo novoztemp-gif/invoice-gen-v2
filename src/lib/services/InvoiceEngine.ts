@@ -1,6 +1,6 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 import { MAX_INVOICES_PER_BATCH } from "@/lib/constants/invoice";
-import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
+import { fetchAllInvoicesForBatch, fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 import {
   computeLineAmount,
   generateCommercialQuantity,
@@ -10,8 +10,8 @@ import {
   roundToWholeInteger,
 } from "@/lib/utils/quantity-rate-utils";
 import { AutoBalanceEngine } from "./AutoBalanceEngine";
-import { SalesAutoBalanceEngine } from "./SalesAutoBalanceEngine";
 import { InvoiceNumberingService } from "./InvoiceNumberingService";
+import { SalesAutoBalanceEngine } from "./SalesAutoBalanceEngine";
 
 export interface ProductConfig {
   product_id: string;
@@ -686,10 +686,10 @@ export class InvoiceEngine {
       throw new Error(validation.message);
     }
 
-    // 2. Fetch original invoice to get its original total before saving
+    // 2. Fetch original invoice to get its original total/products before saving
     const { data: originalInvoice } = await supabase
       .from("invoice")
-      .select("total_amount, invoice_number")
+      .select("total_amount, invoice_number, products")
       .eq("id", invoiceId)
       .single();
 
@@ -706,8 +706,39 @@ export class InvoiceEngine {
     const originalTotal = Number(originalInvoice?.total_amount || 0);
     const newTotal = Number(updates.total_amount || 0);
 
-    // 3. Save and Rebalance atomically if total changed, otherwise perform a single update
-    if (originalTotal !== newTotal) {
+    // A product swap (e.g. -5kg Orange, +equivalent-value Apple) can leave
+    // the invoice's own total_amount unchanged while still needing full
+    // cross-invoice rebalancing to keep each product's batch-wide total
+    // conserved — checking total_amount alone would let this through as a
+    // plain, unbalanced update.
+    const originalProducts: any[] = Array.isArray(originalInvoice?.products)
+      ? originalInvoice.products
+      : [];
+    const newProducts: any[] = Array.isArray(updates.products)
+      ? updates.products
+      : [];
+    const productsChanged = (() => {
+      if (originalProducts.length !== newProducts.length) return true;
+      const origByPid = new Map(
+        originalProducts.map((p: any) => [p.product_id, p]),
+      );
+      for (const p of newProducts) {
+        const orig = origByPid.get(p.product_id);
+        if (!orig) return true;
+        if (
+          Math.abs(Number(p.quantity || 0) - Number(orig.quantity || 0)) >
+            0.001 ||
+          Math.abs(Number(p.rate || 0) - Number(orig.rate || 0)) > 0.001
+        ) {
+          return true;
+        }
+      }
+      return false;
+    })();
+
+    // 3. Save and Rebalance atomically if the total or product composition
+    // changed, otherwise perform a single update (e.g. transport details only).
+    if (originalTotal !== newTotal || productsChanged) {
       if (batchCheck?.batch_type === "SALES") {
         const salesEngine = new SalesAutoBalanceEngine(supabase);
         return await salesEngine.saveEditedInvoiceAndBalance(
@@ -764,11 +795,15 @@ export class InvoiceEngine {
   ): Promise<Map<string, number>> {
     const carryForwardMap = new Map<string, number>();
 
-    // Load all ledger rows before currentBatchFromDate
-    const { data: ledgerRows } = await supabase
-      .from("daily_stock_ledger")
-      .select("product_id, purchased_quantity, sold_quantity, ledger_date")
-      .lt("ledger_date", currentBatchFromDate);
+    // Load all ledger rows before currentBatchFromDate. Paginated —
+    // easily exceeds PostgREST's default 1000-row cap.
+    const ledgerRows = await fetchAllQueryRows((from, to) =>
+      supabase
+        .from("daily_stock_ledger")
+        .select("product_id, purchased_quantity, sold_quantity, ledger_date")
+        .lt("ledger_date", currentBatchFromDate)
+        .range(from, to),
+    );
 
     if (!ledgerRows || ledgerRows.length === 0) {
       return carryForwardMap;
@@ -835,6 +870,36 @@ export class InvoiceEngine {
     return { isValid: true };
   }
 
+  // Purchase/sales generation draws heavily on Math.random() for supplier
+  // assignment, product selection, and budget partitioning, so the strict
+  // pre-persistence guards (max amount, batch total, major customer exact
+  // balance, line-count, category) occasionally reject a single random draw
+  // even though the batch configuration itself is perfectly feasible — a
+  // different draw succeeds. Rather than surface that as an error to a user
+  // who can't do anything about it besides clicking "Generate" again,
+  // transparently retry with a fresh draw a bounded number of times. A
+  // configuration that's genuinely infeasible (e.g. minimum invoice amount
+  // unreachable within Product Rules) fails identically on every attempt and
+  // still surfaces after the budget is exhausted.
+  private static readonly MAX_GENERATION_ATTEMPTS = 8;
+
+  private static generateWithAutoRetry<T>(generate: () => T): T {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= this.MAX_GENERATION_ATTEMPTS; attempt++) {
+      try {
+        return generate();
+      } catch (err) {
+        lastError = err;
+        if (attempt < this.MAX_GENERATION_ATTEMPTS) {
+          console.warn(
+            `[generateWithAutoRetry] Attempt ${attempt}/${this.MAX_GENERATION_ATTEMPTS} failed, retrying with a fresh draw: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+    }
+    throw lastError;
+  }
+
   /**
    * Generate invoice split-ups and save them to the database
    */
@@ -854,7 +919,10 @@ export class InvoiceEngine {
     }
 
     // If batch_status is null or FINALIZED, reset batch_status to draft so RLS allows regenerating/saving invoices
-    if (!(batch as any).batch_status || (batch as any).batch_status === "FINALIZED") {
+    if (
+      !(batch as any).batch_status ||
+      (batch as any).batch_status === "FINALIZED"
+    ) {
       await supabase
         .from("invoice_batch")
         .update({ batch_status: "draft" })
@@ -870,7 +938,8 @@ export class InvoiceEngine {
     console.log("=========================");
     console.log({
       previousEndingSequence: (typedBatch as any).previous_ending_sequence,
-      rawBatchPreviousEndingSequence: (typedBatch as any).previous_ending_sequence,
+      rawBatchPreviousEndingSequence: (typedBatch as any)
+        .previous_ending_sequence,
     });
 
     if (!typedBatch.products || typedBatch.products.length === 0) {
@@ -910,19 +979,20 @@ export class InvoiceEngine {
     // Manual Sequence Override or Auto-Detection of Highest Existing Sequence Number
     const prevEndingSeq = (typedBatch as any).previous_ending_sequence;
     let startingCounter = 1;
-
-    if (
+    const isManualSequenceOverride =
       prevEndingSeq !== undefined &&
       prevEndingSeq !== null &&
       prevEndingSeq !== "" &&
       !isNaN(Number(prevEndingSeq)) &&
-      Number(prevEndingSeq) >= 0
-    ) {
+      Number(prevEndingSeq) >= 0;
+
+    if (isManualSequenceOverride) {
       startingCounter = Number(prevEndingSeq) + 1;
     } else {
-      const debugAbbr = (typedBatch as any).issuing_company_abbreviation || "IC";
+      const debugAbbr =
+        (typedBatch as any).issuing_company_abbreviation || "IC";
       const prefix = `${debugAbbr}-${canonicalFy}-${invType}`;
-      
+
       let maxSeq = 0;
       let page = 0;
       const pageSize = 1000;
@@ -1002,38 +1072,61 @@ export class InvoiceEngine {
         }
       }
 
-      invoices = this.generatePurchaseInvoiceSplitupsInternal(
-        typedBatch,
-        numberOfDays,
-        fromDate,
-        startingCounter,
-        undefined,
-        supplierCategoryMap,
+      invoices = this.generateWithAutoRetry(() =>
+        this.generatePurchaseInvoiceSplitupsInternal(
+          typedBatch,
+          numberOfDays,
+          fromDate,
+          startingCounter,
+          undefined,
+          supplierCategoryMap,
+        ),
       );
     } else {
       let availableStockMap: Map<string, any> | null = null;
+      // True physical ceiling per product (opening stock + every day's
+      // purchased_quantity, batch-wide, ignoring date) — a final safety
+      // check compares total GENERATED quantity per product against this
+      // after generation completes, so a bug in the per-day sourcing logic
+      // (like the ledger pagination tie-break bug fixed alongside this)
+      // gets caught loudly instead of silently over-selling stock.
+      const totalPurchasedByProductForCheck = new Map<string, number>();
       if (typedBatch.stock_source_batch_id) {
         const batchIds = typedBatch.stock_source_batch_id
           .split(",")
           .map((id: string) => id.trim())
-          .filter(
-            (id: string) => Boolean(id) && !id.startsWith("CARRY_FORWARD_"),
+          .filter((id: string) => Boolean(id));
+
+        let ledgerData: any[] = [];
+        try {
+          ledgerData = await fetchAllQueryRows((from, to) =>
+            supabase
+              .from("daily_stock_ledger")
+              .select(
+                "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
+              )
+              .in(
+                "purchase_batch_id",
+                batchIds.length > 0
+                  ? batchIds
+                  : [typedBatch.stock_source_batch_id],
+              )
+              // Ordering by ledger_date ALONE is not deterministic across
+              // separate paginated .range() calls when many rows share the
+              // same date (every product purchased that day) — Postgres is
+              // free to break ties differently per page query, so a
+              // same-date row can land in two consecutive pages (counted
+              // twice, inflating that product's available stock) or in
+              // neither (dropped, starving it) once the ledger exceeds a
+              // page size. product_id as a secondary sort key makes the
+              // order — and therefore the pagination split — stable.
+              .order("ledger_date", { ascending: true })
+              .order("product_id", { ascending: true })
+              .range(from, to),
           );
-
-        const { data: ledgerData, error: ledgerError } = await supabase
-          .from("daily_stock_ledger")
-          .select(
-            "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
-          )
-          .in(
-            "purchase_batch_id",
-            batchIds.length > 0 ? batchIds : [typedBatch.stock_source_batch_id],
-          )
-          .order("ledger_date", { ascending: true });
-
-        if (ledgerError) {
+        } catch (err: any) {
           throw new Error(
-            `Failed to load daily stock ledger: ${ledgerError.message}`,
+            `Failed to load daily stock ledger: ${err?.message || "Unknown error"}`,
           );
         }
 
@@ -1110,6 +1203,14 @@ export class InvoiceEngine {
         }
 
         for (const [productId, rows] of productGroups.entries()) {
+          totalPurchasedByProductForCheck.set(
+            productId,
+            (Number(rows[0].opening_stock) || 0) +
+              rows.reduce(
+                (s: number, r: any) => s + (Number(r.purchased_quantity) || 0),
+                0,
+              ),
+          );
           let carryForward = Number(rows[0].opening_stock) || 0;
           for (const row of rows) {
             const opening = carryForward;
@@ -1127,13 +1228,45 @@ export class InvoiceEngine {
         }
       }
 
-      invoices = this.generateInvoiceSplitupsInternal(
-        typedBatch,
-        numberOfDays,
-        fromDate,
-        startingCounter,
-        availableStockMap,
+      invoices = this.generateWithAutoRetry(() =>
+        this.generateInvoiceSplitupsInternal(
+          typedBatch,
+          numberOfDays,
+          fromDate,
+          startingCounter,
+          availableStockMap,
+        ),
       );
+
+      // Final safety net: no product's GENERATED total may exceed what was
+      // actually purchased for it, batch-wide, regardless of which day it
+      // landed on. Every per-day sourcing step is meant to guarantee this by
+      // construction, but a bug in that sourcing (e.g. the ledger
+      // pagination tie-break issue fixed alongside this check) can silently
+      // over-allocate — this catches that class of bug loudly, at
+      // generation time, instead of it surfacing later as a stock
+      // discrepancy discovered by chance.
+      if (totalPurchasedByProductForCheck.size > 0) {
+        const generatedByProduct = new Map<string, number>();
+        for (const inv of invoices) {
+          for (const p of (inv as any).products || []) {
+            if (!p.product_id) continue;
+            generatedByProduct.set(
+              p.product_id,
+              (generatedByProduct.get(p.product_id) || 0) +
+                Number(p.quantity || 0),
+            );
+          }
+        }
+        for (const [pid, purchased] of totalPurchasedByProductForCheck.entries()) {
+          const generated = generatedByProduct.get(pid) || 0;
+          if (generated > purchased + 0.01) {
+            throw new Error(
+              `Overstock Error: Generated ${generated} KG of product ${pid}, exceeding total purchased ${purchased} KG. Generation aborted.`,
+            );
+          }
+        }
+      }
     }
 
     // Validate all generated invoices before saving
@@ -1141,43 +1274,6 @@ export class InvoiceEngine {
       const validation = this.validateInvoiceData(inv);
       if (!validation.isValid) {
         throw new Error(`Generation validation failed: ${validation.message}`);
-      }
-    }
-
-    // Save quantities for PURCHASE batches (Budget-Driven inventory generation)
-    if (typedBatch.batch_type === "PURCHASE") {
-      const productTotalQty = new Map<string, number>();
-      for (const inv of invoices) {
-        for (const p of inv.products) {
-          productTotalQty.set(
-            p.product_id,
-            (productTotalQty.get(p.product_id) || 0) + p.quantity,
-          );
-        }
-      }
-
-      const purchaseProductsToUpsert = Array.from(
-        productTotalQty.entries(),
-      ).map(([prodId, qty]) => ({
-        batch_id: batchId,
-        product_id: prodId,
-        monthly_quantity: qty,
-      }));
-
-      // Delete existing and insert new generated quantities
-      await supabase
-        .from("purchase_batch_products")
-        .delete()
-        .eq("batch_id", batchId);
-
-      const { error: insertQtyError } = await supabase
-        .from("purchase_batch_products")
-        .insert(purchaseProductsToUpsert);
-
-      if (insertQtyError) {
-        throw new Error(
-          `Failed to save purchase batch product inventory: ${insertQtyError.message}`,
-        );
       }
     }
 
@@ -1198,72 +1294,12 @@ export class InvoiceEngine {
       edited_at: inv.edited_at || null,
     }));
 
-    // Ensure 100% unique invoice numbers before inserting into database
-    const currentAbbr = (typedBatch as any).issuing_company_abbreviation || "IC";
-    const currentFy = canonicalFy;
-    const prefix = `${currentAbbr}-${currentFy}-${invType}`;
-
-    const existingNumberSet = new Set<string>();
-    let highestSeqInDb = 0;
-    let invPage = 0;
-    const invPageSize = 1000;
-    let hasMoreInvoices = true;
-
-    while (hasMoreInvoices) {
-      const { data: pageInvoices } = await supabase
-        .from("invoice")
-        .select("invoice_number")
-        .neq("invoice_batch_id", batchId)
-        .like("invoice_number", `${prefix}-%`)
-        .range(invPage * invPageSize, (invPage + 1) * invPageSize - 1);
-
-      if (pageInvoices && pageInvoices.length > 0) {
-        for (const row of pageInvoices) {
-          const num = row.invoice_number;
-          if (num) {
-            existingNumberSet.add(num);
-            const parts = num.split("-");
-            const seq = parseInt(parts[parts.length - 1], 10);
-            if (!isNaN(seq) && seq > highestSeqInDb) {
-              highestSeqInDb = seq;
-            }
-          }
-        }
-        if (pageInvoices.length < invPageSize) {
-          hasMoreInvoices = false;
-        } else {
-          invPage++;
-        }
-      } else {
-        hasMoreInvoices = false;
-      }
-    }
-
-    const usedNumberSet = new Set<string>();
-    let hasCollision = false;
-
-    for (const inv of invoicesToInsert) {
-      if (
-        existingNumberSet.has(inv.invoice_number) ||
-        usedNumberSet.has(inv.invoice_number)
-      ) {
-        hasCollision = true;
-        break;
-      }
-      usedNumberSet.add(inv.invoice_number);
-    }
-
-    if (hasCollision) {
-      let safeSeq = Math.max(startingCounter, highestSeqInDb + 1);
-      for (const inv of invoicesToInsert) {
-        inv.invoice_number = InvoiceNumberingService.formatInvoiceNumber(
-          currentAbbr,
-          currentFy,
-          invType,
-          safeSeq++,
-        );
-      }
-    }
+    // Invoice numbers are assigned strictly from the user-provided Previous
+    // Ending Sequence Number + 1, with no auto-detection or collision-based
+    // renumbering against existing invoices. If the numbers collide with
+    // something already in the database, the insert below fails on the
+    // table's own uniqueness constraint rather than silently reassigning
+    // numbers the user didn't ask for.
 
     // STEP 3: Immediately before inserting into the invoice table
     console.log("==========================================");
@@ -1343,11 +1379,14 @@ export class InvoiceEngine {
     const batchIds = stockSourceBatchId
       .split(",")
       .map((id: string) => id.trim())
-      .filter((id: string) => Boolean(id) && !id.startsWith("CARRY_FORWARD_"));
+      .filter((id: string) => Boolean(id));
 
     if (batchIds.length === 0) return;
 
-    const salesInvoices = await fetchAllInvoicesForBatch(supabase, salesBatchId);
+    const salesInvoices = await fetchAllInvoicesForBatch(
+      supabase,
+      salesBatchId,
+    );
     if (!salesInvoices || salesInvoices.length === 0) return;
 
     // Sum sold quantities per product and date
@@ -1374,14 +1413,26 @@ export class InvoiceEngine {
       }
     }
 
-    // Fetch existing daily_stock_ledger entries for the source purchase batch(es)
-    const { data: ledgerRows, error: fetchErr } = await supabase
-      .from("daily_stock_ledger")
-      .select("*")
-      .in("purchase_batch_id", batchIds)
-      .order("ledger_date", { ascending: true });
+    // Fetch existing daily_stock_ledger entries for the source purchase
+    // batch(es). Paginated — easily exceeds PostgREST's default 1000-row
+    // cap, which would silently leave whichever products' rows fell past
+    // the cutoff with a stale/wrong sold_quantity.
+    let ledgerRows: any[] = [];
+    try {
+      ledgerRows = await fetchAllQueryRows((from, to) =>
+        supabase
+          .from("daily_stock_ledger")
+          .select("*")
+          .in("purchase_batch_id", batchIds)
+          .order("ledger_date", { ascending: true })
+          .order("product_id", { ascending: true })
+          .range(from, to),
+      );
+    } catch {
+      return;
+    }
 
-    if (fetchErr || !ledgerRows || ledgerRows.length === 0) return;
+    if (!ledgerRows || ledgerRows.length === 0) return;
 
     // Group ledger rows by product_id
     const rowsByProduct = new Map<string, any[]>();
@@ -1392,52 +1443,107 @@ export class InvoiceEngine {
       rowsByProduct.get(row.product_id)!.push(row);
     }
 
+    // Collect every row's new sold_quantity across all products first, then
+    // write them all in bounded concurrent chunks — writing one row at a
+    // time here previously meant a batch with many products/days (1000+
+    // ledger rows) issued that many sequential DB round-trips in a single
+    // request, which could time out partway through and silently leave most
+    // rows' sold_quantity unset (stock that was genuinely sold still showing
+    // as available/leftover).
+    const pendingUpdates: { id: string; sold_quantity: number }[] = [];
+
     for (const [productId, rows] of rowsByProduct.entries()) {
-      const dateQtyMap = new Map<string, number>();
-      for (const row of rows) {
-        const key = `${row.ledger_date}_${row.product_id}`;
-        if (soldByDateAndProduct.has(key)) {
-          dateQtyMap.set(row.id, soldByDateAndProduct.get(key)!);
+      // Chronological walk across all selected purchase batches' rows for this
+      // product. Only the quantity actually sold on a row's own date (plus any
+      // genuinely unmatched spillover) is added to that row's sold_quantity —
+      // never the full available amount just because *something* was sold.
+      const sortedRows = [...rows].sort((a, b) => {
+        if (a.ledger_date !== b.ledger_date) {
+          return a.ledger_date < b.ledger_date ? -1 : 1;
+        }
+        return (
+          batchIds.indexOf(a.purchase_batch_id) -
+          batchIds.indexOf(b.purchase_batch_id)
+        );
+      });
+
+      const dateQtyRemaining = new Map<string, number>();
+      for (const [key, qty] of soldByDateAndProduct.entries()) {
+        const sepIdx = key.lastIndexOf("_");
+        const dateStr = key.slice(0, sepIdx);
+        const keyProductId = key.slice(sepIdx + 1);
+        if (keyProductId === productId) {
+          dateQtyRemaining.set(dateStr, qty);
         }
       }
 
       const totalSoldForProd = soldByProductTotal.get(productId) || 0;
-      let remainingUnallocatedSold = totalSoldForProd;
+      let allocatedSoFar = 0;
+      let carry = 0;
+      const rowConsumed = new Map<string, number>();
 
-      for (const row of rows) {
-        const opening = Number(row.opening_stock || 0);
+      for (const row of sortedRows) {
+        const existingSold = Number(row.sold_quantity || 0);
         const purchased = Number(row.purchased_quantity || 0);
-        const totalPurchasedAvailable = opening + purchased;
+        const available = Math.max(0, carry + purchased - existingSold);
 
-        let newSold = 0;
-        const dateSpecificQty = dateQtyMap.get(row.id);
+        const dateRemaining = dateQtyRemaining.get(row.ledger_date) || 0;
+        const consumed = Math.min(available, dateRemaining);
 
-        if (dateSpecificQty !== undefined && dateSpecificQty > 0) {
-          newSold = Math.min(totalPurchasedAvailable, dateSpecificQty);
-        } else if (remainingUnallocatedSold > 0) {
-          newSold = Math.min(totalPurchasedAvailable, remainingUnallocatedSold);
-          remainingUnallocatedSold -= newSold;
+        if (consumed > 0) {
+          dateQtyRemaining.set(row.ledger_date, dateRemaining - consumed);
+          allocatedSoFar += consumed;
         }
+        rowConsumed.set(row.id, consumed);
 
-        // Rule: Sales generation completely consumes the allocated Purchase stock.
-        // After Sales generation: Purchased Quantity == Sold Quantity (remaining stock = 0).
-        const finalSoldQty = Math.max(
-          Number(row.sold_quantity || 0),
-          newSold > 0
-            ? newSold
-            : totalSoldForProd > 0
-            ? totalPurchasedAvailable
-            : Number(row.sold_quantity || 0),
-        );
-
-        await supabase
-          .from("daily_stock_ledger")
-          .update({
-            sold_quantity: Math.min(totalPurchasedAvailable, finalSoldQty),
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", row.id);
+        carry = available - consumed;
       }
+
+      // Safety net: spill over any unmatched remainder (e.g. a sold date with
+      // no corresponding ledger row) across rows in chronological order,
+      // bounded by each row's real remaining capacity — never forced.
+      let spillover = Math.max(0, totalSoldForProd - allocatedSoFar);
+      if (spillover > 0.001) {
+        for (const row of sortedRows) {
+          if (spillover <= 0.001) break;
+          const existingSold = Number(row.sold_quantity || 0);
+          const purchased = Number(row.purchased_quantity || 0);
+          const alreadyConsumed = rowConsumed.get(row.id) || 0;
+          const remainingCapacity = Math.max(
+            0,
+            purchased - existingSold - alreadyConsumed,
+          );
+          const extra = Math.min(remainingCapacity, spillover);
+          if (extra > 0) {
+            rowConsumed.set(row.id, alreadyConsumed + extra);
+            spillover -= extra;
+          }
+        }
+      }
+
+      for (const row of sortedRows) {
+        const consumed = rowConsumed.get(row.id) || 0;
+        if (consumed <= 0.001) continue;
+
+        const newSoldQuantity =
+          Math.round((Number(row.sold_quantity || 0) + consumed) * 100) / 100;
+
+        pendingUpdates.push({ id: row.id, sold_quantity: newSoldQuantity });
+      }
+    }
+
+    const CHUNK = 25;
+    const updatedAt = new Date().toISOString();
+    for (let i = 0; i < pendingUpdates.length; i += CHUNK) {
+      const chunk = pendingUpdates.slice(i, i + CHUNK);
+      await Promise.all(
+        chunk.map((u) =>
+          supabase
+            .from("daily_stock_ledger")
+            .update({ sold_quantity: u.sold_quantity, updated_at: updatedAt })
+            .eq("id", u.id),
+        ),
+      );
     }
   }
 
@@ -1464,6 +1570,21 @@ export class InvoiceEngine {
   }
 
   private static getProductCategory(p: any): "Meat" | "Fruits" {
+    // The products table's own `category` column (constrained to exactly
+    // 'Meat' | 'Fruits' by schema) is the real source of truth — trust it
+    // first. Name-based guessing is a last-resort fallback for the rare
+    // case that field is genuinely missing, and previously ran BEFORE this
+    // check, which meant a product with a perfectly valid category could
+    // still get silently overridden by a keyword match (or, far more often
+    // for this catalog, fall through both keyword lists — YAMS, SEER,
+    // GOOSEBERRY, SAPOTA, POMFRET etc. match neither — straight into a
+    // hardcoded "Meat" default regardless of what it actually was).
+    const explicitCategory = String(p?.category || p?.category_name || "")
+      .trim()
+      .toUpperCase();
+    if (explicitCategory === "FRUITS") return "Fruits";
+    if (explicitCategory === "MEAT") return "Meat";
+
     const name = String(p?.product_name || "").toUpperCase();
     if (
       /APPLE|BANANA|BLUEBERRY|CUSTARD APPLE|KIWI|LYCHEE|CHERRY|FIG|ORANGE|GRAPE|MANGO|PEACH|PEAR|PLUM|WATERMELON|PINEAPPLE|PAPAYA|FRUIT/i.test(
@@ -1479,8 +1600,7 @@ export class InvoiceEngine {
     ) {
       return "Meat";
     }
-    const cat = String(p?.category || p?.category_name || "Meat").toUpperCase();
-    return cat.includes("FRUIT") ? "Fruits" : "Meat";
+    return explicitCategory.includes("FRUIT") ? "Fruits" : "Meat";
   }
 
   /**
@@ -1562,6 +1682,41 @@ export class InvoiceEngine {
       dateList.push(dateStr);
     }
 
+    // Compute proportional category totals across batch products — used both
+    // to pick a category for each Major Customer invoice (keeping every
+    // invoice category-pure, same rule as regular invoices) and to size
+    // regular-customer category quotas below.
+    const categoryTotals = new Map<string, number>();
+    for (const p of batch.products) {
+      const cat = this.getProductCategory(p);
+      const avgRate =
+        (parseFloat(p.perDayRateMin) + parseFloat(p.perDayRateMax)) / 2;
+      const avgQty =
+        (parseFloat(p.perDayQtyMin) + parseFloat(p.perDayQtyMax)) / 2;
+      const estAmt =
+        (isNaN(avgRate) ? 100 : avgRate) * (isNaN(avgQty) ? 10 : avgQty);
+      categoryTotals.set(cat, (categoryTotals.get(cat) || 0) + estAmt);
+    }
+    const grandTotalEst =
+      Array.from(categoryTotals.values()).reduce((a, b) => a + b, 0) || 1;
+    const categoryKeys = Array.from(categoryTotals.keys());
+    const productConfigById = new Map<string, ProductConfig>(
+      (batch.products || []).map((p: any) => [p.product_id, p]),
+    );
+
+    // Which customer_id already has an invoice on which date — shared across
+    // Major Customer generation (below) and the regular day-first loop
+    // (further down), so no customer (major or regular) ever gets two
+    // invoices on the same date.
+    const usedPartiesByDate = new Map<string, Set<string>>();
+    const markPartyUsed = (dateStr: string, customerId: string | null) => {
+      if (!customerId) return;
+      if (!usedPartiesByDate.has(dateStr)) {
+        usedPartiesByDate.set(dateStr, new Set());
+      }
+      usedPartiesByDate.get(dateStr)!.add(customerId);
+    };
+
     // ── STEP 1: Process Configured Sales Major Customers FIRST (Reserving Stock) ──
     for (const m of majorCustomers) {
       if (!m.customer_id) continue;
@@ -1612,13 +1767,33 @@ export class InvoiceEngine {
       // Generate exact Major Customer Invoices
       for (let b = 0; b < majorBudgets.length; b++) {
         const targetBudget = majorBudgets[b];
+        // Per-customer-local index/total — never the global invoices.length,
+        // which would misalign date spacing for every major customer after
+        // the first.
         const dateStr: string = this.getSequentialDateForIndex(
-          invoices.length,
+          b,
           majorBudgets.length,
           dateList,
         );
 
-        const shuffled = [...batch.products].sort(() => Math.random() - 0.5);
+        // Pick ONE category for this invoice (weighted by its share of the
+        // batch's configured value), same rule regular invoices already
+        // follow — an invoice never mixes Meat and Fruits, even though a
+        // customer isn't locked to a category.
+        let categoryRoll = Math.random() * grandTotalEst;
+        let chosenCategory = categoryKeys[0] || "Meat";
+        for (const catKey of categoryKeys) {
+          categoryRoll -= categoryTotals.get(catKey) || 0;
+          if (categoryRoll <= 0) {
+            chosenCategory = catKey;
+            break;
+          }
+        }
+        const categoryProducts = batch.products.filter(
+          (p) => this.getProductCategory(p) === chosenCategory,
+        );
+
+        const shuffled = [...categoryProducts].sort(() => Math.random() - 0.5);
         const targetSubsetCount = Math.min(
           shuffled.length,
           Math.floor(Math.random() * 6) + 3,
@@ -1627,24 +1802,41 @@ export class InvoiceEngine {
 
         let currentInvoiceProducts: any[] = [];
         let currentInvoiceAmount = 0;
-        const usedQuantities = new Set<number>();
 
         for (let j = 0; j < chosenProducts.length; j++) {
           const p = chosenProducts[j];
           const minR = parseFloat(p.perDayRateMin) || 10;
           const maxR = parseFloat(p.perDayRateMax) || 500;
-          const rate = roundToWholeInteger(
-            minR + Math.random() * (maxR - minR),
-          );
+          let rate = roundToWholeInteger(minR + Math.random() * (maxR - minR));
 
-          const minQ = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
+          const minQ = parseFloat(p.perDayQtyMin) || 10;
           const maxQ = Math.max(minQ, parseFloat(p.perDayQtyMax) || 100);
 
           const remBudget = targetBudget - currentInvoiceAmount;
           if (remBudget <= 0) break;
 
+          // The invoice's first line is exempt from the "don't exceed
+          // budget" check below (an invoice can't end up with zero lines) —
+          // so its rate must itself be capped to whatever the target budget
+          // can actually afford at the minimum commercial quantity, instead
+          // of using an uncapped random rate that can blow straight past a
+          // tight budget before any line has even been added.
+          if (currentInvoiceProducts.length === 0) {
+            const maxAffordableRate = remBudget / minQ;
+            if (rate > maxAffordableRate) {
+              // A cap must always round DOWN — rounding to the nearest
+              // whole number (e.g. 999.9 -> 1000) can land back above the
+              // budget it was supposed to enforce.
+              rate = Math.max(minR, Math.floor(maxAffordableRate));
+            }
+          }
+
+          // Never exempt the first line from budget fit — an invoice with
+          // no viable product for its date/budget must end up with zero
+          // lines and be skipped (handled below), not seeded with a
+          // product that doesn't actually fit.
           const maxQtyFitting = remBudget / (rate || 1);
-          if (maxQtyFitting < minQ && currentInvoiceProducts.length > 0) {
+          if (maxQtyFitting < minQ) {
             continue;
           }
 
@@ -1674,17 +1866,33 @@ export class InvoiceEngine {
             }
           }
 
-          if (availStock <= 0 && currentInvoiceProducts.length > 0) continue;
+          // Never exempt the first line from the stock check either — a
+          // product with less real remaining stock than its own minimum
+          // commercial quantity cannot go on ANY invoice for this date,
+          // first line or not. (The old `Math.max(availStock, minQ)` below
+          // used to inflate the ceiling back up to minQ in exactly this
+          // case, which could oversell beyond what was actually
+          // purchased — skip instead.)
+          if (availStock < minQ) continue;
 
-          const upperLimit = Math.min(
-            Math.max(availStock, minQ),
-            maxQ,
-            Math.max(minQ, maxQtyFitting),
-          );
-          const qtyToPut = generateCommercialQuantity(minQ, upperLimit, {
-            productName: p.product_name,
-            existingQuantities: usedQuantities,
-          });
+          // Same product can't appear twice on one invoice.
+          if (
+            currentInvoiceProducts.some(
+              (cp) => cp.product_id === p.product_id,
+            )
+          ) {
+            continue;
+          }
+
+          // Deterministic: take as much of the real remaining stock as
+          // fits this invoice's budget and the line's own max quantity —
+          // never a random pick within that ceiling. If that ceiling is
+          // itself below minQ, the line genuinely doesn't fit — skip it
+          // rather than forcing quantity back up past what's actually
+          // available/affordable.
+          const upperLimit = Math.min(availStock, maxQ, maxQtyFitting);
+          const qtyToPut =
+            upperLimit < minQ ? 0 : Math.max(minQ, Math.floor(upperLimit * 4) / 4);
 
           if (qtyToPut <= 0) continue;
 
@@ -1713,7 +1921,6 @@ export class InvoiceEngine {
             }
           }
 
-          usedQuantities.add(qtyToPut);
           currentInvoiceProducts.push({
             product_id: p.product_id,
             product_name: p.product_name,
@@ -1729,9 +1936,35 @@ export class InvoiceEngine {
             Math.round((currentInvoiceAmount + lineAmt) * 100) / 100;
         }
 
-        // Fallback: If no products were added due to date stock constraints, force-add at least 1 product from batch
+        // Fallback: a Major Customer's invoice count/amount is a
+        // configured commitment, so this invoice must still get built even
+        // if the deterministic pass above found nothing that fit. Pick
+        // whichever batch product actually has the MOST real remaining
+        // stock for this date (never blindly batch.products[0]) so this
+        // last resort still respects the ledger rather than fabricating a
+        // sale from nothing whenever any real option exists at all.
         if (currentInvoiceProducts.length === 0 && batch.products.length > 0) {
-          const fallbackProd = batch.products[0];
+          let fallbackProd = batch.products[0];
+          let fallbackStock = -1;
+          for (const cand of batch.products) {
+            let candStock = 999999;
+            if (availableStockMap) {
+              const ledgerKey = `${dateStr}_${cand.product_id}`;
+              const val = availableStockMap.get(ledgerKey);
+              if (val && typeof val === "object") {
+                candStock = (val.opening || 0) + (val.purchased || 0);
+              } else if (typeof val === "number") {
+                candStock = val;
+              } else {
+                candStock = 0;
+              }
+            }
+            if (candStock > fallbackStock) {
+              fallbackStock = candStock;
+              fallbackProd = cand;
+            }
+          }
+
           const minR = parseFloat(fallbackProd.perDayRateMin) || 10;
           const maxR = parseFloat(fallbackProd.perDayRateMax) || 500;
           const rate = roundToWholeInteger(
@@ -1742,18 +1975,39 @@ export class InvoiceEngine {
             parseFloat(fallbackProd.perDayQtyMin) || 10,
           );
           const lineAmt = targetBudget;
-          const qtyToPut = Math.max(minQ, Math.round(lineAmt / (rate || 1)));
-
-          currentInvoiceProducts.push({
-            product_id: fallbackProd.product_id,
-            product_name: fallbackProd.product_name,
-            hsn_code: fallbackProd.hsn_code,
-            unit_of_measure: fallbackProd.unit_of_measure,
-            quantity: qtyToPut,
-            rate,
-            amount: lineAmt,
-            customer_id: customerId,
-          });
+          let qtyToPut = Math.max(minQ, Math.round(lineAmt / (rate || 1)));
+          // Cap to real remaining stock when the ledger has an answer for
+          // this product/date at all (fallbackStock stays 999999 only for
+          // Purchase batches, which don't carry an availableStockMap).
+          if (availableStockMap && fallbackStock < 999999) {
+            qtyToPut = Math.min(qtyToPut, Math.max(0, fallbackStock));
+          }
+          if (qtyToPut <= 0) {
+            // Truly nothing left anywhere for this date — nothing safe to
+            // add without overselling; leave this invoice slot empty
+            // rather than fabricate a line with zero real stock behind it.
+          } else {
+            if (availableStockMap) {
+              const ledgerKey = `${dateStr}_${fallbackProd.product_id}`;
+              const val = availableStockMap.get(ledgerKey);
+              if (val && typeof val === "object") {
+                val.purchased = Math.max(
+                  0,
+                  Math.round((val.purchased - qtyToPut) * 100) / 100,
+                );
+              }
+            }
+            currentInvoiceProducts.push({
+              product_id: fallbackProd.product_id,
+              product_name: fallbackProd.product_name,
+              hsn_code: fallbackProd.hsn_code,
+              unit_of_measure: fallbackProd.unit_of_measure,
+              quantity: qtyToPut,
+              rate,
+              amount: Math.round(qtyToPut * rate * 100) / 100,
+              customer_id: customerId,
+            });
+          }
         }
 
         // Adjust line item amounts / rate so total equals targetBudget
@@ -1802,6 +2056,12 @@ export class InvoiceEngine {
           }
         }
 
+        // Nothing safe to sell for this date anywhere in the batch — skip
+        // this invoice slot entirely rather than persist an empty/
+        // zero-amount invoice. (Rare: only when every configured product
+        // is genuinely out of real stock on this exact date.)
+        if (currentInvoiceProducts.length === 0) continue;
+
         const abbr = (batch as any).issuing_company_abbreviation || "IC";
         const fy = (batch.financial_year || "2026-27").replace(/^FY/i, "");
         const invType = batch.batch_type === "PURCHASE" ? "P" : "S";
@@ -1822,6 +2082,7 @@ export class InvoiceEngine {
           status: "generated",
           batch_type: batch.batch_type,
         });
+        markPartyUsed(dateStr, customerId);
       }
 
       // Major Customer Exact Balance Correction Guard
@@ -1841,15 +2102,41 @@ export class InvoiceEngine {
         const majorDrift = mTarget - generatedSum;
 
         if (Math.abs(majorDrift) > 0) {
-          const lastInv = mCustInvoices[mCustInvoices.length - 1];
-          if (lastInv && lastInv.products && lastInv.products.length > 0) {
-            const lastProd = lastInv.products[lastInv.products.length - 1];
-            lastProd.amount = Math.round((lastProd.amount || 0) + majorDrift);
-            lastProd.rate = roundToWholeInteger(
-              lastProd.amount / (lastProd.quantity || 1),
-            );
-            lastInv.total_amount = Math.round(
-              lastInv.products.reduce(
+          // Spread the drift across every line of every invoice belonging to
+          // this major customer, solving each line back onto a valid
+          // rate/quantity via solveLineForTarget (never a raw amount/qty
+          // rate that could fall outside the product's configured range),
+          // until it's closed or every line is exhausted.
+          const productConfigById = new Map<string, ProductConfig>(
+            (batch.products || []).map((p: any) => [p.product_id, p]),
+          );
+          let remainingDrift = majorDrift;
+          for (const inv of mCustInvoices) {
+            if (Math.abs(remainingDrift) <= 0.5) break;
+            if (!inv.products || inv.products.length === 0) continue;
+            for (const item of inv.products) {
+              if (Math.abs(remainingDrift) <= 0.5) break;
+              const targetLineAmt = Math.round(
+                (item.amount || 0) + remainingDrift,
+              );
+              if (targetLineAmt <= 0) continue;
+              const previousAmount = item.amount || 0;
+              const solved = this.solveLineForTarget(
+                item.product_id,
+                item.quantity,
+                targetLineAmt,
+                productConfigById,
+              );
+              item.quantity = solved.quantity;
+              item.rate = solved.rate;
+              item.amount = computeLineAmount(item.quantity, item.rate);
+              remainingDrift =
+                Math.round(
+                  (remainingDrift - (item.amount - previousAmount)) * 100,
+                ) / 100;
+            }
+            inv.total_amount = Math.round(
+              inv.products.reduce(
                 (sum: number, item: any) => sum + Math.round(item.amount || 0),
                 0,
               ),
@@ -1873,21 +2160,6 @@ export class InvoiceEngine {
     for (const prodConfig of batch.products) {
       runningRemaining.set(prodConfig.product_id, 0);
     }
-
-    // Compute proportional category totals across batch products
-    const categoryTotals = new Map<string, number>();
-    for (const p of batch.products) {
-      const cat = (p as any).category_name || (p as any).category || "Meat";
-      const avgRate =
-        (parseFloat(p.perDayRateMin) + parseFloat(p.perDayRateMax)) / 2;
-      const avgQty =
-        (parseFloat(p.perDayQtyMin) + parseFloat(p.perDayQtyMax)) / 2;
-      const estAmt =
-        (isNaN(avgRate) ? 100 : avgRate) * (isNaN(avgQty) ? 10 : avgQty);
-      categoryTotals.set(cat, (categoryTotals.get(cat) || 0) + estAmt);
-    }
-    const grandTotalEst =
-      Array.from(categoryTotals.values()).reduce((a, b) => a + b, 0) || 1;
 
     // Natural Active Subset Sampling for Sales Batch Customers
     let activeSelectedCustomers = [...selectedCustomers];
@@ -1949,41 +2221,18 @@ export class InvoiceEngine {
           continue;
         }
 
-        let qtyToSell = 0;
-        let actualRemaining = 0;
-
-        if (available < 10) {
-          // If total available stock is less than 10 KG, consume the entire remaining stock at once
-          // to prevent generating micro splits like 0.25 KG, 0.36 KG, 0.44 KG
-          qtyToSell = available;
-          actualRemaining = 0;
-        } else {
-          // Available >= 10 KG: target remaining <= 15 KG while ensuring qtyToSell >= 10 KG
-          const maxTargetRemaining = Math.min(15, available - 10);
-          const targetRemaining =
-            Math.round(Math.random() * maxTargetRemaining * 4) / 4;
-
-          qtyToSell = Math.max(
-            10,
-            Math.round((available - targetRemaining) * 4) / 4,
-          );
-
-          actualRemaining = Math.round((available - qtyToSell) * 100) / 100;
-          if (actualRemaining > 15) {
-            qtyToSell =
-              Math.round((qtyToSell + (actualRemaining - 15)) * 4) / 4;
-            actualRemaining = 15;
-          } else if (actualRemaining < 0) {
-            qtyToSell = available;
-            actualRemaining = 0;
-          }
-        }
+        // Sell exactly 100% of today's real available stock — this
+        // deterministic default is what makes it match Null mode exactly
+        // (see DailyStockReviewModal's computeNullModeRows), so the Daily
+        // Stock Ledger's initial proposal is never a random subset of what
+        // was actually purchased. Auto Allocate / manual edits in the
+        // review modal are the only place a smaller amount gets chosen —
+        // never here, never randomly.
+        const qtyToSell = roundToQuarterIncrement(available);
+        const actualRemaining = 0;
 
         runningRemaining.set(prodConfig.product_id, actualRemaining);
 
-        if (qtyToSell <= 0) continue;
-
-        qtyToSell = roundToQuarterIncrement(qtyToSell);
         if (qtyToSell <= 0) continue;
 
         const minRate = parseFloat(prodConfig.perDayRateMin) || 0;
@@ -2044,21 +2293,51 @@ export class InvoiceEngine {
 
           let currentInvoiceProducts: any[] = [];
           let currentInvoiceAmount = 0;
-          const usedQuantities = new Set<number>();
 
           for (const p of chosenProducts) {
             const minRate = parseFloat(p.perDayRateMin) || 10;
             const maxRate = parseFloat(p.perDayRateMax) || 500;
-            const rate = roundToWholeInteger(
+            let rate = roundToWholeInteger(
               minRate + Math.random() * (maxRate - minRate),
             );
-            p.rate = rate;
 
-            const prodMinQty = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
+            const prodMinQty = parseFloat(p.perDayQtyMin) || 10;
             const prodMaxQty = Math.max(
               prodMinQty,
               parseFloat(p.perDayQtyMax) || 100,
             );
+
+            // The invoice's first line is exempt from the "don't exceed"
+            // check below (an invoice can't end up with zero lines) — so
+            // its rate must itself be capped to whatever thresholdMax can
+            // actually afford at the minimum commercial quantity, instead
+            // of using an uncapped random rate that can blow straight past
+            // the invoice ceiling before any line has even been added.
+            if (currentInvoiceProducts.length === 0) {
+              const remBudget = thresholdMax - currentInvoiceAmount;
+              const maxAffordableRate = remBudget / prodMinQty;
+              if (rate > maxAffordableRate) {
+                if (maxAffordableRate < minRate) {
+                  // Even at this product's cheapest legal rate, its own
+                  // minimum commercial quantity alone exceeds thresholdMax
+                  // — there is no legal line for this product that fits
+                  // under the invoice ceiling. Forcing it in anyway (the
+                  // old behaviour: Math.max(minRate, ...) silently pushed
+                  // the "capped" rate back ABOVE the budget) is exactly
+                  // what let generated invoices exceed the configured
+                  // maximum. Skip it as this invoice's first line instead —
+                  // the next candidate product gets a turn at being first,
+                  // and this one is retried on a future invoice/day.
+                  remainingPool.push(p);
+                  continue;
+                }
+                // A cap must always round DOWN — rounding to the nearest
+                // whole number (e.g. 999.9 -> 1000) can land back above the
+                // budget it was supposed to enforce.
+                rate = Math.max(minRate, Math.floor(maxAffordableRate));
+              }
+            }
+            p.rate = rate;
 
             const maxQtyFitting =
               (thresholdMax - currentInvoiceAmount) / (rate || 1);
@@ -2077,16 +2356,29 @@ export class InvoiceEngine {
               Math.max(prodMinQty, maxQtyFitting),
             );
 
-            const qtyToPut = generateCommercialQuantity(
-              prodMinQty,
-              upperLimit,
-              {
-                productName: p.product_name,
-                existingQuantities: usedQuantities,
-              },
-            );
+            // Deterministic: always take as much of the real remaining
+            // stock as fits (this invoice's budget, the line's own max
+            // quantity, and what's actually left for the day) — never a
+            // random pick within that ceiling. The product naturally
+            // spreads across multiple invoices for the day (via
+            // remainingPool below) purely because each invoice's own
+            // budget bounds maxQtyFitting, not because of randomness.
+            const qtyToPut =
+              upperLimit < prodMinQty
+                ? 0
+                : Math.max(prodMinQty, Math.floor(upperLimit * 4) / 4);
 
             if (qtyToPut <= 0) {
+              remainingPool.push(p);
+              continue;
+            }
+
+            // Same product can't appear twice on one invoice.
+            if (
+              currentInvoiceProducts.some(
+                (cp) => cp.product_id === p.product_id,
+              )
+            ) {
               remainingPool.push(p);
               continue;
             }
@@ -2101,7 +2393,6 @@ export class InvoiceEngine {
               continue;
             }
 
-            usedQuantities.add(qtyToPut);
             currentInvoiceProducts.push({
               ...p,
               quantity: qtyToPut,
@@ -2132,34 +2423,93 @@ export class InvoiceEngine {
         }
       }
 
-      // Merge last invoice into previous SAME-CATEGORY invoice ONLY if it's below thresholdMin
-      if (dayInvoices.length > 1) {
-        const lastInv = dayInvoices[dayInvoices.length - 1];
-        if (lastInv.total_amount < thresholdMin) {
-          const sameCatPrevInv = dayInvoices
-            .slice(0, dayInvoices.length - 1)
-            .reverse()
-            .find((inv) => inv.category_key === lastInv.category_key);
+      // Merge any below-thresholdMin invoice into another SAME-CATEGORY
+      // invoice from the same day (not just the last one into its immediate
+      // predecessor), repeating until no more under-threshold invoice can be
+      // improved. Category purity is preserved throughout. Invoices that
+      // have no eligible merge target are marked unfixable so they don't
+      // block other invoices from still being checked.
+      const unfixable = new Set<any>();
+      let mergedSomething = true;
+      while (mergedSomething) {
+        mergedSomething = false;
+        const belowMinIdx = dayInvoices.findIndex(
+          (inv) => inv.total_amount < thresholdMin && !unfixable.has(inv),
+        );
+        if (belowMinIdx === -1) break;
 
-          if (
-            sameCatPrevInv &&
-            sameCatPrevInv.total_amount + lastInv.total_amount <= thresholdMax
-          ) {
-            sameCatPrevInv.products.push(...lastInv.products);
-            sameCatPrevInv.total_amount =
-              Math.round(
-                (sameCatPrevInv.total_amount + lastInv.total_amount) * 100,
-              ) / 100;
-            dayInvoices.pop();
-          }
+        const belowMinInv = dayInvoices[belowMinIdx];
+        const belowMinProductIds = new Set(
+          belowMinInv.products.map((p: any) => p.product_id),
+        );
+        const targetIdx = dayInvoices.findIndex(
+          (inv, idx) =>
+            idx !== belowMinIdx &&
+            inv.category_key === belowMinInv.category_key &&
+            inv.total_amount + belowMinInv.total_amount <= thresholdMax &&
+            // Concatenating product lines blindly would create a duplicate
+            // line (same product, two different rates) whenever the two
+            // invoices being merged happen to both carry it — reject any
+            // candidate target that already has ANY product belowMinInv
+            // is also carrying.
+            !inv.products.some((p: any) => belowMinProductIds.has(p.product_id)),
+        );
+
+        if (targetIdx !== -1) {
+          const targetInv = dayInvoices[targetIdx];
+          targetInv.products.push(...belowMinInv.products);
+          targetInv.total_amount =
+            Math.round(
+              (targetInv.total_amount + belowMinInv.total_amount) * 100,
+            ) / 100;
+          dayInvoices.splice(belowMinIdx, 1);
+          mergedSomething = true;
+        } else {
+          unfixable.add(belowMinInv);
+          mergedSomething = true;
         }
       }
 
-      const usedPartiesOnDay = new Set<string>();
+      // Last resort for invoices no merge could fix: grow their existing
+      // lines toward thresholdMin via solveLineForTarget (same mechanism
+      // already used for the Major Customer balance guard above) before
+      // accepting a below-minimum invoice.
+      for (const inv of unfixable) {
+        if (inv.total_amount >= thresholdMin) continue;
+        const shortfall = thresholdMin - inv.total_amount;
+        let remaining = shortfall;
+        for (const item of inv.products) {
+          if (remaining <= 0) break;
+          const targetLineAmt = Math.round((item.amount || 0) + remaining);
+          const previousAmount = item.amount || 0;
+          const solved = this.solveLineForTarget(
+            item.product_id,
+            item.quantity,
+            targetLineAmt,
+            productConfigById,
+          );
+          item.quantity = solved.quantity;
+          item.rate = solved.rate;
+          item.amount = computeLineAmount(item.quantity, item.rate);
+          remaining =
+            Math.round((remaining - (item.amount - previousAmount)) * 100) /
+            100;
+        }
+        inv.total_amount = Math.round(
+          inv.products.reduce(
+            (sum: number, p: any) => sum + Math.round(p.amount || 0),
+            0,
+          ),
+        );
+      }
 
       for (const inv of dayInvoices) {
         let assignedCustomerId = null;
         const invCategory = inv.category_key || "Meat";
+        if (!usedPartiesByDate.has(invoiceDate)) {
+          usedPartiesByDate.set(invoiceDate, new Set());
+        }
+        const usedPartiesOnDay = usedPartiesByDate.get(invoiceDate)!;
 
         // Filter major customer eligible by day AND customer category lock for this batch
         const eligibleMajor =
@@ -2207,6 +2557,7 @@ export class InvoiceEngine {
           );
 
           const categoryEligibleOnly = activeSelectedCustomers.filter((cId) => {
+            if (usedPartiesOnDay.has(cId)) return false;
             const currentCat = customerBatchCategoryMap.get(cId);
             if (currentCat === invCategory) return true;
             if (!currentCat && assignedCountForCat < catQuota) return true;
@@ -2215,8 +2566,13 @@ export class InvoiceEngine {
 
           const fallbackAnySameCategory = activeSelectedCustomers.filter(
             (cId) =>
-              !customerBatchCategoryMap.has(cId) ||
-              customerBatchCategoryMap.get(cId) === invCategory,
+              !usedPartiesOnDay.has(cId) &&
+              (!customerBatchCategoryMap.has(cId) ||
+                customerBatchCategoryMap.get(cId) === invCategory),
+          );
+
+          const fallbackAnyUnusedToday = activeSelectedCustomers.filter(
+            (cId) => !usedPartiesOnDay.has(cId),
           );
 
           if (categoryAndDayEligible.length > 0) {
@@ -2234,8 +2590,49 @@ export class InvoiceEngine {
               Math.random() * fallbackAnySameCategory.length,
             );
             assignedCustomerId = fallbackAnySameCategory[randomCustomerIndex];
+          } else if (fallbackAnyUnusedToday.length > 0) {
+            const randomCustomerIndex = Math.floor(
+              Math.random() * fallbackAnyUnusedToday.length,
+            );
+            assignedCustomerId = fallbackAnyUnusedToday[randomCustomerIndex];
           } else {
-            // Fallback if capacity exceeded on this single date
+            // Every selected customer already has an invoice on this date —
+            // never double-book a customer for the same day. Merge this
+            // invoice's products into another already-generated invoice
+            // for the same date/category that has headroom, instead.
+            const invProductIds = new Set(
+              inv.products.map((p: any) => p.product_id),
+            );
+            const mergeTarget = invoices.find(
+              (existingInv: any) =>
+                existingInv.invoice_date === invoiceDate &&
+                existingInv.products?.[0]?.category === invCategory &&
+                Math.round(existingInv.total_amount || 0) +
+                  Math.round(inv.total_amount || 0) <=
+                  thresholdMax &&
+                // Never merge in a product the target invoice already
+                // carries — that would create a duplicate line for the
+                // same product at two different rates.
+                !(existingInv.products || []).some((p: any) =>
+                  invProductIds.has(p.product_id),
+                ),
+            );
+            if (mergeTarget) {
+              const mergedProducts = inv.products.map((p: any) => ({
+                ...p,
+                customer_id: mergeTarget.products?.[0]?.customer_id,
+              }));
+              mergeTarget.products.push(...mergedProducts);
+              mergeTarget.total_amount = Math.round(
+                mergeTarget.products.reduce(
+                  (s: number, p: any) => s + Math.round(p.amount || 0),
+                  0,
+                ),
+              );
+              continue;
+            }
+            // Genuinely no merge target and no unused customer for this
+            // date — last-resort double-book rather than drop the invoice.
             const randomCustomerIndex = Math.floor(
               Math.random() * activeSelectedCustomers.length,
             );
@@ -2277,6 +2674,63 @@ export class InvoiceEngine {
       }
     }
 
+    // ── Final Minimum-Amount Safety Net ──
+    // The per-day merge/grow logic above only ever looks at OTHER invoices
+    // from the SAME day — a day with very little leftover stock can end up
+    // with one small invoice that has no same-day, same-category merge
+    // partner and no rate/quantity headroom left to grow into thresholdMin
+    // (both are hard product-rule ceilings), silently persisting a
+    // below-minimum invoice. Give every remaining below-minimum invoice one
+    // more chance against the WHOLE batch (any day, same category, no
+    // overlapping product, ₹ headroom under thresholdMax) before accepting
+    // defeat — date is not treated as a hard constraint elsewhere in this
+    // pipeline either.
+    if (thresholdMin > 0) {
+      let mergedGlobally = true;
+      while (mergedGlobally) {
+        mergedGlobally = false;
+        const belowIdx = invoices.findIndex(
+          (inv: any) => Math.round(inv.total_amount || 0) < thresholdMin,
+        );
+        if (belowIdx === -1) break;
+
+        const belowInv: any = invoices[belowIdx];
+        const belowCategory = belowInv.products?.[0]?.category;
+        const belowProductIds = new Set(
+          belowInv.products.map((p: any) => p.product_id),
+        );
+        const targetIdx = invoices.findIndex(
+          (inv: any, idx: number) =>
+            idx !== belowIdx &&
+            inv.products?.[0]?.category === belowCategory &&
+            Math.round(inv.total_amount || 0) +
+              Math.round(belowInv.total_amount || 0) <=
+              thresholdMax &&
+            !inv.products.some((p: any) => belowProductIds.has(p.product_id)),
+        );
+
+        if (targetIdx === -1) break;
+
+        const targetInv: any = invoices[targetIdx];
+        targetInv.products.push(...belowInv.products);
+        targetInv.total_amount = Math.round(
+          (Number(targetInv.total_amount) || 0) +
+            (Number(belowInv.total_amount) || 0),
+        );
+        invoices.splice(belowIdx, 1);
+        mergedGlobally = true;
+      }
+
+      const stillBelow = invoices.filter(
+        (inv: any) => Math.round(inv.total_amount || 0) < thresholdMin,
+      );
+      if (stillBelow.length > 0) {
+        throw new Error(
+          `Minimum Invoice Amount Violation: ${stillBelow.length} generated invoice(s) (e.g. ${stillBelow[0].invoice_number || "unnumbered"} at ₹${stillBelow[0].total_amount}) could not be brought up to the batch's minimum invoice amount (₹${thresholdMin}) — no compatible same-category invoice anywhere in the batch had room to absorb it. Try lowering the minimum invoice amount or regenerating.`,
+        );
+      }
+    }
+
     // ── Exact Batch Total Balancing Routine (Issue 6) ──
     // Guarantees sum(invoice.total_amount) === batch.total_amount to exact ₹0 (whole integer rupees)
     const targetTotal = Math.round(batch.total_amount);
@@ -2285,23 +2739,71 @@ export class InvoiceEngine {
     );
     let batchDiff = targetTotal - currentTotal;
 
-    if (Math.abs(batchDiff) > 0 && invoices.length > 0) {
-      const lastInv = invoices[invoices.length - 1];
-      if (lastInv && lastInv.products && lastInv.products.length > 0) {
-        const lastItem = lastInv.products[lastInv.products.length - 1];
-        const targetLineAmt = Math.round(lastItem.amount + batchDiff);
-        if (targetLineAmt > 0) {
-          lastItem.amount = targetLineAmt;
-          lastItem.rate = roundToWholeInteger(
-            lastItem.amount / (lastItem.quantity || 1),
-          );
-          lastInv.total_amount = Math.round(
-            lastInv.products.reduce(
-              (s: number, p: any) => s + Math.round(p.amount || 0),
-              0,
-            ),
-          );
-        }
+    // Major Customer invoices must keep their own exact sum/max-limit
+    // (enforced by STEP 4 below) — never touch them here.
+    const majorCustomerIds = new Set(
+      majorCustomers.map((m) => m.customer_id).filter(Boolean),
+    );
+    const balanceableInvoices = invoices.filter(
+      (inv: any) => !majorCustomerIds.has(inv.customer_id),
+    );
+
+    // Spread the diff across balanceable invoices via solveLineForTarget,
+    // always keeping each invoice within [thresholdMin, thresholdMax] where
+    // possible — never dumping the whole diff onto a single invoice
+    // regardless of its limits.
+    if (Math.abs(batchDiff) > 0 && balanceableInvoices.length > 0) {
+      let remainingBatchDiff = batchDiff;
+      for (const inv of balanceableInvoices) {
+        if (Math.abs(remainingBatchDiff) <= 0) break;
+        if (!inv.products || inv.products.length === 0) continue;
+        const currentInvTotal = Math.round(inv.total_amount || 0);
+        const room =
+          remainingBatchDiff > 0
+            ? thresholdMax - currentInvTotal
+            : currentInvTotal - thresholdMin;
+        const applied =
+          room > 0
+            ? remainingBatchDiff > 0
+              ? Math.min(remainingBatchDiff, room)
+              : Math.max(remainingBatchDiff, -room)
+            : 0;
+        if (applied === 0) continue;
+
+        const lastItem = inv.products[inv.products.length - 1];
+        const previousAmount = lastItem.amount || 0;
+        const targetLineAmt = Math.round(previousAmount + applied);
+        if (targetLineAmt <= 0) continue;
+        const solved = this.solveLineForTarget(
+          lastItem.product_id,
+          lastItem.quantity,
+          targetLineAmt,
+          productConfigById,
+        );
+        lastItem.quantity = solved.quantity;
+        lastItem.rate = solved.rate;
+        lastItem.amount = computeLineAmount(lastItem.quantity, lastItem.rate);
+        inv.total_amount = Math.round(
+          inv.products.reduce(
+            (s: number, p: any) => s + Math.round(p.amount || 0),
+            0,
+          ),
+        );
+        remainingBatchDiff =
+          Math.round(
+            (remainingBatchDiff - (inv.total_amount - currentInvTotal)) * 100,
+          ) / 100;
+      }
+
+      // No balanceable invoice had room to absorb the rest of the diff
+      // within [thresholdMin, thresholdMax]. Exceeding an invoice's
+      // configured maximum to force an exact batch total is exactly the
+      // bug this was meant to guard against — leave the residual unclosed
+      // (a small, logged drift) rather than violate the invoice cap.
+      if (Math.abs(remainingBatchDiff) > 0) {
+        console.warn(
+          `[generateInvoiceSplitupsInternal] ₹${remainingBatchDiff} of batch total drift could not be closed without exceeding a balanceable invoice's configured min/max — left as a residual rather than violating thresholdMax.`,
+        );
       }
     }
 
@@ -2670,9 +3172,7 @@ export class InvoiceEngine {
 
     // 2. Adjust drift to ensure exact totalAmount sum matching
     let currentSum =
-      Math.round(
-        invoiceBudgets.reduce((s, b) => s + b, 0) * 100,
-      ) / 100;
+      Math.round(invoiceBudgets.reduce((s, b) => s + b, 0) * 100) / 100;
     let drift = Math.round((totalAmount - currentSum) * 100) / 100;
 
     if (Math.abs(drift) > 0.001) {
@@ -2737,9 +3237,7 @@ export class InvoiceEngine {
     for (const p of products) {
       const occStr = p.occurrencePercentage;
       const occ =
-        typeof occStr === "number"
-          ? occStr
-          : parseFloat(String(occStr ?? ""));
+        typeof occStr === "number" ? occStr : parseFloat(String(occStr ?? ""));
       if (isNaN(occ) || occ < 0 || occ > 100) {
         return {
           isValid: false,
@@ -2786,7 +3284,10 @@ export class InvoiceEngine {
 
     // Filter products with occurrencePercentage > 0
     const validProducts = products.filter((p) => {
-      if (p.occurrencePercentage === undefined || p.occurrencePercentage === null) {
+      if (
+        p.occurrencePercentage === undefined ||
+        p.occurrencePercentage === null
+      ) {
         return true;
       }
       return Number(p.occurrencePercentage) > 0;
@@ -2852,6 +3353,255 @@ export class InvoiceEngine {
     return dateList[boundedDayIndex];
   }
 
+  /**
+   * Solves a line item's quantity/rate to hit targetAmt as closely as
+   * possible without leaving either bound. Rate-only correction can't close
+   * large drifts once it hits the product's configured rate ceiling/floor —
+   * this also grows/shrinks quantity within its own configured range to make
+   * up the remainder, since quantity_min/quantity_max is just as valid a
+   * configured constraint as rate_min/rate_max and just as flexible.
+   */
+  /**
+   * Solves a line's quantity/rate to hit targetAmt, keeping quantity strictly
+   * on the commercial quarter-KG grid (.00/.25/.50/.75) and rate a whole
+   * rupee. Both being discretized means a single (rate, quantity) pair
+   * usually can't be nudged to hit an arbitrary rupee target exactly by
+   * varying quantity alone — a quarter-KG step at a high rate can be a
+   * ₹100+ jump, so an exact few-rupee gap can be mathematically unreachable
+   * at that one rate. Varying rate by ±1 changes the amount by exactly the
+   * line's quantity — a much finer, DIFFERENT-sized adjustment — so this
+   * searches a small grid of nearby rates x nearby quarter-KG quantities
+   * around the ideal point and prefers whichever combination lands exactly
+   * on targetAmt. Callers that spread a residual across many lines
+   * (drift-closing loops) call this repeatedly, recomputing the remaining
+   * gap after each line — so even when one line can't close it exactly,
+   * the next one usually can, and the loop converges to a ₹0 residual
+   * without ever using a non-commercial quantity.
+   *
+   * When preferFloor is true, a candidate that would push the amount above
+   * targetAmt is rejected — used wherever targetAmt was itself already
+   * computed as a hard ceiling (e.g. an invoice's remaining headroom below
+   * its configured Maximum Invoice Amount), so rounding can never tip the
+   * invoice over that ceiling. The leftover (if any) is left for the next
+   * line/invoice in the caller's spreading loop to pick up.
+   */
+  private static solveLineForTarget(
+    productId: string,
+    currentQuantity: number,
+    targetAmt: number,
+    productConfigById: Map<string, ProductConfig>,
+    options: { preferFloor?: boolean } = {},
+  ): { quantity: number; rate: number } {
+    const config = productConfigById.get(productId);
+    const minR = config ? parseFloat(config.perDayRateMin as any) : NaN;
+    const maxR = config ? parseFloat(config.perDayRateMax as any) : NaN;
+    const minQ = config ? parseFloat(config.perDayQtyMin as any) : NaN;
+    const maxQ = config ? parseFloat(config.perDayQtyMax as any) : NaN;
+    const hasRateBounds =
+      Number.isFinite(minR) && Number.isFinite(maxR) && minR <= maxR;
+    const hasQtyBounds =
+      Number.isFinite(minQ) && Number.isFinite(maxQ) && minQ <= maxQ;
+
+    let qty = currentQuantity > 0 ? currentQuantity : hasQtyBounds ? minQ : 1;
+    let rate = roundToWholeInteger(targetAmt / qty);
+    if (hasRateBounds) {
+      rate = Math.min(maxR, Math.max(minR, rate));
+    }
+    if (rate <= 0) {
+      rate = hasRateBounds ? minR : 1;
+    }
+
+    const amountAtCurrentQty = computeLineAmount(qty, rate);
+
+    if (hasQtyBounds && Math.abs(amountAtCurrentQty - targetAmt) > 0.5) {
+      const baseRate = rate;
+
+      type Candidate = { qty: number; rate: number; amount: number; diff: number };
+      let best: Candidate | undefined;
+
+      // A ±3 window around the ideal rate misses an exact whole-rupee match
+      // whenever it happens to sit further away — which is common on a
+      // target this specific (an exact multiplier of a major customer's
+      // configured amount). Progressively widen the search — cheap because
+      // it stops the instant an exact (diff === 0) match is found — instead
+      // of settling for a ₹1-2 residual that a later strict guard rejects.
+      const windows = hasRateBounds
+        ? [3, 10, 30, Math.ceil(maxR - minR)]
+        : [0];
+
+      outer: for (const window of windows) {
+        const rateCandidates = new Set<number>([baseRate]);
+        if (hasRateBounds) {
+          for (let d = -window; d <= window; d++) {
+            const r = baseRate + d;
+            if (r >= minR && r <= maxR) rateCandidates.add(r);
+          }
+        }
+
+        for (const candidateRate of rateCandidates) {
+          if (candidateRate <= 0) continue;
+          const idealQty = targetAmt / candidateRate;
+          const idealK = idealQty * 4;
+          const candidateKs = new Set<number>([
+            Math.floor(idealK),
+            Math.ceil(idealK),
+            Math.round(idealK),
+          ]);
+
+          for (const k of candidateKs) {
+            if (k <= 0) continue;
+            const candidateQty = Math.min(maxQ, Math.max(minQ, k / 4));
+            const candidateAmount = computeLineAmount(
+              candidateQty,
+              candidateRate,
+            );
+            if (options.preferFloor && candidateAmount > targetAmt) continue;
+            const diff = Math.abs(candidateAmount - targetAmt);
+            if (!best || diff < best.diff) {
+              best = {
+                qty: candidateQty,
+                rate: candidateRate,
+                amount: candidateAmount,
+                diff,
+              };
+            }
+            if (diff === 0) break outer;
+          }
+        }
+
+        if (!hasRateBounds || window >= maxR - minR) break;
+      }
+
+      if (best) {
+        qty = best.qty;
+        rate = best.rate;
+      } else if (options.preferFloor) {
+        // Every candidate overshot targetAmt (a hard ceiling) — fall back
+        // to the largest one at the base rate that still fits under it.
+        const idealK = (targetAmt / baseRate) * 4;
+        qty = Math.max(minQ, Math.min(maxQ, Math.floor(idealK) / 4));
+      } else {
+        const idealQty = targetAmt / baseRate;
+        qty = Math.max(minQ, Math.min(maxQ, roundToQuarterIncrement(idealQty)));
+      }
+    }
+
+    return { quantity: qty, rate };
+  }
+
+  private static lineCapacity(p: any): number {
+    const maxQty = parseFloat(p.perDayQtyMax) || 0;
+    const maxRate = parseFloat(p.perDayRateMax) || 0;
+    return maxQty * maxRate;
+  }
+
+  // Upper bound on what a single invoice can realistically total, given the
+  // rate/quantity ceilings configured for every product in its category.
+  private static maxAchievableInvoiceAmount(categoryProducts: any[]): number {
+    return categoryProducts.reduce(
+      (sum, p) => sum + this.lineCapacity(p),
+      0,
+    );
+  }
+
+  // Picks enough of a category's highest-capacity products so their combined
+  // max quantity x max rate ceiling can reach targetBudget (falling back to
+  // the whole category if it's still not enough), with a small random
+  // top-up for line-item variety on smaller invoices.
+  private static selectProductsForBudgetCapacity(
+    categoryProducts: any[],
+    targetBudget: number,
+  ): any[] {
+    const capacityDesc = [...categoryProducts].sort(
+      (a, b) => this.lineCapacity(b) - this.lineCapacity(a),
+    );
+    let neededCount = 0;
+    let cumulativeCap = 0;
+    for (const p of capacityDesc) {
+      if (cumulativeCap >= targetBudget) break;
+      cumulativeCap += this.lineCapacity(p);
+      neededCount++;
+    }
+    const randomVariety = Math.floor(Math.random() * 6) + 3;
+    const count = Math.min(
+      capacityDesc.length,
+      Math.max(neededCount, randomVariety),
+    );
+    return capacityDesc.slice(0, count);
+  }
+
+  private static lineFloor(p: any): number {
+    const minQty = parseFloat(p.perDayQtyMin) || 10;
+    const minRate = parseFloat(p.perDayRateMin) || 10;
+    return minQty * minRate;
+  }
+
+  /**
+   * Finds the product whose cheapest possible line (quantity_min x
+   * rate_min) still fits within targetBudget, preferring the most
+   * expensive one that fits (best occurrence variety) over always picking
+   * the absolute cheapest. Falls back to the category's overall cheapest
+   * line if nothing fits (shouldn't happen given the upfront
+   * Minimum-Invoice-Amount feasibility guard, but stays safe either way).
+   *
+   * Occurrence-weighted selection picks products irrespective of price, so
+   * on a tight budget the first product it hands back can easily have a
+   * floor above the target — and since the very first line of an invoice
+   * is exempt from the "don't exceed budget" guard (an invoice can't start
+   * with zero lines), that line gets added anyway and the invoice
+   * overshoots before any drift-correction even runs. Guaranteeing the
+   * first product always fits removes that overshoot at the source.
+   */
+  private static cheapestFittingProduct(
+    categoryProducts: any[],
+    targetBudget: number,
+  ): any {
+    let bestFit: any = null;
+    let bestFitFloor = -Infinity;
+    let cheapestOverall: any = null;
+    let cheapestOverallFloor = Infinity;
+    for (const p of categoryProducts) {
+      const floor = this.lineFloor(p);
+      if (floor < cheapestOverallFloor) {
+        cheapestOverallFloor = floor;
+        cheapestOverall = p;
+      }
+      if (floor <= targetBudget && floor > bestFitFloor) {
+        bestFitFloor = floor;
+        bestFit = p;
+      }
+    }
+    return bestFit || cheapestOverall;
+  }
+
+  // Every invoice needs a "guaranteed affordable" first line so it never
+  // ends up empty — but cheapestFittingProduct() picks that deterministically
+  // by price fit alone (highest floor still <= budget), which is the same
+  // 1-2 products for any given budget range, invoice after invoice,
+  // regardless of their configured Occurrence Percentage. Across an entire
+  // batch that systematically overrepresents whichever product happens to
+  // fit typical invoice budgets best, at the expense of every other
+  // configured product — exactly the "not obeying occurrence" symptom.
+  // This does the same affordability filtering, but picks among the
+  // affordable set with an occurrence-weighted random draw (reusing
+  // selectProductsByOccurrence's weighting) instead of a fixed price-fit
+  // ranking, falling back to the deterministic pick only when nothing is
+  // affordable (need SOME product, and occurrence doesn't matter if the
+  // pool is one item anyway).
+  private static occurrenceWeightedFittingProduct(
+    categoryProducts: any[],
+    targetBudget: number,
+  ): any {
+    const affordable = categoryProducts.filter(
+      (p) => this.lineFloor(p) <= targetBudget,
+    );
+    if (affordable.length === 0) {
+      return this.cheapestFittingProduct(categoryProducts, targetBudget);
+    }
+    const [picked] = this.selectProductsByOccurrence(affordable, 1);
+    return picked || this.cheapestFittingProduct(categoryProducts, targetBudget);
+  }
+
   private static generatePurchaseInvoiceSplitupsInternal(
     batch: InvoiceBatch,
     numberOfDays: number,
@@ -2906,6 +3656,19 @@ export class InvoiceEngine {
       productsByCategory.get(catKey)!.push(p);
     }
 
+    // Used by the drift/exact-balance-correction passes below, which
+    // recompute a line's rate from a target amount (rate = amount /
+    // quantity) to hit an invoice/major-customer budget exactly. Without
+    // clamping to the product's own configured rate range, that recomputed
+    // rate can land anywhere — this is what let generated rates fall
+    // outside product_rules.rate_min/rate_max, most visibly on major
+    // customer invoices, which get an extra balance-correction pass on top
+    // of the per-invoice one.
+    const productConfigById = new Map<string, ProductConfig>();
+    for (const p of batch.products) {
+      productConfigById.set(p.product_id, p);
+    }
+
     let categoryKeys = Array.from(productsByCategory.keys());
 
     // If suppliers are specified, filter product categories to match supplier categories
@@ -2928,42 +3691,33 @@ export class InvoiceEngine {
 
     if (categoryKeys.length === 0) return [];
 
-    // 2. Determine exact target invoice count N to partition totalAmount EXACTLY
-    const avgThreshold = (thresholdMin + thresholdMax) / 2;
-    let targetInvoiceCount = Math.round(totalAmount / avgThreshold);
-    const minInvoices = Math.ceil(totalAmount / thresholdMax);
-    const maxInvoices = Math.floor(totalAmount / thresholdMin);
-    targetInvoiceCount = Math.max(
-      minInvoices,
-      Math.min(maxInvoices, targetInvoiceCount),
-    );
-    if (targetInvoiceCount < 1) targetInvoiceCount = 1;
-
-    // Partition totalAmount into EXACT targetInvoiceCount invoice budgets that sum to totalAmount
-    const invoiceBudgets: number[] = [];
-    let unallocated = totalAmount;
-
-    for (let i = 0; i < targetInvoiceCount; i++) {
-      invoiceBudgets.push(thresholdMin);
-      unallocated -= thresholdMin;
+    // Feasibility guard: an invoice can never total less than its cheapest
+    // possible single line (quantity_min x rate_min of the cheapest product
+    // in its category). If the configured Minimum Invoice Amount is below
+    // that floor, every small invoice is structurally forced above target
+    // and no downstream drift-correction can fix it — surface this clearly
+    // now instead of failing with a confusing total mismatch after
+    // generating thousands of invoices.
+    for (const catKey of categoryKeys) {
+      const catProducts = productsByCategory.get(catKey) || [];
+      if (catProducts.length === 0) continue;
+      let cheapestLine = Infinity;
+      let cheapestProductName = "";
+      for (const p of catProducts) {
+        const minQty = parseFloat(p.perDayQtyMin) || 10;
+        const minRate = parseFloat(p.perDayRateMin) || 10;
+        const floor = minQty * minRate;
+        if (floor < cheapestLine) {
+          cheapestLine = floor;
+          cheapestProductName = p.product_name;
+        }
+      }
+      if (Number.isFinite(cheapestLine) && thresholdMin < cheapestLine) {
+        throw new Error(
+          `Configured Minimum Invoice Amount (₹${thresholdMin.toFixed(2)}) is below the lowest amount achievable with a single product line in the "${catKey}" category — even the cheapest product, ${cheapestProductName}, needs at least ₹${cheapestLine.toFixed(2)} per line (its configured minimum quantity x minimum rate). Raise the Minimum Invoice Amount to at least ₹${cheapestLine.toFixed(2)}, or lower the Quantity/Rate minimums in Product Rules for this category.`,
+        );
+      }
     }
-
-    const roomPerInvoice = thresholdMax - thresholdMin;
-    for (let i = 0; i < targetInvoiceCount - 1; i++) {
-      const minAdd = Math.max(
-        0,
-        unallocated - (targetInvoiceCount - 1 - i) * roomPerInvoice,
-      );
-      const maxAdd = Math.min(unallocated, roomPerInvoice);
-      const add = minAdd + Math.random() * (maxAdd - minAdd);
-      const roundedAdd = Math.round(add * 100) / 100;
-      invoiceBudgets[i] =
-        Math.round((invoiceBudgets[i] + roundedAdd) * 100) / 100;
-      unallocated = Math.round((unallocated - roundedAdd) * 100) / 100;
-    }
-    invoiceBudgets[targetInvoiceCount - 1] =
-      Math.round((invoiceBudgets[targetInvoiceCount - 1] + unallocated) * 100) /
-      100;
 
     // Prepare date list
     const dateList: string[] = [];
@@ -3057,21 +3811,28 @@ export class InvoiceEngine {
         }
       }
 
-      // Generate exact Major Customer Invoices
-      let actualCatKey: "Fruits" | "Meat" = catKey as "Fruits" | "Meat";
-      let categoryProducts = productsByCategory.get(actualCatKey) || [];
-      if (categoryProducts.length === 0 && categoryKeys.length > 0) {
-        actualCatKey = categoryKeys[0] as "Fruits" | "Meat";
-        categoryProducts = productsByCategory.get(actualCatKey) || [];
-      }
+      // Generate exact Major Customer Invoices. actualCatKey must stay
+      // locked to the supplier's real, configured category (catKey, from
+      // suppliers.category) — silently falling back to whichever category
+      // happens to have products available used to create invoices whose
+      // products didn't actually match their supplier's category. That
+      // mismatch was invisible at generation time (nothing there re-checks
+      // it) and only surfaced later as a confusing "Supplier category is
+      // incompatible" error the first time the invoice was edited.
+      const actualCatKey: "Fruits" | "Meat" = catKey as "Fruits" | "Meat";
+      const categoryProducts = productsByCategory.get(actualCatKey) || [];
       if (categoryProducts.length === 0) {
-        categoryProducts = batch.products;
-        if (categoryProducts.length > 0) {
-          actualCatKey = this.getProductCategory(categoryProducts[0]);
-        }
+        throw new Error(
+          `Major Customer's supplier is configured as "${actualCatKey}" category, but no ${actualCatKey} products with a positive Occurrence Percentage are selected for this batch. Add ${actualCatKey} products to the batch (or configure this Major Customer with a supplier of a matching category) before generating.`,
+        );
       }
-      if (supplierCategoryMap) {
-        supplierCategoryMap.set(supplierId, actualCatKey);
+
+      const maxAchievable = this.maxAchievableInvoiceAmount(categoryProducts);
+      const largestBudget = Math.max(...majorBudgets);
+      if (maxAchievable > 0 && largestBudget > maxAchievable) {
+        throw new Error(
+          `Major Customer configuration cannot be satisfied within the configured rate/quantity limits. One of the invoices needs ₹${largestBudget.toFixed(2)}, but the maximum realistic invoice total for the "${actualCatKey}" category (given current Product Rules) is ₹${maxAchievable.toFixed(2)}. Please lower the Major Customer amount or invoice limits, increase the invoice count, or widen the Rate/Quantity ranges in Product Rules for this category.`,
+        );
       }
 
       for (let b = 0; b < majorBudgets.length; b++) {
@@ -3082,12 +3843,22 @@ export class InvoiceEngine {
           dateList,
         );
 
-        const targetSubsetCount = Math.min(
-          categoryProducts.length,
-          Math.floor(Math.random() * 6) + 3,
+        const capacitySelection = this.selectProductsForBudgetCapacity(
+          categoryProducts,
+          targetBudget,
         );
-        const shuffled = [...categoryProducts].sort(() => Math.random() - 0.5);
-        const chosenProducts = shuffled.slice(0, targetSubsetCount);
+        const firstFit = this.occurrenceWeightedFittingProduct(
+          categoryProducts,
+          targetBudget,
+        );
+        const chosenProducts = firstFit
+          ? [
+              firstFit,
+              ...capacitySelection.filter(
+                (p) => p.product_id !== firstFit.product_id,
+              ),
+            ]
+          : capacitySelection;
 
         let currentInvoiceProducts: any[] = [];
         let currentInvoiceAmount = 0;
@@ -3097,15 +3868,30 @@ export class InvoiceEngine {
           const p = chosenProducts[j];
           const minR = parseFloat(p.perDayRateMin) || 10;
           const maxR = parseFloat(p.perDayRateMax) || 500;
-          const rate = roundToWholeInteger(
-            minR + Math.random() * (maxR - minR),
-          );
+          let rate = roundToWholeInteger(minR + Math.random() * (maxR - minR));
 
-          const minQ = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
+          const minQ = parseFloat(p.perDayQtyMin) || 10;
           const maxQ = Math.max(minQ, parseFloat(p.perDayQtyMax) || 100);
 
           const remBudget = targetBudget - currentInvoiceAmount;
           if (remBudget <= 0) break;
+
+          // The invoice's first line is exempt from the "don't exceed
+          // budget" check below (an invoice can't end up with zero lines) —
+          // so its rate must itself be capped to whatever the target budget
+          // can actually afford at the minimum commercial quantity, instead
+          // of using an uncapped random rate that can blow straight past a
+          // tight budget (and from there, past thresholdMax) before any
+          // line has even been added.
+          if (currentInvoiceProducts.length === 0) {
+            const maxAffordableRate = remBudget / minQ;
+            if (rate > maxAffordableRate) {
+              // A cap must always round DOWN — rounding to the nearest
+              // whole number (e.g. 999.9 -> 1000) can land back above the
+              // budget it was supposed to enforce.
+              rate = Math.max(minR, Math.floor(maxAffordableRate));
+            }
+          }
 
           const maxQtyFitting = remBudget / (rate || 1);
           if (maxQtyFitting < minQ && currentInvoiceProducts.length > 0) {
@@ -3146,18 +3932,31 @@ export class InvoiceEngine {
         }
 
         if (currentInvoiceProducts.length === 0) {
-          const p = categoryProducts[0] || batch.products[0];
-          const minQ = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
-          const rate = roundToWholeInteger(targetBudget / minQ);
-          const amt = computeLineAmount(minQ, rate);
+          // categoryProducts is already occurrence-filtered (0%-occurrence
+          // products excluded at the productsByCategory grouping stage,
+          // above) and guaranteed non-empty here — never fall through to
+          // an unfiltered batch.products[0], which could reintroduce a
+          // 0%-occurrence product as this invoice's only line.
+          const p =
+            this.cheapestFittingProduct(categoryProducts, targetBudget) ||
+            categoryProducts[0];
+          const minQ = parseFloat(p.perDayQtyMin) || 10;
+          const solved = this.solveLineForTarget(
+            p.product_id,
+            minQ,
+            targetBudget,
+            productConfigById,
+            { preferFloor: true },
+          );
+          const amt = computeLineAmount(solved.quantity, solved.rate);
           currentInvoiceProducts.push({
             product_id: p.product_id,
             product_name: p.product_name,
             hsn_code: p.hsn_code,
             unit_of_measure: p.unit_of_measure,
             category: actualCatKey,
-            quantity: minQ,
-            rate,
+            quantity: solved.quantity,
+            rate: solved.rate,
             amount: amt,
           });
           currentInvoiceAmount = amt;
@@ -3173,20 +3972,25 @@ export class InvoiceEngine {
             const targetLineAmt =
               Math.round((item.amount + lineDrift) * 100) / 100;
             if (targetLineAmt > 0) {
-              let newRate = roundToWholeInteger(targetLineAmt / item.quantity);
-              if (newRate > 0) {
-                item.rate = newRate;
-                item.amount = computeLineAmount(item.quantity, newRate);
-                lineDrift =
-                  Math.round(
-                    (targetBudget -
-                      currentInvoiceProducts.reduce(
-                        (s: number, p: any) => s + p.amount,
-                        0,
-                      )) *
-                      100,
-                  ) / 100;
-              }
+              const solved = this.solveLineForTarget(
+                item.product_id,
+                item.quantity,
+                targetLineAmt,
+                productConfigById,
+                { preferFloor: true },
+              );
+              item.quantity = solved.quantity;
+              item.rate = solved.rate;
+              item.amount = computeLineAmount(item.quantity, item.rate);
+              lineDrift =
+                Math.round(
+                  (targetBudget -
+                    currentInvoiceProducts.reduce(
+                      (s: number, p: any) => s + p.amount,
+                      0,
+                    )) *
+                    100,
+                ) / 100;
             }
           }
         }
@@ -3203,9 +4007,18 @@ export class InvoiceEngine {
             currentInvoiceProducts[currentInvoiceProducts.length - 1];
           const targetLineAmt = Math.round(lastItem.amount + invDrift);
           if (targetLineAmt > 0) {
-            lastItem.amount = targetLineAmt;
-            lastItem.rate = roundToWholeInteger(
-              lastItem.amount / (lastItem.quantity || 1),
+            const solved = this.solveLineForTarget(
+              lastItem.product_id,
+              lastItem.quantity,
+              targetLineAmt,
+              productConfigById,
+              { preferFloor: true },
+            );
+            lastItem.quantity = solved.quantity;
+            lastItem.rate = solved.rate;
+            lastItem.amount = computeLineAmount(
+              lastItem.quantity,
+              lastItem.rate,
             );
             finalInvoiceTotal =
               Math.round(
@@ -3219,18 +4032,12 @@ export class InvoiceEngine {
 
         const abbr = (batch as any).issuing_company_abbreviation || "IC";
         const fy = (batch.financial_year || "2026-27").replace(/^FY/i, "");
-        const beforeCounter = invoiceCounter;
         const draftInvNumber = InvoiceNumberingService.formatInvoiceNumber(
           abbr,
           fy,
           batch.batch_type === "PURCHASE" ? "P" : "S",
           invoiceCounter++,
         );
-        console.log("[COUNTER TRACE - Major Customer Invoice]", {
-          beforeCounter,
-          generatedInvoiceNumber: draftInvNumber,
-          afterCounter: invoiceCounter,
-        });
 
         const productsWithSupplierId = currentInvoiceProducts.map((p: any) => ({
           ...p,
@@ -3269,15 +4076,36 @@ export class InvoiceEngine {
         const majorDrift = mTarget - generatedSum;
 
         if (Math.abs(majorDrift) > 0) {
-          const lastInv = mCustInvoices[mCustInvoices.length - 1];
-          if (lastInv && lastInv.products && lastInv.products.length > 0) {
-            const lastProd = lastInv.products[lastInv.products.length - 1];
-            lastProd.amount = Math.round((lastProd.amount || 0) + majorDrift);
-            lastProd.rate = roundToWholeInteger(
-              lastProd.amount / (lastProd.quantity || 1),
-            );
-            lastInv.total_amount = Math.round(
-              lastInv.products.reduce(
+          // A single line can only absorb so much drift before hitting its
+          // own rate/quantity ceiling. Spread the remaining drift across
+          // every line of every invoice belonging to this major customer
+          // until it's closed or every line is exhausted.
+          let remainingDrift = majorDrift;
+          for (const inv of mCustInvoices) {
+            if (Math.abs(remainingDrift) <= 0.5) break;
+            if (!inv.products || inv.products.length === 0) continue;
+            for (const item of inv.products) {
+              if (Math.abs(remainingDrift) <= 0.5) break;
+              const targetLineAmt = Math.round(
+                (item.amount || 0) + remainingDrift,
+              );
+              if (targetLineAmt <= 0) continue;
+              const previousAmount = item.amount || 0;
+              const solved = this.solveLineForTarget(
+                item.product_id,
+                item.quantity,
+                targetLineAmt,
+                productConfigById,
+              );
+              item.quantity = solved.quantity;
+              item.rate = solved.rate;
+              item.amount = computeLineAmount(item.quantity, item.rate);
+              remainingDrift =
+                Math.round((remainingDrift - (item.amount - previousAmount)) * 100) /
+                100;
+            }
+            inv.total_amount = Math.round(
+              inv.products.reduce(
                 (sum: number, item: any) => sum + Math.round(item.amount || 0),
                 0,
               ),
@@ -3287,8 +4115,23 @@ export class InvoiceEngine {
       }
     }
 
+    // The correction guard above targets each major customer's configured
+    // amount, but bounded by their products' rate/quantity ranges it may
+    // leave a small residual over/undershoot. From here on, use what was
+    // ACTUALLY generated for major customers (not the configured target) so
+    // the normal-invoice budget below compensates for that residual and the
+    // grand total still lands exactly on the batch's requested total.
+    const majorCustomerIdSet = new Set(
+      majorCustomers.map((m) => m.customer_id).filter(Boolean),
+    );
+    const actualMajorTotal = Math.round(
+      invoices
+        .filter((inv) => majorCustomerIdSet.has(inv.customer_id))
+        .reduce((sum, inv) => sum + Math.round(inv.total_amount || 0), 0),
+    );
+
     // ── STEP 2: Process Remaining Batch Amount (if any) ──────────────────────
-    const remainingBatchAmount = Math.max(0, totalAmount - totalMajorAmount);
+    const remainingBatchAmount = Math.max(0, totalAmount - actualMajorTotal);
 
     if (remainingBatchAmount > 0) {
       // Use uniform random budget partitioning to prevent invoice amount clustering at thresholdMax
@@ -3322,10 +4165,22 @@ export class InvoiceEngine {
           categoryProducts.length,
           Math.floor(Math.random() * 6) + 3,
         );
-        const chosenProducts = this.selectProductsByOccurrence(
+        const occurrenceSelection = this.selectProductsByOccurrence(
           categoryProducts,
           targetSubsetCount,
         );
+        const firstFit = this.occurrenceWeightedFittingProduct(
+          categoryProducts,
+          targetBudget,
+        );
+        const chosenProducts = firstFit
+          ? [
+              firstFit,
+              ...occurrenceSelection.filter(
+                (p) => p.product_id !== firstFit.product_id,
+              ),
+            ]
+          : occurrenceSelection;
 
         let currentInvoiceProducts: any[] = [];
         let currentInvoiceAmount = 0;
@@ -3335,15 +4190,30 @@ export class InvoiceEngine {
           const p = chosenProducts[j];
           const minR = parseFloat(p.perDayRateMin) || 10;
           const maxR = parseFloat(p.perDayRateMax) || 500;
-          const rate = roundToWholeInteger(
-            minR + Math.random() * (maxR - minR),
-          );
+          let rate = roundToWholeInteger(minR + Math.random() * (maxR - minR));
 
-          const minQ = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
+          const minQ = parseFloat(p.perDayQtyMin) || 10;
           const maxQ = Math.max(minQ, parseFloat(p.perDayQtyMax) || 100);
 
           const remBudget = targetBudget - currentInvoiceAmount;
           if (remBudget <= 0) break;
+
+          // The invoice's first line is exempt from the "don't exceed
+          // budget" check below (an invoice can't end up with zero lines) —
+          // so its rate must itself be capped to whatever the target budget
+          // can actually afford at the minimum commercial quantity, instead
+          // of using an uncapped random rate that can blow straight past a
+          // tight budget (and from there, past thresholdMax) before any
+          // line has even been added.
+          if (currentInvoiceProducts.length === 0) {
+            const maxAffordableRate = remBudget / minQ;
+            if (rate > maxAffordableRate) {
+              // A cap must always round DOWN — rounding to the nearest
+              // whole number (e.g. 999.9 -> 1000) can land back above the
+              // budget it was supposed to enforce.
+              rate = Math.max(minR, Math.floor(maxAffordableRate));
+            }
+          }
 
           const maxQtyFitting = remBudget / (rate || 1);
           if (maxQtyFitting < minQ && currentInvoiceProducts.length > 0) {
@@ -3384,18 +4254,26 @@ export class InvoiceEngine {
         }
 
         if (currentInvoiceProducts.length === 0) {
-          const p = categoryProducts[0];
-          const minQ = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
-          const rate = roundToWholeInteger(targetBudget / minQ);
-          const amt = computeLineAmount(minQ, rate);
+          const p =
+            this.cheapestFittingProduct(categoryProducts, targetBudget) ||
+            categoryProducts[0];
+          const minQ = parseFloat(p.perDayQtyMin) || 10;
+          const solved = this.solveLineForTarget(
+            p.product_id,
+            minQ,
+            targetBudget,
+            productConfigById,
+            { preferFloor: true },
+          );
+          const amt = computeLineAmount(solved.quantity, solved.rate);
           currentInvoiceProducts.push({
             product_id: p.product_id,
             product_name: p.product_name,
             hsn_code: p.hsn_code,
             unit_of_measure: p.unit_of_measure,
             category: catKey,
-            quantity: minQ,
-            rate,
+            quantity: solved.quantity,
+            rate: solved.rate,
             amount: amt,
           });
           currentInvoiceAmount = amt;
@@ -3410,20 +4288,25 @@ export class InvoiceEngine {
             const targetLineAmt =
               Math.round((item.amount + lineDrift) * 100) / 100;
             if (targetLineAmt > 0) {
-              let newRate = roundToWholeInteger(targetLineAmt / item.quantity);
-              if (newRate > 0) {
-                item.rate = newRate;
-                item.amount = computeLineAmount(item.quantity, newRate);
-                lineDrift =
-                  Math.round(
-                    (targetBudget -
-                      currentInvoiceProducts.reduce(
-                        (s: number, p: any) => s + p.amount,
-                        0,
-                      )) *
-                      100,
-                  ) / 100;
-              }
+              const solved = this.solveLineForTarget(
+                item.product_id,
+                item.quantity,
+                targetLineAmt,
+                productConfigById,
+                { preferFloor: true },
+              );
+              item.quantity = solved.quantity;
+              item.rate = solved.rate;
+              item.amount = computeLineAmount(item.quantity, item.rate);
+              lineDrift =
+                Math.round(
+                  (targetBudget -
+                    currentInvoiceProducts.reduce(
+                      (s: number, p: any) => s + p.amount,
+                      0,
+                    )) *
+                    100,
+                ) / 100;
             }
           }
         }
@@ -3438,10 +4321,17 @@ export class InvoiceEngine {
         if (Math.abs(invDrift) > 0 && currentInvoiceProducts.length > 0) {
           const lastItem =
             currentInvoiceProducts[currentInvoiceProducts.length - 1];
-          lastItem.amount = Math.round(lastItem.amount + invDrift);
-          lastItem.rate = roundToWholeInteger(
-            lastItem.amount / (lastItem.quantity || 1),
+          const targetAmt = Math.round(lastItem.amount + invDrift);
+          const solved = this.solveLineForTarget(
+            lastItem.product_id,
+            lastItem.quantity,
+            targetAmt,
+            productConfigById,
+            { preferFloor: true },
           );
+          lastItem.quantity = solved.quantity;
+          lastItem.rate = solved.rate;
+          lastItem.amount = computeLineAmount(lastItem.quantity, lastItem.rate);
         }
 
         const finalInvoiceTotal = Math.round(
@@ -3515,15 +4405,11 @@ export class InvoiceEngine {
     }
 
     // ── STEP 3: Global Drift Redistribution & Normal Purchase Invoice Limit Enforcement ──
-    const majorCustomerIds = new Set(
-      majorCustomers.map((m) => m.customer_id).filter(Boolean),
-    );
-
     const normalInvoices = invoices.filter(
-      (inv) => !majorCustomerIds.has(inv.customer_id),
+      (inv) => !majorCustomerIdSet.has(inv.customer_id),
     );
     const majorInvoices = invoices.filter((inv) =>
-      majorCustomerIds.has(inv.customer_id),
+      majorCustomerIdSet.has(inv.customer_id),
     );
 
     const normalSum = Math.round(
@@ -3532,7 +4418,7 @@ export class InvoiceEngine {
         0,
       ),
     );
-    const targetNormalTotal = Math.round(totalAmount - totalMajorAmount);
+    const targetNormalTotal = Math.round(totalAmount - actualMajorTotal);
     let globalDrift = targetNormalTotal - normalSum;
 
     if (globalDrift > 0 && normalInvoices.length > 0) {
@@ -3545,9 +4431,20 @@ export class InvoiceEngine {
         if (headroom > 0 && inv.products.length > 0) {
           const addAmt = Math.min(globalDrift, headroom);
           const lastItem = inv.products[inv.products.length - 1];
-          lastItem.amount = Math.round(lastItem.amount + addAmt);
-          lastItem.rate = roundToWholeInteger(
-            lastItem.amount / (lastItem.quantity || 1),
+          const previousAmount = lastItem.amount;
+          const targetAmt = Math.round(lastItem.amount + addAmt);
+          const solved = this.solveLineForTarget(
+            lastItem.product_id,
+            lastItem.quantity,
+            targetAmt,
+            productConfigById,
+            { preferFloor: true },
+          );
+          lastItem.quantity = solved.quantity;
+          lastItem.rate = solved.rate;
+          lastItem.amount = computeLineAmount(
+            lastItem.quantity,
+            lastItem.rate,
           );
           inv.total_amount = Math.round(
             inv.products.reduce(
@@ -3555,7 +4452,7 @@ export class InvoiceEngine {
               0,
             ),
           );
-          globalDrift -= addAmt;
+          globalDrift -= lastItem.amount - previousAmount;
         }
       }
 
@@ -3573,16 +4470,27 @@ export class InvoiceEngine {
           dateList,
         );
 
-        const p = categoryProducts[0];
+        const p =
+          this.cheapestFittingProduct(categoryProducts, newBudget) ||
+          categoryProducts[0];
         const prodCat = this.getProductCategory(p);
-        const minQ = Math.max(10, parseFloat(p.perDayQtyMin) || 10);
-        const rate = roundToWholeInteger(newBudget / minQ);
-        const amt = computeLineAmount(minQ, rate);
+        const minQ = parseFloat(p.perDayQtyMin) || 10;
+        const solvedNew = this.solveLineForTarget(
+          p.product_id,
+          minQ,
+          newBudget,
+          productConfigById,
+          { preferFloor: true },
+        );
+        const newQty = solvedNew.quantity;
+        const rate = solvedNew.rate;
+        const amt = computeLineAmount(newQty, rate);
 
         let supplierId: string | null = null;
         if (prodCat === "Fruits") {
           if (fruitSuppliers.length > 0) {
-            supplierId = fruitSuppliers[invoices.length % fruitSuppliers.length];
+            supplierId =
+              fruitSuppliers[invoices.length % fruitSuppliers.length];
           } else {
             break;
           }
@@ -3620,46 +4528,57 @@ export class InvoiceEngine {
               hsn_code: p.hsn_code,
               unit_of_measure: p.unit_of_measure,
               category: catKey,
-              quantity: minQ,
+              quantity: newQty,
               rate,
-              amount: newBudget,
+              amount: amt,
               customer_id: supplierId,
               supplier_id: supplierId,
             },
           ],
-          total_amount: newBudget,
+          total_amount: amt,
           status: "generated",
           batch_type: "PURCHASE",
         };
 
         invoices.push(newInv);
         normalInvoices.push(newInv);
-        globalDrift -= newBudget;
+        globalDrift -= amt;
+        if (amt <= 0.5) break;
       }
     } else if (globalDrift < 0 && normalInvoices.length > 0) {
-      // Reduce drift from normal invoices that are above thresholdMin
+      // Reduce drift from normal invoices that are above thresholdMin.
+      // Spread the reduction across every line of the invoice (not just the
+      // last one) so a single line's own rate/quantity floor can't leave
+      // residual overshoot unresolved.
       for (let i = normalInvoices.length - 1; i >= 0; i--) {
         if (globalDrift >= 0) break;
         const inv = normalInvoices[i];
-        const currentAmt = Math.round(inv.total_amount || 0);
-        const surplus = Math.max(0, currentAmt - thresholdMin);
-        if (surplus > 0 && inv.products.length > 0) {
+        if (!inv.products || inv.products.length === 0) continue;
+        for (const item of inv.products) {
+          if (globalDrift >= 0) break;
+          const currentAmt = Math.round(inv.total_amount || 0);
+          const surplus = Math.max(0, currentAmt - thresholdMin);
+          if (surplus <= 0) break;
           const subAmt = Math.min(-globalDrift, surplus);
-          const lastItem = inv.products[inv.products.length - 1];
-          const newLastAmt = Math.round(lastItem.amount - subAmt);
-          if (newLastAmt > 0) {
-            lastItem.amount = newLastAmt;
-            lastItem.rate = roundToWholeInteger(
-              lastItem.amount / (lastItem.quantity || 1),
-            );
-            inv.total_amount = Math.round(
-              inv.products.reduce(
-                (s: number, p: any) => s + Math.round(p.amount || 0),
-                0,
-              ),
-            );
-            globalDrift += subAmt;
-          }
+          const targetLineAmt = Math.round((item.amount || 0) - subAmt);
+          if (targetLineAmt <= 0) continue;
+          const previousAmount = item.amount || 0;
+          const solved = this.solveLineForTarget(
+            item.product_id,
+            item.quantity,
+            targetLineAmt,
+            productConfigById,
+          );
+          item.quantity = solved.quantity;
+          item.rate = solved.rate;
+          item.amount = computeLineAmount(item.quantity, item.rate);
+          inv.total_amount = Math.round(
+            inv.products.reduce(
+              (s: number, p: any) => s + Math.round(p.amount || 0),
+              0,
+            ),
+          );
+          globalDrift += previousAmount - item.amount;
         }
       }
     }
@@ -3676,15 +4595,47 @@ export class InvoiceEngine {
         const lastInv = majorInvoices[majorInvoices.length - 1];
         if (lastInv && lastInv.products.length > 0) {
           const lastItem = lastInv.products[lastInv.products.length - 1];
-          lastItem.amount = Math.round(lastItem.amount + majorDrift);
-          lastItem.rate = roundToWholeInteger(
-            lastItem.amount / (lastItem.quantity || 1),
+          const targetAmt = Math.round(lastItem.amount + majorDrift);
+          const solved = this.solveLineForTarget(
+            lastItem.product_id,
+            lastItem.quantity,
+            targetAmt,
+            productConfigById,
+          );
+          lastItem.quantity = solved.quantity;
+          lastItem.rate = solved.rate;
+          lastItem.amount = computeLineAmount(
+            lastItem.quantity,
+            lastItem.rate,
           );
           lastInv.total_amount = Math.round(
             lastInv.products.reduce(
               (s: number, p: any) => s + Math.round(p.amount || 0),
               0,
             ),
+          );
+        }
+      }
+    }
+
+    // ── STEP 3.5: Rate Bounds Guard ────────────────────────────────────────────
+    // Defense in depth: every drift/exact-balance-correction pass above now
+    // clamps recomputed rates to the product's configured range, but this
+    // catches anything that slips through (e.g. a product whose range is too
+    // narrow to hit a target amount at all) with a clear error instead of
+    // silently persisting an out-of-range rate.
+    for (const inv of invoices) {
+      for (const item of inv.products || []) {
+        const config = productConfigById.get(item.product_id);
+        if (!config) continue;
+        const minR = parseFloat(config.perDayRateMin as any);
+        const maxR = parseFloat(config.perDayRateMax as any);
+        if (!Number.isFinite(minR) || !Number.isFinite(maxR) || minR > maxR) {
+          continue;
+        }
+        if (item.rate < minR || item.rate > maxR) {
+          throw new Error(
+            `Generated rate (₹${item.rate}) for ${item.product_name || item.product_id} on invoice ${inv.invoice_number} is outside the configured range [₹${minR}, ₹${maxR}].`,
           );
         }
       }

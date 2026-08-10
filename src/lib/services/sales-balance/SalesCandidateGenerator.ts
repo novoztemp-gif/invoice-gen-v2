@@ -3,6 +3,7 @@ import {
   roundToQuarterIncrement,
   roundToWholeInteger,
 } from "@/lib/utils/quantity-rate-utils";
+import { computeAddRoom, SalesAllocationTracker } from "./SalesLineCapacity";
 import {
   roundMoney,
   SALES_BALANCE_LIMITS,
@@ -196,36 +197,67 @@ export class SalesCandidateGenerator {
   public static generateInvoiceLineCandidates(
     invoice: SalesInvoice,
     constraints: Map<string, SalesProductConstraint>,
-    availableStockMap?: Map<string, number>,
+    tracker: SalesAllocationTracker | undefined,
     targetProductTotals?: Map<string, number>,
     affectedProductIds?: Set<string>,
     originalTotalBalancingMap?: Map<string, number>,
+    thresholdMax?: number,
+    productTemplates?: Map<string, SalesLine>,
   ): SalesGeneratedInvoiceLineCandidates[] {
-    return invoice.products.map((line) => {
+    const existingLineResults = invoice.products.map((line) => {
       const isAffected =
         !affectedProductIds || affectedProductIds.has(line.product_id);
 
       const constraint = constraints.get(line.product_id);
-      const stockKey = `${invoice.invoice_date}_${line.product_id}`;
-      const availableStockLimit =
-        availableStockMap?.get(stockKey) ?? Number.POSITIVE_INFINITY;
       const targetQtyHint = targetProductTotals?.get(line.product_id);
       const originalTotalBalancingQty = originalTotalBalancingMap?.get(
         line.product_id,
       );
 
+      // One shared calculation of how far this line is allowed to grow —
+      // product quantity max, the shared per-date/product stock ceiling,
+      // and the invoice's own headroom under the batch's maximum invoice
+      // amount, all folded together instead of checked separately (a
+      // separately-checked stock limit here used to ignore the ₹ cap
+      // entirely, and vice versa, letting the search commit to candidates
+      // that only failed at final validation). Queried at zero "already
+      // used" — cross-invoice coordination during the actual search happens
+      // via the same tracker in SalesCandidateSolver.
+      const stockCeiling = tracker
+        ? tracker.ceilingFor(invoice.invoice_date, line.product_id)
+        : Number.POSITIVE_INFINITY;
+      const { room } = computeAddRoom({
+        currentQuantity: line.quantity,
+        currentAmount: line.amount,
+        invoiceTotalAmount: invoice.total_amount,
+        rate: line.rate,
+        constraint,
+        thresholdMax,
+        stockCeiling,
+        stockAlreadyUsed: 0,
+      });
+      const maxQtyCeiling =
+        room === Number.POSITIVE_INFINITY
+          ? Number.POSITIVE_INFINITY
+          : roundToQuarterIncrement(line.quantity + room);
+
       const quantities = isAffected
         ? this.generateQuantityCandidates(
             line.quantity,
             line.unit_of_measure || constraint?.unitOfMeasure || "kg",
-            availableStockLimit,
+            maxQtyCeiling,
             targetQtyHint,
             constraint,
             originalTotalBalancingQty,
           )
         : [line.quantity];
 
-      const rates = this.generateRateCandidates(line.rate, constraint);
+      // Same lock as quantity above — an unaffected line's rate must never
+      // vary either, or a different, untouched product could silently end
+      // up with a different rate.
+      const rates = isAffected
+        ? this.generateRateCandidates(line.rate, constraint)
+        : [line.rate];
 
       const candidateSet = new Map<string, SalesGeneratedLineCandidate>();
 
@@ -326,7 +358,23 @@ export class SalesCandidateGenerator {
         lineCandidatePool.set(`${cand.quantity}_${cand.rate}`, cand);
       }
 
-      const candidates = Array.from(lineCandidatePool.values());
+      // maxQtyCeiling already bounds quantity at the line's CURRENT rate —
+      // but candidate rates can vary too (generateRateCandidates), so a
+      // higher-rate candidate at that same capped quantity could still push
+      // the invoice over the ₹ cap. Final safety filter for that case, still
+      // always keeping the original (unchanged) line as a fallback even if
+      // it was already over the cap before this edit.
+      const otherLinesTotal = roundMoney(invoice.total_amount - line.amount);
+      const maxAmountForThisLine =
+        thresholdMax && thresholdMax > 0
+          ? Math.max(0, thresholdMax - otherLinesTotal)
+          : Number.POSITIVE_INFINITY;
+      const candidates = Array.from(lineCandidatePool.values()).filter(
+        (cand) =>
+          (Math.abs(cand.quantity - line.quantity) < 0.001 &&
+            Math.abs(cand.rate - line.rate) < 0.001) ||
+          cand.amount <= maxAmountForThisLine + 0.5,
+      );
 
       return {
         productId: line.product_id,
@@ -334,5 +382,106 @@ export class SalesCandidateGenerator {
         candidates,
       };
     });
+
+    // Balancing invoices are no longer restricted to ones that already
+    // carry the edited product — any invoice in the batch is eligible.
+    // For an affected product this invoice doesn't currently hold at all,
+    // synthesize a phantom zero-quantity line from productTemplates and
+    // generate ADD-only candidates for it (a q=0 candidate — "don't add it
+    // here" — is always kept, so this never forces a change).
+    const newLineResults: SalesGeneratedInvoiceLineCandidates[] = [];
+    if (affectedProductIds && productTemplates) {
+      const existingPids = new Set(invoice.products.map((p) => p.product_id));
+      for (const pid of affectedProductIds) {
+        if (existingPids.has(pid)) continue;
+        const template = productTemplates.get(pid);
+        if (!template) continue;
+
+        const constraint = constraints.get(pid);
+        const targetQtyHint = targetProductTotals?.get(pid);
+        const originalTotalBalancingQty = originalTotalBalancingMap?.get(pid);
+        const zeroLine: SalesLine = {
+          ...template,
+          quantity: 0,
+          rate: template.rate,
+          amount: 0,
+        };
+
+        const stockCeiling = tracker
+          ? tracker.ceilingFor(invoice.invoice_date, pid)
+          : Number.POSITIVE_INFINITY;
+        const { room } = computeAddRoom({
+          currentQuantity: 0,
+          currentAmount: 0,
+          invoiceTotalAmount: invoice.total_amount,
+          rate: template.rate,
+          constraint,
+          thresholdMax,
+          stockCeiling,
+          stockAlreadyUsed: 0,
+        });
+        const maxQtyCeiling =
+          room === Number.POSITIVE_INFINITY
+            ? Number.POSITIVE_INFINITY
+            : roundToQuarterIncrement(room);
+
+        const quantities = this.generateQuantityCandidates(
+          0,
+          zeroLine.unit_of_measure || constraint?.unitOfMeasure || "kg",
+          maxQtyCeiling,
+          targetQtyHint,
+          constraint,
+          originalTotalBalancingQty,
+        );
+        const rates = this.generateRateCandidates(template.rate, constraint);
+
+        const candidateSet = new Map<string, SalesGeneratedLineCandidate>();
+        candidateSet.set(`0_${template.rate}`, {
+          line: zeroLine,
+          delta: 0,
+          quantity: 0,
+          rate: template.rate,
+          amount: 0,
+        });
+
+        for (const q of quantities) {
+          if (q === 0) continue;
+          for (const r of rates) {
+            const amount = computeLineAmount(q, r);
+            const key = `${q}_${r}`;
+            if (!candidateSet.has(key)) {
+              candidateSet.set(key, {
+                line: { ...zeroLine, quantity: q, rate: r, amount },
+                delta: amount,
+                quantity: q,
+                rate: r,
+                amount,
+              });
+            }
+          }
+        }
+
+        const otherLinesTotal = invoice.total_amount;
+        const maxAmountForThisLine =
+          thresholdMax && thresholdMax > 0
+            ? Math.max(0, thresholdMax - otherLinesTotal)
+            : Number.POSITIVE_INFINITY;
+
+        const candidates = Array.from(candidateSet.values())
+          .filter(
+            (cand) =>
+              cand.quantity === 0 || cand.amount <= maxAmountForThisLine + 0.5,
+          )
+          .slice(0, SALES_BALANCE_LIMITS.maxLineCandidates);
+
+        newLineResults.push({
+          productId: pid,
+          originalLine: zeroLine,
+          candidates,
+        });
+      }
+    }
+
+    return [...existingLineResults, ...newLineResults];
   }
 }

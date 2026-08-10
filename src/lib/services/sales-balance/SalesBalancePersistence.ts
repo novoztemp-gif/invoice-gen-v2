@@ -51,6 +51,19 @@ export class SalesBalancePersistence {
       edited_at: now,
     }));
 
+    const newInvoicesPayload = (plan.newInvoices || []).map((inv) => ({
+      id: inv.id,
+      invoice_number: inv.invoice_number,
+      invoice_date: inv.invoice_date,
+      products: inv.products,
+      total_amount: inv.total_amount,
+      status: "generated",
+      transport_mode: inv.transport_mode ?? null,
+      vehicle_number: inv.vehicle_number ?? null,
+      date_of_supply: inv.date_of_supply ?? null,
+      edited_at: now,
+    }));
+
     const expectedProductTotalsObj: Record<string, number> = {};
     if (expectedProductTotals) {
       for (const [pid, qty] of expectedProductTotals.entries()) {
@@ -66,6 +79,7 @@ export class SalesBalancePersistence {
         p_edited_invoice_id: editedInvoiceId,
         p_edited_invoice_data: editedPayload,
         p_balancing_updates: balancingPayload,
+        p_new_invoices: newInvoicesPayload,
         p_expected_product_totals: expectedProductTotals
           ? expectedProductTotalsObj
           : null,
@@ -98,7 +112,10 @@ export class SalesBalancePersistence {
       expectedProductTotals,
     );
 
-    const affectedInvoiceIds = plan.balancingInvoices.map((inv) => inv.id);
+    const affectedInvoiceIds = [
+      ...plan.balancingInvoices.map((inv) => inv.id),
+      ...(plan.newInvoices || []).map((inv) => inv.id),
+    ];
 
     const auditRecord: SalesAuditRecord = {
       batchId,
@@ -106,13 +123,15 @@ export class SalesBalancePersistence {
       editTimestamp: now,
       affectedInvoiceIds,
       numProductsModified: plan.editedInvoice.products.length,
-      numInvoicesRebalanced: plan.balancingInvoices.length,
+      numInvoicesRebalanced:
+        plan.balancingInvoices.length + (plan.newInvoices || []).length,
       transactionStatus: "SUCCESS",
     };
 
     return {
       success: true,
-      modifiedInvoicesCount: 1 + plan.balancingInvoices.length,
+      modifiedInvoicesCount:
+        1 + plan.balancingInvoices.length + (plan.newInvoices || []).length,
       message: "Sales batch successfully rebalanced, persisted, and verified.",
       auditRecord,
     };

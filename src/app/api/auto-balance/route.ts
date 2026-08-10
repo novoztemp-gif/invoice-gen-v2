@@ -50,8 +50,16 @@ export async function POST(request: NextRequest) {
   } catch (error: any) {
     console.error("Auto Balance Engine Error:", error);
 
-    // Return 409 Conflict if it's a lock error
-    if (error.message && error.message.includes("currently being updated")) {
+    // Return 409 Conflict if it's a lock error. Purchase's engine says
+    // "currently being updated"; Sales's says "Concurrent Edit Detected" /
+    // "currently being edited" — check for both so a real lock conflict on
+    // either batch type surfaces as a proper 409, not a generic 500.
+    if (
+      error.message &&
+      (error.message.includes("currently being updated") ||
+        error.message.includes("Concurrent Edit Detected") ||
+        error.message.includes("currently being edited"))
+    ) {
       return NextResponse.json({ message: error.message }, { status: 409 });
     }
 

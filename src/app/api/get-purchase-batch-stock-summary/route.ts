@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 import { createClient } from "@/lib/supabase/server";
 
 export async function GET(request: NextRequest) {
@@ -21,7 +22,7 @@ export async function GET(request: NextRequest) {
     const batchIds = batchIdParam
       .split(",")
       .map((id) => id.trim())
-      .filter((id) => Boolean(id) && !id.startsWith("CARRY_FORWARD_"));
+      .filter((id) => Boolean(id));
 
     if (batchIds.length === 0) {
       // Return carry-forward stock only if no purchase batch ID is passed
@@ -75,22 +76,27 @@ export async function GET(request: NextRequest) {
     }
 
     const primaryBatch = batches[0];
-    const earliestDate = batches.reduce(
-      (min, b) => (b.invoice_date_from < min ? b.invoice_date_from : min),
-      primaryBatch.invoice_date_from,
-    );
 
-    // 2. Compute carry-forward stock from previous finalized batches
-    const carryForwardStock = await InvoiceEngine.getCarryForwardStock(
-      supabase,
-      earliestDate,
-    );
-
-    // 3. Sum up purchased quantities across all selected batches
-    const { data: ledgerRows, error: ledgerError } = await supabase
-      .from("daily_stock_ledger")
-      .select("product_id, purchased_quantity, sold_quantity")
-      .in("purchase_batch_id", batchIds);
+    // 2. Sum up purchased quantities across all selected batches. Paginated
+    // — a batch with many products/days easily exceeds PostgREST's default
+    // 1000-row cap, which would silently drop whichever products' rows
+    // fell past the cutoff (no ordering is specified, so it's effectively
+    // arbitrary which products go missing).
+    let ledgerRows: any[] = [];
+    let ledgerError: any = null;
+    try {
+      ledgerRows = await fetchAllQueryRows((from, to) =>
+        supabase
+          .from("daily_stock_ledger")
+          .select(
+            "purchase_batch_id, product_id, purchased_quantity, sold_quantity",
+          )
+          .in("purchase_batch_id", batchIds)
+          .range(from, to),
+      );
+    } catch (err: any) {
+      ledgerError = err;
+    }
 
     // Paginate through invoice table to fetch ALL purchase invoices without PostgREST 1000-row cap
     const purchaseInvoices: any[] = [];
@@ -126,29 +132,50 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const purchasedSums = new Map<string, number>();
-
-    // 1. If daily_stock_ledger has rows for these batches, sum purchased_quantity across days
-    if (ledgerRows && ledgerRows.length > 0) {
-      for (const row of ledgerRows) {
-        if (row.product_id) {
-          const purchased = Number(row.purchased_quantity || 0);
-          purchasedSums.set(
-            row.product_id,
-            (purchasedSums.get(row.product_id) || 0) + purchased,
-          );
-        }
+    // A batch counts as "touched" (Leftover Stock semantics) if ANY of its
+    // ledger rows show sold_quantity > 0 — recomputed here server-side
+    // rather than trusting a client-supplied flag, mirroring the same rule
+    // fetchAvailableSources() uses on the frontend to label a card
+    // "Leftover Stock". Untouched batches are fresh "Purchase Batch"
+    // sources.
+    const touchedBatchIds = new Set<string>();
+    for (const row of ledgerRows || []) {
+      if (Number(row.sold_quantity || 0) > 0.001 && row.purchase_batch_id) {
+        touchedBatchIds.add(row.purchase_batch_id);
       }
     }
 
-    // 2. If purchasedSums is empty or daily_stock_ledger had no entries, sum ALL purchase invoices
-    const totalLedgerPurchased = Array.from(purchasedSums.values()).reduce(
-      (a, b) => a + b,
-      0,
-    );
+    const purchasedSums = new Map<string, number>();
+    const carryForwardSums = new Map<string, number>();
 
+    // 1. If daily_stock_ledger has rows for these batches, sum each batch's
+    // own net remaining (purchased - sold) across days — attributed to
+    // "purchased" (fresh) or "carry_forward" (opening, from a touched/
+    // leftover batch) per that specific batch's own state, never a global,
+    // unscoped carry-forward across the whole system. This is what makes
+    // selecting a fresh Purchase Batch alone show purchased-only (no
+    // opening stock), while a Leftover Stock source's remaining quantity
+    // counts as opening stock — and combining both in one selection sums
+    // opening + purchased = total, per product.
+    if (ledgerRows && ledgerRows.length > 0) {
+      for (const row of ledgerRows) {
+        if (!row.product_id) continue;
+        const purchased = Number(row.purchased_quantity || 0);
+        const sold = Number(row.sold_quantity || 0);
+        const net = Math.max(0, purchased - sold);
+        const target = touchedBatchIds.has(row.purchase_batch_id)
+          ? carryForwardSums
+          : purchasedSums;
+        target.set(row.product_id, (target.get(row.product_id) || 0) + net);
+      }
+    }
+
+    // 2. Only fall back to summing ALL purchase invoices when daily_stock_ledger
+    // genuinely has no rows for these batches. A net sum of 0 with real ledger
+    // rows present means the batch is fully consumed, not unposted — that must
+    // NOT fall back to showing the original gross purchase amount.
     if (
-      totalLedgerPurchased === 0 &&
+      (!ledgerRows || ledgerRows.length === 0) &&
       purchaseInvoices &&
       purchaseInvoices.length > 0
     ) {
@@ -166,18 +193,6 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    console.log("==========================================");
-    console.log("[STOCK SUMMARY ROUTE - purchasedSums Entries]");
-    for (const [prodId, sumQty] of purchasedSums.entries()) {
-      console.log({ product_id: prodId, purchased_quantity: sumQty });
-    }
-    const sumPurchasedSums = Array.from(purchasedSums.values()).reduce(
-      (a, b) => a + b,
-      0,
-    );
-    console.log("SUM(purchasedSums.values()):", sumPurchasedSums);
-    console.log("==========================================");
-
     // Aggregate unique products across selected batches
     const productMap = new Map<string, any>();
     let totalCombinedAmount = 0;
@@ -194,21 +209,9 @@ export async function GET(request: NextRequest) {
     // 4. Group and format products details
     const summary = Array.from(productMap.values()).map((prod: any) => {
       const pId = prod.product_id;
-      const hasKey = purchasedSums.has(pId);
-      const rawGet = purchasedSums.get(pId);
-      const carryForward = carryForwardStock.get(pId) || 0;
+      const carryForward = carryForwardSums.get(pId) || 0;
       const purchased = purchasedSums.get(pId) || 0;
       const totalAvailable = carryForward + purchased;
-
-      console.log("[PRODUCT PROOF CHECK]", {
-        product_id: pId,
-        product_name: prod.product_name,
-        "purchasedSums.has": hasKey,
-        "purchasedSums.get": rawGet,
-        carryForward,
-        purchased,
-        totalAvailable,
-      });
 
       return {
         product_id: pId,
@@ -219,33 +222,6 @@ export async function GET(request: NextRequest) {
         unit: prod.unit_of_measure || "kg",
       };
     });
-
-    const sumSummaryPurchased = summary.reduce(
-      (a, b) => a + Number(b.purchased || 0),
-      0,
-    );
-    const sumSummaryTotalAvailable = summary.reduce(
-      (a, b) => a + Number(b.total_available || 0),
-      0,
-    );
-
-    console.log("==========================================");
-    console.log("SUM(summary.map(x => x.purchased)):", sumSummaryPurchased);
-    console.log(
-      "SUM(summary.map(x => x.total_available)):",
-      sumSummaryTotalAvailable,
-    );
-    console.log("[STOCK SUMMARY ROUTE - Per Product Breakdown]");
-    for (const s of summary) {
-      console.log({
-        product_id: s.product_id,
-        product_name: s.product_name,
-        carry_forward: s.carry_forward,
-        purchased: s.purchased,
-        total_available: s.total_available,
-      });
-    }
-    console.log("==========================================");
 
     return NextResponse.json({
       success: true,

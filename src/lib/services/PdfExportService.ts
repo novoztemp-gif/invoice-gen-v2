@@ -31,8 +31,8 @@ export async function generatePurchasePDFBuffer(
       .strokeColor("black")
       .stroke();
 
-    // Title: PURCHASE INVOICE (centered)
-    doc.font("Helvetica-Bold").fontSize(15).text("PURCHASE INVOICE", 0, 42, {
+    // Title: CASH VOUCHER (centered)
+    doc.font("Helvetica-Bold").fontSize(15).text("CASH VOUCHER", 0, 42, {
       align: "center",
       underline: true,
     });

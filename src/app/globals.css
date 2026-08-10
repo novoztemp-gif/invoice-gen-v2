@@ -116,4 +116,12 @@
   body {
     @apply bg-background text-foreground;
   }
+  /* Set by LayoutContent on every route except /login. Clips <html> itself
+     as the final, authoritative scroll boundary for the app shell — see
+     the comment in LayoutContent.tsx for why the shell div's own
+     overflow-hidden isn't sufficient by itself. */
+  html.app-shell-active {
+    height: 100%;
+    overflow: hidden;
+  }
 }

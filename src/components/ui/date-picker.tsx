@@ -18,6 +18,7 @@ interface DatePickerProps {
   placeholder?: string;
   disabled?: boolean;
   required?: boolean;
+  className?: string;
 }
 
 export function DatePicker({
@@ -26,6 +27,7 @@ export function DatePicker({
   placeholder = "Pick a date",
   disabled = false,
   required = false,
+  className,
 }: DatePickerProps) {
   const [open, setOpen] = React.useState(false);
 
@@ -42,6 +44,7 @@ export function DatePicker({
           className={cn(
             "w-full justify-start text-left font-normal",
             !date && "text-muted-foreground",
+            className,
           )}
           disabled={disabled}
         >

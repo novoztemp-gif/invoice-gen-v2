@@ -56,11 +56,14 @@ export default function PrintInvoicePage() {
           .eq("id", b.issuing_company_id)
           .single();
 
-        // 4. Fetch receiving company
-        const customerId =
-          inv.products?.[0]?.customer_id || b.receiving_company_id;
+        // 4. Fetch the counterparty: a supplier for PURCHASE invoices, a
+        // receiving company for SALES invoices.
+        const isPurchaseBatch = b.batch_type === "PURCHASE";
+        const customerId = isPurchaseBatch
+          ? b.supplier_id || inv.products?.[0]?.customer_id
+          : inv.products?.[0]?.customer_id || b.receiving_company_id;
         const { data: receiving, error: receivingError } = await supabase
-          .from("receiving_companies")
+          .from(isPurchaseBatch ? "suppliers" : "receiving_companies")
           .select("*")
           .eq("id", customerId)
           .single();
@@ -219,7 +222,7 @@ export default function PrintInvoicePage() {
               {/* Header */}
               <div className="text-center">
                 <h2 className="text-xl font-bold tracking-wider text-black border-b border-black pb-1 uppercase">
-                  Purchase Invoice
+                  Cash Voucher
                 </h2>
               </div>
 
@@ -286,7 +289,9 @@ export default function PrintInvoicePage() {
                     {invoice.products
                       ?.map((p: any) => {
                         const hsn = p.hsn_code ? String(p.hsn_code).trim() : "";
-                        return hsn ? `${p.product_name} - ${hsn}` : p.product_name;
+                        return hsn
+                          ? `${p.product_name} - ${hsn}`
+                          : p.product_name;
                       })
                       .join(", ") || "raw materials"}
                   </div>

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
+import { GeneratingModal } from "@/components/GeneratingModal";
 import InvoiceEditor from "@/components/InvoiceEditor";
 import InvoicePreview from "@/components/InvoicePreview";
 import { PurchaseAutoBalanceSummaryModal } from "@/components/PurchaseAutoBalanceSummaryModal";
@@ -130,9 +131,20 @@ export default function BatchDetail() {
     toggleDate,
   } = useInvoiceBatchDetail({ batchId });
 
+  // Sales batches already have their invoices staged (status "pending") at
+  // creation time, so `invoices.length === 0` alone can't gate the
+  // Generate Splitup CTA the way it does for Purchase/Expense — a pending
+  // Sales batch's invoices exist but must stay hidden until revealed.
+  const showGenerateSplitupCta =
+    batch?.batch_type === "SALES"
+      ? batch?.status === "pending"
+      : invoices.length === 0;
+
   const [isPreviewChallan, setIsPreviewChallan] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [autoBalanceSummary, setAutoBalanceSummary] = useState<any | null>(null);
+  const [autoBalanceSummary, setAutoBalanceSummary] = useState<any | null>(
+    null,
+  );
 
   const handleSaveInvoiceWithSummary = async (
     invoiceId: string,
@@ -140,7 +152,7 @@ export default function BatchDetail() {
     setStatus: (status: string) => void,
   ) => {
     const res = await handleSaveInvoice(invoiceId, updates, setStatus);
-    if (batch?.batch_type !== "SALES" && res?.impactSummary) {
+    if (res?.impactSummary) {
       setAutoBalanceSummary(res.impactSummary);
     }
   };
@@ -458,12 +470,12 @@ export default function BatchDetail() {
                         : "Regular"}
                     </span>
                     <p className="font-medium text-sm">
-                      {batch.selected_customers
-                        .map(
-                          (id: string) =>
-                            receivingCustomers[id]?.company_name || id,
-                        )
-                        .join(", ")}
+                      {batch.selected_customers.length}{" "}
+                      {batch.batch_type === "PURCHASE"
+                        ? "regular supplier"
+                        : "regular customer"}
+                      {batch.selected_customers.length > 1 ? "s" : ""}{" "}
+                      selected
                     </p>
                   </div>
                 ) : null}
@@ -754,7 +766,7 @@ export default function BatchDetail() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle>Invoice Splitups</CardTitle>
-          {invoices.length === 0 && (
+          {showGenerateSplitupCta && (
             <Button onClick={handleGenerateSplitups} disabled={generating}>
               {generating ? (
                 <>
@@ -768,7 +780,7 @@ export default function BatchDetail() {
           )}
         </CardHeader>
         <CardContent>
-          {invoices.length === 0 ? (
+          {showGenerateSplitupCta ? (
             <div className="text-center py-12 text-slate-500">
               <p className="text-lg">No invoice splitups generated yet.</p>
               <p className="text-sm mt-2">
@@ -814,9 +826,12 @@ export default function BatchDetail() {
                 {filteredInvoices.length === 0 ? (
                   <div className="text-center py-12 text-slate-500 bg-slate-50/60 rounded-xl border border-dashed border-slate-200 p-8">
                     <Search className="h-10 w-10 mx-auto text-slate-300 mb-3" />
-                    <p className="text-base font-semibold text-slate-700">No invoices found.</p>
+                    <p className="text-base font-semibold text-slate-700">
+                      No invoices found.
+                    </p>
                     <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-                      No generated invoices match your search term &quot;{searchQuery}&quot;.
+                      No generated invoices match your search term &quot;
+                      {searchQuery}&quot;.
                     </p>
                     <Button
                       variant="outline"
@@ -830,316 +845,315 @@ export default function BatchDetail() {
                 ) : (
                   <div className="space-y-4">
                     {dateWiseSummary.map((summary) => {
-                      const isExpanded = expandedDates[summary.date] !== false;
+                      // Date groups default to collapsed — a batch can have
+                      // thousands of invoices, and rendering every day's
+                      // full invoice/product tables on initial load was a
+                      // major source of page slowness.
+                      const isExpanded = expandedDates[summary.date] === true;
                       return (
-                      <div
-                        key={summary.date}
-                        className="border rounded-lg overflow-hidden"
-                      >
                         <div
-                          className="flex items-center justify-between p-4 bg-slate-50 cursor-pointer hover:bg-slate-100 transition-colors"
-                          onClick={() => toggleDate(summary.date)}
+                          key={summary.date}
+                          className="border rounded-lg overflow-hidden"
                         >
-                          <div className="flex items-center gap-3">
-                            {isExpanded ? (
-                              <ChevronUp className="h-5 w-5 text-slate-600" />
-                            ) : (
-                              <ChevronDown className="h-5 w-5 text-slate-600" />
-                            )}
-                            <div>
-                              <h4 className="font-semibold text-lg text-slate-700">
-                                {format(
-                                  new Date(summary.date),
-                                  "EEEE, dd MMMM yyyy",
-                                )}
-                              </h4>
-                              <p className="text-sm text-slate-500">
-                                {summary.count} invoice
-                                {summary.count > 1 ? "s" : ""} • ₹
-                                {summary.total.toLocaleString("en-IN", {
-                                  minimumFractionDigits: 2,
-                                  maximumFractionDigits: 2,
-                                })}
-                              </p>
+                          <div
+                            className="flex items-center justify-between p-4 bg-slate-50 cursor-pointer hover:bg-slate-100 transition-colors"
+                            onClick={() => toggleDate(summary.date)}
+                          >
+                            <div className="flex items-center gap-3">
+                              {isExpanded ? (
+                                <ChevronUp className="h-5 w-5 text-slate-600" />
+                              ) : (
+                                <ChevronDown className="h-5 w-5 text-slate-600" />
+                              )}
+                              <div>
+                                <h4 className="font-semibold text-lg text-slate-700">
+                                  {format(
+                                    new Date(summary.date),
+                                    "EEEE, dd MMMM yyyy",
+                                  )}
+                                </h4>
+                                <p className="text-sm text-slate-500">
+                                  {summary.count} invoice
+                                  {summary.count > 1 ? "s" : ""} • ₹
+                                  {summary.total.toLocaleString("en-IN", {
+                                    minimumFractionDigits: 2,
+                                    maximumFractionDigits: 2,
+                                  })}
+                                </p>
+                              </div>
                             </div>
                           </div>
-                        </div>
 
-                        {isExpanded && (
-                          <div className="p-4 space-y-4">
-                            {(() => {
-                              console.log("==========================================");
-                              console.log("[PAGE DEBUG] dateInvoices.length:", summary.invoices.length);
-                              console.log("[PAGE DEBUG] dateInvoices.map:", summary.invoices.map((i: any) => i.invoice_number));
-                              console.log("[PAGE DEBUG] filteredInvoices.map:", filteredInvoices.map((i: any) => i.invoice_number));
-                              console.log("==========================================");
-                              return null;
-                            })()}
-                            {summary.invoices.map((invoice) => (
-                              <div
-                                key={invoice.id}
-                                className="border-l-4 border-slate-200 pl-4"
-                              >
-                                <div className="flex items-center justify-between mb-3">
-                                  <div>
-                                    <div className="flex items-center gap-2">
-                                      <h5 className="font-semibold">
-                                        {invoice.invoice_number}
-                                      </h5>
-                                      {invoice.status && (
-                                        <Badge
-                                          variant={
-                                            invoice.status === "generated"
-                                              ? "default"
-                                              : invoice.status === "completed"
+                          {isExpanded && (
+                            <div className="p-4 space-y-4">
+                              {summary.invoices.map((invoice) => (
+                                <div
+                                  key={invoice.id}
+                                  className="border-l-4 border-slate-200 pl-4"
+                                >
+                                  <div className="flex items-center justify-between mb-3">
+                                    <div>
+                                      <div className="flex items-center gap-2">
+                                        <h5 className="font-semibold">
+                                          {invoice.invoice_number}
+                                        </h5>
+                                        {invoice.status && (
+                                          <Badge
+                                            variant={
+                                              invoice.status === "generated"
                                                 ? "default"
-                                                : invoice.status === "failed"
-                                                  ? "destructive"
-                                                  : "secondary"
-                                          }
-                                        >
-                                          {invoice.status.toUpperCase()}
-                                        </Badge>
-                                      )}
+                                                : invoice.status === "completed"
+                                                  ? "default"
+                                                  : invoice.status === "failed"
+                                                    ? "destructive"
+                                                    : "secondary"
+                                            }
+                                          >
+                                            {invoice.status.toUpperCase()}
+                                          </Badge>
+                                        )}
+                                      </div>
+                                      {(() => {
+                                        const partnerId =
+                                          (invoice as any).customer_id ||
+                                          invoice.products?.[0]?.customer_id ||
+                                          (batch as any).supplier_id ||
+                                          batch.receiving_company_id;
+                                        const partnerObj = partnerId
+                                          ? receivingCustomers[partnerId]
+                                          : null;
+                                        const partnerName =
+                                          partnerObj?.company_name ||
+                                          partnerObj?.supplier_name ||
+                                          batch.suppliers?.company_name ||
+                                          batch.receiving_companies
+                                            ?.company_name;
+                                        return partnerName ? (
+                                          <p className="text-xs text-slate-500 font-medium mt-0.5">
+                                            {batch.batch_type === "PURCHASE"
+                                              ? "Supplier: "
+                                              : "Customer: "}
+                                            {partnerName}
+                                          </p>
+                                        ) : null;
+                                      })()}
                                     </div>
-                                    {(() => {
-                                      const partnerId =
-                                        (invoice as any).customer_id ||
-                                        invoice.products?.[0]?.customer_id ||
-                                        (batch as any).supplier_id ||
-                                        batch.receiving_company_id;
-                                      const partnerObj = partnerId
-                                        ? receivingCustomers[partnerId]
-                                        : null;
-                                      const partnerName =
-                                        partnerObj?.company_name ||
-                                        partnerObj?.supplier_name ||
-                                        batch.suppliers?.company_name ||
-                                        batch.receiving_companies?.company_name;
-                                      return partnerName ? (
-                                        <p className="text-xs text-slate-500 font-medium mt-0.5">
-                                          {batch.batch_type === "PURCHASE"
-                                            ? "Supplier: "
-                                            : "Customer: "}
-                                          {partnerName}
-                                        </p>
-                                      ) : null;
-                                    })()}
-                                  </div>
-                                  <div className="text-right">
-                                    <p className="text-sm text-slate-500">
-                                      Invoice Total
-                                    </p>
-                                    <p className="text-lg font-bold">
-                                      ₹
-                                      {invoice.total_amount.toLocaleString(
-                                        "en-IN",
-                                        {
-                                          minimumFractionDigits: 2,
-                                          maximumFractionDigits: 2,
-                                        },
-                                      )}
-                                    </p>
-                                  </div>
-                                </div>
-                                {batch?.batch_type === "PURCHASE" ? (
-                                  <div className="mt-4 flex flex-wrap gap-2 w-full">
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      className="flex-1 text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-200"
-                                      onClick={() => {
-                                        setPreviewIndex(
-                                          invoices.findIndex(
-                                            (inv) => inv.id === invoice.id,
-                                          ),
-                                        );
-                                        setIsEditingMode(false);
-                                        setIsPreviewChallan(false);
-                                      }}
-                                    >
-                                      <Eye className="h-4 w-4 mr-2" />
-                                      Preview
-                                    </Button>
-                                    {batch.batch_status !== "FINALIZED" && (
-                                      <Button
-                                        variant="outline"
-                                        size="sm"
-                                        className="flex-1 text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
-                                        onClick={() => {
-                                          setPreviewIndex(
-                                            invoices.findIndex(
-                                              (inv) => inv.id === invoice.id,
-                                            ),
-                                          );
-                                          setIsEditingMode(true);
-                                          setIsPreviewChallan(false);
-                                        }}
-                                      >
-                                        <Edit3 className="h-4 w-4 mr-2" />
-                                        Edit
-                                      </Button>
-                                    )}
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      className="flex-1 text-slate-600 hover:text-slate-900"
-                                      onClick={() =>
-                                        handleDownloadExcel(invoice)
-                                      }
-                                    >
-                                      <Download className="h-4 w-4 mr-2" />
-                                      Download PDF
-                                    </Button>
-                                  </div>
-                                ) : (
-                                  <div className="mt-4 flex flex-wrap gap-2 w-full text-xs">
-                                    {/* 1. Preview Invoice */}
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      className="flex-1 min-w-[130px] text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-200"
-                                      onClick={() => {
-                                        setPreviewIndex(
-                                          invoices.findIndex(
-                                            (inv) => inv.id === invoice.id,
-                                          ),
-                                        );
-                                        setIsEditingMode(false);
-                                        setIsPreviewChallan(false);
-                                      }}
-                                    >
-                                      <Eye className="h-3.5 w-3.5 mr-1.5" />
-                                      Preview Invoice
-                                    </Button>
-
-                                    {/* 2. Edit */}
-                                    {batch.batch_status !== "FINALIZED" && (
-                                      <Button
-                                        variant="outline"
-                                        size="sm"
-                                        className="flex-1 min-w-[90px] text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
-                                        onClick={() => {
-                                          setPreviewIndex(
-                                            invoices.findIndex(
-                                              (inv) => inv.id === invoice.id,
-                                            ),
-                                          );
-                                          setIsEditingMode(true);
-                                          setIsPreviewChallan(false);
-                                        }}
-                                      >
-                                        <Edit3 className="h-3.5 w-3.5 mr-1.5" />
-                                        Edit
-                                      </Button>
-                                    )}
-
-                                    {/* 3. Download Invoice */}
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      className="flex-1 min-w-[140px] text-slate-700 hover:text-slate-900"
-                                      onClick={() =>
-                                        handleDownloadExcel(invoice)
-                                      }
-                                    >
-                                      <Download className="h-3.5 w-3.5 mr-1.5" />
-                                      Download Invoice
-                                    </Button>
-
-                                    {/* 4. Preview Delivery Challan */}
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      className="flex-1 min-w-[160px] text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 border-emerald-200"
-                                      onClick={() => {
-                                        setPreviewIndex(
-                                          invoices.findIndex(
-                                            (inv) => inv.id === invoice.id,
-                                          ),
-                                        );
-                                        setIsEditingMode(false);
-                                        setIsPreviewChallan(true);
-                                      }}
-                                    >
-                                      <Eye className="h-3.5 w-3.5 mr-1.5" />
-                                      Preview Delivery Challan
-                                    </Button>
-
-                                    {/* 5. Download Delivery Challan */}
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      className="flex-1 min-w-[170px] text-teal-700 hover:text-teal-900 hover:bg-teal-50 border-teal-200"
-                                      onClick={() =>
-                                        triggerDownload(
-                                          `/api/download-invoice?invoiceId=${invoice.id}&isChallan=true`,
-                                          `Delivery_Challan_${invoice.invoice_number}.xlsx`,
-                                        )
-                                      }
-                                    >
-                                      <Download className="h-3.5 w-3.5 mr-1.5" />
-                                      Download Delivery Challan
-                                    </Button>
-                                  </div>
-                                )}
-
-                                <Table>
-                                  <TableHeader>
-                                    <TableRow>
-                                      <TableHead>Product</TableHead>
-                                      <TableHead>HSN Code</TableHead>
-                                      <TableHead className="text-right">
-                                        Quantity
-                                      </TableHead>
-                                      <TableHead className="text-right">
-                                        Rate
-                                      </TableHead>
-                                      <TableHead className="text-right">
-                                        Amount
-                                      </TableHead>
-                                    </TableRow>
-                                  </TableHeader>
-                                  <TableBody>
-                                    {invoice.products.map((product) => (
-                                      <TableRow
-                                        key={`${invoice.id}-${product.product_id}`}
-                                      >
-                                        <TableCell className="font-medium">
-                                          {product.product_name}
-                                        </TableCell>
-                                        <TableCell>
-                                          {product.hsn_code}
-                                        </TableCell>
-                                        <TableCell className="text-right">
-                                          {product.quantity}
-                                        </TableCell>
-                                        <TableCell className="text-right">
-                                          ₹
-                                          {Number(product.rate || 0).toFixed(2)}
-                                        </TableCell>
-                                        <TableCell className="text-right">
-                                          ₹
-                                          {Number(
-                                            product.amount || 0,
-                                          ).toLocaleString("en-IN", {
+                                    <div className="text-right">
+                                      <p className="text-sm text-slate-500">
+                                        Invoice Total
+                                      </p>
+                                      <p className="text-lg font-bold">
+                                        ₹
+                                        {invoice.total_amount.toLocaleString(
+                                          "en-IN",
+                                          {
                                             minimumFractionDigits: 2,
                                             maximumFractionDigits: 2,
-                                          })}
-                                        </TableCell>
+                                          },
+                                        )}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  {batch?.batch_type === "PURCHASE" ? (
+                                    <div className="mt-4 flex flex-wrap gap-2 w-full">
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1 text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-200"
+                                        onClick={() => {
+                                          setPreviewIndex(
+                                            invoices.findIndex(
+                                              (inv) => inv.id === invoice.id,
+                                            ),
+                                          );
+                                          setIsEditingMode(false);
+                                          setIsPreviewChallan(false);
+                                        }}
+                                      >
+                                        <Eye className="h-4 w-4 mr-2" />
+                                        Preview
+                                      </Button>
+                                      {batch.batch_status !== "FINALIZED" && (
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          className="flex-1 text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
+                                          onClick={() => {
+                                            setPreviewIndex(
+                                              invoices.findIndex(
+                                                (inv) => inv.id === invoice.id,
+                                              ),
+                                            );
+                                            setIsEditingMode(true);
+                                            setIsPreviewChallan(false);
+                                          }}
+                                        >
+                                          <Edit3 className="h-4 w-4 mr-2" />
+                                          Edit
+                                        </Button>
+                                      )}
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1 text-slate-600 hover:text-slate-900"
+                                        onClick={() =>
+                                          handleDownloadExcel(invoice)
+                                        }
+                                      >
+                                        <Download className="h-4 w-4 mr-2" />
+                                        Download PDF
+                                      </Button>
+                                    </div>
+                                  ) : (
+                                    <div className="mt-4 flex flex-wrap gap-2 w-full text-xs">
+                                      {/* 1. Preview Invoice */}
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1 min-w-[130px] text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-200"
+                                        onClick={() => {
+                                          setPreviewIndex(
+                                            invoices.findIndex(
+                                              (inv) => inv.id === invoice.id,
+                                            ),
+                                          );
+                                          setIsEditingMode(false);
+                                          setIsPreviewChallan(false);
+                                        }}
+                                      >
+                                        <Eye className="h-3.5 w-3.5 mr-1.5" />
+                                        Preview Invoice
+                                      </Button>
+
+                                      {/* 2. Edit */}
+                                      {batch.batch_status !== "FINALIZED" && (
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          className="flex-1 min-w-[90px] text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
+                                          onClick={() => {
+                                            setPreviewIndex(
+                                              invoices.findIndex(
+                                                (inv) => inv.id === invoice.id,
+                                              ),
+                                            );
+                                            setIsEditingMode(true);
+                                            setIsPreviewChallan(false);
+                                          }}
+                                        >
+                                          <Edit3 className="h-3.5 w-3.5 mr-1.5" />
+                                          Edit
+                                        </Button>
+                                      )}
+
+                                      {/* 3. Download Invoice */}
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1 min-w-[140px] text-slate-700 hover:text-slate-900"
+                                        onClick={() =>
+                                          handleDownloadExcel(invoice)
+                                        }
+                                      >
+                                        <Download className="h-3.5 w-3.5 mr-1.5" />
+                                        Download Invoice
+                                      </Button>
+
+                                      {/* 4. Preview Delivery Challan */}
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1 min-w-[160px] text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 border-emerald-200"
+                                        onClick={() => {
+                                          setPreviewIndex(
+                                            invoices.findIndex(
+                                              (inv) => inv.id === invoice.id,
+                                            ),
+                                          );
+                                          setIsEditingMode(false);
+                                          setIsPreviewChallan(true);
+                                        }}
+                                      >
+                                        <Eye className="h-3.5 w-3.5 mr-1.5" />
+                                        Preview Delivery Challan
+                                      </Button>
+
+                                      {/* 5. Download Delivery Challan */}
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1 min-w-[170px] text-teal-700 hover:text-teal-900 hover:bg-teal-50 border-teal-200"
+                                        onClick={() =>
+                                          triggerDownload(
+                                            `/api/download-invoice?invoiceId=${invoice.id}&isChallan=true`,
+                                            `Delivery_Challan_${invoice.invoice_number}.xlsx`,
+                                          )
+                                        }
+                                      >
+                                        <Download className="h-3.5 w-3.5 mr-1.5" />
+                                        Download Delivery Challan
+                                      </Button>
+                                    </div>
+                                  )}
+
+                                  <Table>
+                                    <TableHeader>
+                                      <TableRow>
+                                        <TableHead>Product</TableHead>
+                                        <TableHead>HSN Code</TableHead>
+                                        <TableHead className="text-right">
+                                          Quantity
+                                        </TableHead>
+                                        <TableHead className="text-right">
+                                          Rate
+                                        </TableHead>
+                                        <TableHead className="text-right">
+                                          Amount
+                                        </TableHead>
                                       </TableRow>
-                                    ))}
-                                  </TableBody>
-                                </Table>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+                                    </TableHeader>
+                                    <TableBody>
+                                      {invoice.products.map((product, productIdx) => (
+                                        <TableRow
+                                          key={`${invoice.id}-${product.product_id}-${productIdx}`}
+                                        >
+                                          <TableCell className="font-medium">
+                                            {product.product_name}
+                                          </TableCell>
+                                          <TableCell>
+                                            {product.hsn_code}
+                                          </TableCell>
+                                          <TableCell className="text-right">
+                                            {product.quantity}
+                                          </TableCell>
+                                          <TableCell className="text-right">
+                                            ₹
+                                            {Number(product.rate || 0).toFixed(
+                                              2,
+                                            )}
+                                          </TableCell>
+                                          <TableCell className="text-right">
+                                            ₹
+                                            {Number(
+                                              product.amount || 0,
+                                            ).toLocaleString("en-IN", {
+                                              minimumFractionDigits: 2,
+                                              maximumFractionDigits: 2,
+                                            })}
+                                          </TableCell>
+                                        </TableRow>
+                                      ))}
+                                    </TableBody>
+                                  </Table>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
               {/* Overall Statistics */}
               {/* {invoices.length > 0 && (
@@ -1310,6 +1324,22 @@ export default function BatchDetail() {
       <PurchaseAutoBalanceSummaryModal
         summary={autoBalanceSummary}
         onClose={() => setAutoBalanceSummary(null)}
+        title={
+          batch?.batch_type === "SALES"
+            ? "Sales Auto Balance Summary"
+            : "Purchase Auto Balance Summary"
+        }
+        partyLabel={batch?.batch_type === "SALES" ? "Customer" : "Supplier"}
+      />
+
+      {/* Generation Progress Modal */}
+      <GeneratingModal
+        open={generating}
+        label={
+          batch?.batch_type === "SALES"
+            ? "Generating sales invoice splitups"
+            : "Generating purchase invoice splitups"
+        }
       />
 
       {/* Custom Confirmation Modal */}

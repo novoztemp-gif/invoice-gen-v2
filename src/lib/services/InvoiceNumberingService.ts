@@ -86,13 +86,17 @@ export class InvoiceNumberingService {
 
   /**
    * Fetches current sequence state & next sequence preview with rich accounting information.
+   * The next sequence number is always auto-detected from the highest existing
+   * invoice number for this company + financial year + type — there is no
+   * manual override. A new financial year (or a deleted batch/sequence)
+   * naturally starts back at 1 since the detection is scoped to that exact
+   * prefix.
    */
   public static async fetchSequencePreview(
     supabase: SupabaseClient,
     issuingCompanyId: string,
     financialYear: string,
     invoiceType: InvoiceType,
-    previousEndingSequence?: number | string,
   ): Promise<InvoiceSequencePreview | null> {
     if (!issuingCompanyId) return null;
 
@@ -115,14 +119,36 @@ export class InvoiceNumberingService {
         .toUpperCase()
         .replace(/[^A-Z0-9]/g, "");
 
-    const parsedPrev =
-      previousEndingSequence !== undefined &&
-      previousEndingSequence !== null &&
-      previousEndingSequence !== ""
-        ? Number(previousEndingSequence)
-        : 0;
+    const prefix = `${abbreviation}-${canonicalFy}-${invoiceType}`;
+    let currentSeq = 0;
+    let page = 0;
+    const pageSize = 1000;
+    let hasMore = true;
+    while (hasMore) {
+      const { data: pageInvoices } = await supabase
+        .from("invoice")
+        .select("invoice_number")
+        .like("invoice_number", `${prefix}-%`)
+        .range(page * pageSize, (page + 1) * pageSize - 1);
 
-    const currentSeq = !isNaN(parsedPrev) ? parsedPrev : 0;
+      if (pageInvoices && pageInvoices.length > 0) {
+        for (const row of pageInvoices) {
+          const parts = (row.invoice_number || "").split("-");
+          const seqNum = parseInt(parts[parts.length - 1], 10);
+          if (!isNaN(seqNum) && seqNum > currentSeq) {
+            currentSeq = seqNum;
+          }
+        }
+        if (pageInvoices.length < pageSize) {
+          hasMore = false;
+        } else {
+          page++;
+        }
+      } else {
+        hasMore = false;
+      }
+    }
+
     const nextSeq = currentSeq + 1;
 
     const currentInvoiceNumber =

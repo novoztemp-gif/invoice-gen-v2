@@ -186,7 +186,7 @@ export default function InvoicePreview({
                     {/* Header */}
                     <div className="text-center">
                       <h2 className="text-xl font-bold tracking-wider text-black border-b border-black pb-1 uppercase">
-                        Purchase Invoice
+                        Cash Voucher
                       </h2>
                     </div>
 

@@ -19,13 +19,25 @@ export default async function fetchJobStats(
       };
     }
 
-    const { data: jobs, error } = await supabase
-      .from("jobs")
-      .select("status")
-      .in("invoice_id", invoiceIds);
+    // `.in("invoice_id", ids)` builds a GET request with every ID in the
+    // query string — for a batch with thousands of invoices this exceeds
+    // typical proxy/CDN URL length limits (414 Request-URI Too Large).
+    // Chunking keeps each request's URL small regardless of batch size.
+    const CHUNK_SIZE = 200;
+    const chunks: string[][] = [];
+    for (let i = 0; i < invoiceIds.length; i += CHUNK_SIZE) {
+      chunks.push(invoiceIds.slice(i, i + CHUNK_SIZE));
+    }
 
-    if (error) {
-      console.error("Error fetching jobs:", error);
+    const results = await Promise.all(
+      chunks.map((chunk) =>
+        supabase.from("jobs").select("status").in("invoice_id", chunk),
+      ),
+    );
+
+    const firstError = results.find((r) => r.error)?.error;
+    if (firstError) {
+      console.error("Error fetching jobs:", firstError);
       return {
         pending: 0,
         processing: 0,
@@ -41,8 +53,8 @@ export default async function fetchJobStats(
       failed: 0,
     };
 
-    if (jobs) {
-      jobs.forEach((job) => {
+    for (const { data: jobs } of results) {
+      (jobs || []).forEach((job) => {
         if (job.status === "pending") stats.pending++;
         else if (job.status === "processing") stats.processing++;
         else if (job.status === "completed") stats.completed++;

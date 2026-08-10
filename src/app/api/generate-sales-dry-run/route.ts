@@ -2,8 +2,10 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import { InvoiceNumberingService } from "@/lib/services/InvoiceNumberingService";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 import { createClient } from "@/lib/supabase/server";
 import { roundToQuarterIncrement } from "@/lib/utils/quantity-rate-utils";
+import { reconcileInvoicesToTargets } from "@/lib/utils/reconcile-invoice-quantities";
 
 export async function POST(request: NextRequest) {
   try {
@@ -41,158 +43,133 @@ export async function POST(request: NextRequest) {
     const batchIds = stockSourceBatchId
       .split(",")
       .map((id: string) => id.trim())
-      .filter((id: string) => Boolean(id) && !id.startsWith("CARRY_FORWARD_"));
+      .filter((id: string) => Boolean(id));
 
-    const { data: ledgerData, error: ledgerError } = await supabase
-      .from("daily_stock_ledger")
-      .select(
-        "ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
-      )
-      .in(
-        "purchase_batch_id",
-        batchIds.length > 0 ? batchIds : [stockSourceBatchId],
-      )
-      .order("ledger_date", { ascending: true });
-
-    if (ledgerError) {
+    // Paginated — a source batch with many products/days easily exceeds
+    // PostgREST's default 1000-row cap, which would silently drop
+    // whichever products' rows fell past the cutoff.
+    let ledgerData: any[] = [];
+    try {
+      ledgerData = await fetchAllQueryRows((from, to) =>
+        supabase
+          .from("daily_stock_ledger")
+          .select(
+            "purchase_batch_id, ledger_date, product_id, opening_stock, purchased_quantity, sold_quantity",
+          )
+          .in(
+            "purchase_batch_id",
+            batchIds.length > 0 ? batchIds : [stockSourceBatchId],
+          )
+          .order("ledger_date", { ascending: true })
+          .order("product_id", { ascending: true })
+          .range(from, to),
+      );
+    } catch (err: any) {
       return NextResponse.json(
-        { message: `Failed to load stock ledger: ${ledgerError.message}` },
+        { message: `Failed to load stock ledger: ${err?.message || "Unknown error"}` },
         { status: 500 },
       );
     }
 
-    let effectiveLedgerData = ledgerData || [];
+    const effectiveLedgerData = ledgerData || [];
 
-    // Fallback: If daily_stock_ledger has no entries for these purchase batches, generate synthetic stock ledger rows from purchase invoices/batches
+    // No synthetic/estimated fallback: the Daily Stock Ledger must always
+    // be built from real, persisted daily_stock_ledger rows — which only
+    // exist once a purchase batch is Finalized
+    // (InvoiceEngine.postPurchaseBatchStockLedger). The frontend already
+    // only lets a Finalized batch be selected as a source
+    // (fetchAvailableSources in generate-invoice/page.tsx), so an empty
+    // result here means something upstream is inconsistent — surface that
+    // clearly instead of silently estimating numbers that were never
+    // actually purchased on those exact days.
     if (effectiveLedgerData.length === 0 && batchIds.length > 0) {
-      const { data: purchaseInvoices } = await supabase
-        .from("invoice")
-        .select("invoice_batch_id, invoice_date, products")
-        .in("invoice_batch_id", batchIds);
-
-      const { data: purchaseBatches } = await supabase
-        .from("invoice_batch")
-        .select("id, products")
-        .in("id", batchIds);
-
-      const purchasedByDateAndProduct = new Map<string, number>();
-      const productIds = new Set<string>();
-
-      if (purchaseInvoices && purchaseInvoices.length > 0) {
-        for (const inv of purchaseInvoices) {
-          const dateStr = inv.invoice_date;
-          for (const p of inv.products || []) {
-            if (p.product_id) {
-              productIds.add(p.product_id);
-              const key = `${dateStr}_${p.product_id}`;
-              const qty = Number(p.quantity || 0);
-              purchasedByDateAndProduct.set(
-                key,
-                (purchasedByDateAndProduct.get(key) || 0) + qty,
-              );
-            }
-          }
-        }
-      } else if (purchaseBatches && purchaseBatches.length > 0) {
-        for (const b of purchaseBatches) {
-          for (const p of b.products || []) {
-            if (p.product_id) {
-              productIds.add(p.product_id);
-              const qty = Number(p.monthly_quantity || p.quantity || 0);
-              const key = `${invoiceDateFrom}_${p.product_id}`;
-              purchasedByDateAndProduct.set(
-                key,
-                (purchasedByDateAndProduct.get(key) || 0) + qty,
-              );
-            }
-          }
-        }
-      }
-
-      // Build date list from invoiceDateFrom -> invoiceDateTo
-      const dateList: string[] = [];
-      const curDate = new Date(invoiceDateFrom);
-      const endDate = new Date(invoiceDateTo);
-      while (curDate <= endDate) {
-        dateList.push(curDate.toISOString().slice(0, 10));
-        curDate.setDate(curDate.getDate() + 1);
-      }
-
-      const syntheticRows: any[] = [];
-      for (const prodId of productIds) {
-        dateList.forEach((dateStr) => {
-          const key = `${dateStr}_${prodId}`;
-          const purchasedQty =
-            Math.round((purchasedByDateAndProduct.get(key) || 0) * 100) / 100;
-          syntheticRows.push({
-            ledger_date: dateStr,
-            product_id: prodId,
-            opening_stock: 0,
-            purchased_quantity: purchasedQty,
-            sold_quantity: 0,
-          });
-        });
-      }
-      effectiveLedgerData = syntheticRows;
+      return NextResponse.json(
+        {
+          message:
+            "No daily stock ledger data found for the selected purchase batch(es). The batch must be Finalized before it can be used as a Sales stock source.",
+        },
+        { status: 400 },
+      );
     }
 
-    console.log(
-      "DRY-RUN: effectiveLedgerData rows count:",
-      effectiveLedgerData.length,
-    );
-
-    // ── Build per-day stock picture ────────────────────────────────────────
-    const productGroups = new Map<string, any[]>();
-    for (const row of effectiveLedgerData) {
-      if (!productGroups.has(row.product_id)) {
-        productGroups.set(row.product_id, []);
-      }
-      productGroups.get(row.product_id)!.push(row);
-    }
-
-    // perDayLedger: "date_productId" → { opening, purchased, prevSold, available }
-    const perDayLedger = new Map<
-      string,
-      {
-        opening: number;
-        purchased: number;
-        prevSold: number;
-        available: number;
-      }
-    >();
-
-    const availableStockMap = new Map<string, any>();
-
-    for (const [productId, rows] of productGroups.entries()) {
-      rows.sort((a: any, b: any) => a.ledger_date.localeCompare(b.ledger_date));
-
-      let carryForward = Number(rows[0].opening_stock) || 0;
-
-      for (const row of rows) {
-        const opening = carryForward;
-        const purchased = Number(row.purchased_quantity) || 0;
-        const prevSold = Number(row.sold_quantity) || 0;
-
-        const availableBeforeSales = opening + purchased;
-        const available = Math.max(0, availableBeforeSales - prevSold);
-
-        const key = `${row.ledger_date}_${productId}`;
-        perDayLedger.set(key, { opening, purchased, prevSold, available });
-
-        availableStockMap.set(key, {
-          opening: opening,
-          purchased: Math.max(0, purchased - prevSold),
-        });
-
-        carryForward = available;
-      }
-    }
-
-    // 2. Build the date list
+    // 2. Build the fixed sales date range up front. Everything below always
+    // walks THIS range, never a selected batch's own historical purchase
+    // dates — a Leftover Stock batch's real ledger rows can be from an
+    // entirely earlier period; only its net remaining stock carries into
+    // this range, as a single day-1 opening seed.
     const fromDate = new Date(invoiceDateFrom);
     const toDate = new Date(invoiceDateTo);
     const timeDiff = toDate.getTime() - fromDate.getTime();
     const numberOfDays = Math.ceil(timeDiff / (1000 * 3600 * 24)) + 1;
+    const dateList: string[] = [];
+    {
+      const d = new Date(fromDate);
+      for (let i = 0; i < numberOfDays; i++) {
+        dateList.push(d.toISOString().slice(0, 10));
+        d.setDate(d.getDate() + 1);
+      }
+    }
+
+    // A batch counts as "touched" (Leftover Stock semantics) if any of its
+    // own ledger rows show sold_quantity > 0 — mirrors the same rule
+    // get-purchase-batch-stock-summary and fetchAvailableSources use to
+    // label a source card "Leftover Stock" vs "Purchase Batch".
+    const touchedBatchIds = new Set<string>();
+    for (const row of effectiveLedgerData) {
+      if (Number(row.sold_quantity || 0) > 0.001 && row.purchase_batch_id) {
+        touchedBatchIds.add(row.purchase_batch_id);
+      }
+    }
+
+    // Leftover Stock sources: their net remaining (purchased - sold),
+    // summed across their own real historical days, becomes a single
+    // day-1 opening-stock seed for this generation's date range.
+    // Fresh Purchase Batch sources: their real per-day purchased_quantity
+    // is used as-is, keyed to its own actual date.
+    const leftoverSeedByProduct = new Map<string, number>();
+    const freshPurchasedByKey = new Map<string, number>();
+    const productIdsInScope = new Set<string>();
+
+    for (const row of effectiveLedgerData) {
+      if (!row.product_id) continue;
+      productIdsInScope.add(row.product_id);
+      if (touchedBatchIds.has(row.purchase_batch_id)) {
+        const net = Math.max(
+          0,
+          Number(row.purchased_quantity || 0) - Number(row.sold_quantity || 0),
+        );
+        leftoverSeedByProduct.set(
+          row.product_id,
+          (leftoverSeedByProduct.get(row.product_id) || 0) + net,
+        );
+      } else {
+        const key = `${row.ledger_date}_${row.product_id}`;
+        freshPurchasedByKey.set(
+          key,
+          (freshPurchasedByKey.get(key) || 0) +
+            Number(row.purchased_quantity || 0),
+        );
+      }
+    }
+
+    // ── Build per-day stock picture across the requested date range ─────
+    // Day 1's opening = the leftover seed (0 if no Leftover Stock source
+    // was selected); every later day's carry-forward is tracked internally
+    // by generateInvoiceSplitupsInternal's own runningRemaining tracker, so
+    // only day-1's opening and each day's purchased figure need seeding
+    // here.
+    const availableStockMap = new Map<string, any>();
+    for (const dateStr of dateList) {
+      for (const productId of productIdsInScope) {
+        const key = `${dateStr}_${productId}`;
+        const purchased = freshPurchasedByKey.get(key) || 0;
+        const opening =
+          dateStr === dateList[0]
+            ? leftoverSeedByProduct.get(productId) || 0
+            : 0;
+        availableStockMap.set(key, { opening, purchased });
+      }
+    }
 
     // Resolve starting invoice counter from invoice_sequences
     const canonicalFy = InvoiceNumberingService.normalizeFinancialYear(
@@ -258,13 +235,11 @@ export async function POST(request: NextRequest) {
 
     // Sum up the proposed quantities per date and product
     const proposedQtyMap = new Map<string, number>();
-    const originalProposedQtyMap = new Map<string, number>();
     for (const inv of invoices) {
       for (const p of inv.products) {
         const key = `${inv.invoice_date}_${p.product_id}`;
         const sum = (proposedQtyMap.get(key) || 0) + p.quantity;
         proposedQtyMap.set(key, sum);
-        originalProposedQtyMap.set(key, sum);
       }
     }
 
@@ -274,14 +249,12 @@ export async function POST(request: NextRequest) {
     const dbProductMap = new Map();
     (dbProducts || []).forEach((p) => dbProductMap.set(p.id, p));
 
-    // 4. Construct the review rows by chronologically carrying forward the new proposed sales per product
+    // 4. Construct the review rows by walking the requested date range and
+    // carrying forward the new proposed sales per product. Day 1's opening
+    // is the Leftover Stock seed (0 if none selected); purchased_quantity
+    // per day comes only from fresh (untouched) Purchase Batch sources.
     const reviewRows: any[] = [];
-    for (const [productId, rows] of productGroups.entries()) {
-      // Sort rows chronologically
-      rows.sort((a: any, b: any) => a.ledger_date.localeCompare(b.ledger_date));
-
-      let carryForward = Number(rows[0].opening_stock) || 0;
-
+    for (const productId of productIdsInScope) {
       const productObj = products.find((p: any) => p.product_id === productId);
       const dbProd = dbProductMap.get(productId);
       const productName =
@@ -289,17 +262,16 @@ export async function POST(request: NextRequest) {
       const unit =
         productObj?.unit_of_measure || dbProd?.unit_of_measure || "kg";
 
-      for (const row of rows) {
-        const opening = carryForward;
-        const purchased = Number(row.purchased_quantity) || 0;
-        const prevSold = Number(row.sold_quantity) || 0;
+      let carryForward = leftoverSeedByProduct.get(productId) || 0;
 
-        const key = `${row.ledger_date}_${productId}`;
+      for (const dateStr of dateList) {
+        const opening = carryForward;
+        const purchased = freshPurchasedByKey.get(`${dateStr}_${productId}`) || 0;
+
+        const key = `${dateStr}_${productId}`;
         let proposed = proposedQtyMap.get(key) || 0;
 
-        const available = roundToQuarterIncrement(
-          opening + purchased - prevSold,
-        );
+        const available = roundToQuarterIncrement(opening + purchased);
         let remaining = roundToQuarterIncrement(available - proposed);
 
         // Perform final normalization step to strictly enforce Remaining ∈ [0, 15]
@@ -316,11 +288,11 @@ export async function POST(request: NextRequest) {
         proposedQtyMap.set(key, proposed);
 
         reviewRows.push({
-          date: row.ledger_date,
+          date: dateStr,
           product_id: productId,
           product_name: productName,
           opening_stock: opening,
-          purchased_quantity: Math.max(0, purchased - prevSold),
+          purchased_quantity: purchased,
           proposed_sold: proposed,
           remaining_stock: remaining,
           unit: unit,
@@ -331,102 +303,15 @@ export async function POST(request: NextRequest) {
     }
 
     // Adjust the invoices to match the normalized proposed quantities
-    for (const [key, normalizedProposed] of proposedQtyMap.entries()) {
-      const [dateStr, productId] = key.split("_");
-      const originalProposed = originalProposedQtyMap.get(key) || 0;
-      const diff =
-        Math.round((normalizedProposed - originalProposed) * 100) / 100;
-
-      if (Math.abs(diff) > 0.001) {
-        if (diff > 0) {
-          // Increase: add the entire diff to the first matching invoice
-          let matchingInv = invoices.find(
-            (inv: any) =>
-              inv.invoice_date === dateStr &&
-              inv.products.some((p: any) => p.product_id === productId),
-          );
-          if (!matchingInv) {
-            matchingInv = invoices.find(
-              (inv: any) => inv.invoice_date === dateStr,
-            );
-          }
-          if (matchingInv) {
-            let prodObj = matchingInv.products.find(
-              (p: any) => p.product_id === productId,
-            );
-            if (!prodObj) {
-              const pConfig = mockBatch.products.find(
-                (p: any) => p.product_id === productId,
-              );
-              const minRate = parseFloat(pConfig?.perDayRateMin) || 100;
-              const maxRate = parseFloat(pConfig?.perDayRateMax) || 100;
-              const rate =
-                Math.round(
-                  (minRate + Math.random() * (maxRate - minRate)) * 100,
-                ) / 100;
-
-              prodObj = {
-                product_id: productId,
-                product_name: pConfig?.product_name || "Unknown Product",
-                hsn_code: pConfig?.hsn_code || "",
-                unit_of_measure: pConfig?.unit_of_measure || "kg",
-                quantity: 0,
-                rate: rate,
-                amount: 0,
-                customer_id:
-                  matchingInv.products[0]?.customer_id ||
-                  mockBatch.receiving_company_id,
-              };
-              matchingInv.products.push(prodObj);
-            }
-            const oldQty = prodObj.quantity;
-            const newQty = Math.round((oldQty + diff) * 100) / 100;
-            prodObj.quantity = newQty;
-            prodObj.amount = Math.round(newQty * prodObj.rate * 100) / 100;
-            matchingInv.total_amount = matchingInv.products.reduce(
-              (sum: any, p: any) => sum + p.amount,
-              0,
-            );
-          }
-        } else {
-          // Decrease: subtract from matching invoices until diff is fully applied (diff is negative)
-          let remainingDiff = Math.abs(diff);
-          for (const inv of invoices) {
-            if (inv.invoice_date === dateStr && remainingDiff > 0.001) {
-              const prodObj = inv.products.find(
-                (p: any) => p.product_id === productId,
-              );
-              if (prodObj) {
-                const qtyToSubtract = Math.min(prodObj.quantity, remainingDiff);
-                prodObj.quantity =
-                  Math.round((prodObj.quantity - qtyToSubtract) * 100) / 100;
-                prodObj.amount =
-                  Math.round(prodObj.quantity * prodObj.rate * 100) / 100;
-                if (prodObj.quantity <= 0.001) {
-                  // Remove product from invoice
-                  inv.products = inv.products.filter(
-                    (p: any) => p.product_id !== productId,
-                  );
-                }
-                inv.total_amount = inv.products.reduce(
-                  (sum: any, p: any) => sum + p.amount,
-                  0,
-                );
-                remainingDiff =
-                  Math.round((remainingDiff - qtyToSubtract) * 100) / 100;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Filter out empty invoices (if any)
-    const activeInvoices = invoices.filter(
-      (inv: any) => inv.products.length > 0 && inv.total_amount > 0,
+    const reconciledInvoices = reconcileInvoicesToTargets(
+      invoices,
+      proposedQtyMap,
+      mockBatch.products,
+      mockBatch.receiving_company_id,
+      Number(maximumInvoiceAmount) || undefined,
     );
     invoices.length = 0;
-    invoices.push(...activeInvoices);
+    invoices.push(...reconciledInvoices);
 
     // Sort reviewRows by date ASC, then product_name ASC
     reviewRows.sort((a, b) => {
