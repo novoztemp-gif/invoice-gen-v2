@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
+import { fetchAllQueryRows, fetchRowsByIds } from "@/lib/supabase/fetchAll";
 import { createClient } from "@/lib/supabase/server";
 
 /**
@@ -39,16 +39,21 @@ export async function GET(request: NextRequest) {
           "id, invoice_number, invoice_batch_id, invoice_date, products",
         )
         .eq("batch_type", "SALES")
+        .order("id", { ascending: true })
         .range(from, to),
     );
 
     const batchIds = Array.from(
       new Set(salesInvoices.map((inv: any) => inv.invoice_batch_id).filter(Boolean)),
     );
-    const { data: batches } = await supabase
-      .from("invoice_batch")
-      .select("id, batch_status, status")
-      .in("id", batchIds.length > 0 ? batchIds : ["__none__"]);
+    const batches = await fetchRowsByIds(
+      (chunk) =>
+        supabase
+          .from("invoice_batch")
+          .select("id, batch_status, status")
+          .in("id", chunk),
+      batchIds,
+    );
     const batchStatusMap = new Map(
       (batches || []).map((b: any) => [b.id, b.batch_status]),
     );

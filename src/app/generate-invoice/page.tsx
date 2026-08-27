@@ -43,6 +43,10 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { ValidationGuidanceModal } from "@/components/ValidationGuidanceModal";
 import { useInvoiceForm } from "@/lib/hooks/useInvoiceForm";
+import {
+  getFinalClosingStockByProduct,
+  type StockLedgerRow,
+} from "@/lib/services/StockCalculationService";
 import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
@@ -106,6 +110,10 @@ export default function GenerateInvoice() {
     categorySplits,
     setCategorySplits,
     sequencePreview,
+    occurrenceSemantics,
+    setOccurrenceSemantics,
+    categoryAllocation,
+    setCategoryAllocation,
   } = useInvoiceForm({ batchType: "SALES" });
 
   const errorBorderClass = "border-red-500 ring-1 ring-red-500";
@@ -137,14 +145,21 @@ export default function GenerateInvoice() {
           .order("invoice_date_from", { ascending: false }),
         // Paginated — this is a global fetch across every purchase batch's
         // ledger rows, which easily exceeds PostgREST's default 1000-row
-        // cap and would silently drop whichever batches' rows fell past
-        // the cutoff (no ordering specified, so effectively arbitrary).
+        // cap. Ordering is required, not optional: without it, Postgres has
+        // no defined row order across separate .range() calls at all, so
+        // pagination can silently skip or duplicate rows non-deterministically
+        // — this was producing wildly wrong (too-low) purchased/sold sums,
+        // showing a fraction of the real leftover stock until a
+        // properly-ordered endpoint recomputed it after selection.
         fetchAllQueryRows((from, to) =>
           supabase
             .from("daily_stock_ledger")
             .select(
-              "purchase_batch_id, purchased_quantity, sold_quantity, opening_stock, ledger_date",
+              "purchase_batch_id, product_id, purchased_quantity, sold_quantity, opening_stock, ledger_date",
             )
+            .order("purchase_batch_id", { ascending: true })
+            .order("ledger_date", { ascending: true })
+            .order("product_id", { ascending: true })
             .range(from, to),
         ),
       ]);
@@ -160,6 +175,7 @@ export default function GenerateInvoice() {
           .from("invoice")
           .select("invoice_batch_id, products")
           .eq("batch_type", "PURCHASE")
+          .order("id", { ascending: true })
           .range(invPage * invPageSize, (invPage + 1) * invPageSize - 1);
 
         if (pageInvoices && pageInvoices.length > 0) {
@@ -177,21 +193,44 @@ export default function GenerateInvoice() {
       const allBatches = batches || [];
       setFinalizedPurchaseBatches(allBatches);
 
+      // Group every ledger row by its own purchase_batch_id first (each
+      // batch's remaining stock must be computed from ONLY its own rows,
+      // never blended with another batch's), then run the shared
+      // StockCalculationService's chronological recurrence per product
+      // within that batch, and sum the resulting per-product closing
+      // stocks into one batch-level total for the source card. `purchased`
+      // / `sold` stay as simple raw sums purely to answer "does this batch
+      // have any ledger activity at all" below — the actual remaining
+      // quantity comes from the chronological calculation, not from them.
+      const rowsByBatch = new Map<string, StockLedgerRow[]>();
+      for (const r of ledgerRows || []) {
+        if (!r.purchase_batch_id) continue;
+        const list = rowsByBatch.get(r.purchase_batch_id);
+        if (list) {
+          list.push(r as StockLedgerRow);
+        } else {
+          rowsByBatch.set(r.purchase_batch_id, [r as StockLedgerRow]);
+        }
+      }
+
       const batchLedgerMap = new Map<
         string,
-        { purchased: number; sold: number }
+        { purchased: number; sold: number; remaining: number }
       >();
 
-      for (const r of ledgerRows || []) {
-        if (r.purchase_batch_id) {
-          const item = batchLedgerMap.get(r.purchase_batch_id) || {
-            purchased: 0,
-            sold: 0,
-          };
-          item.purchased += Number(r.purchased_quantity || 0);
-          item.sold += Number(r.sold_quantity || 0);
-          batchLedgerMap.set(r.purchase_batch_id, item);
+      for (const [batchId, rows] of rowsByBatch.entries()) {
+        let purchased = 0;
+        let sold = 0;
+        for (const r of rows) {
+          purchased += Number(r.purchased_quantity || 0);
+          sold += Number(r.sold_quantity || 0);
         }
+        const closingByProduct = getFinalClosingStockByProduct(rows);
+        let remaining = 0;
+        for (const closing of closingByProduct.values()) {
+          remaining += closing;
+        }
+        batchLedgerMap.set(batchId, { purchased, sold, remaining });
       }
 
       // Sum purchased quantities directly from Purchase invoices across ALL invoices
@@ -224,12 +263,12 @@ export default function GenerateInvoice() {
         let totalPurchased = 0;
 
         if (hasLedgerData) {
-          // Ledger is the authoritative source once a purchase batch has been
-          // finalized/posted: net remaining = purchased - sold.
-          totalPurchased = Math.max(
-            0,
-            (ledgerInfo?.purchased || 0) - (ledgerInfo?.sold || 0),
-          );
+          // Ledger is the authoritative source once a purchase batch has
+          // been finalized/posted: remaining stock comes from the shared
+          // StockCalculationService's chronological calculation (computed
+          // above, per product, then summed for this batch), never a raw
+          // purchased-minus-sold on the totals.
+          totalPurchased = ledgerInfo?.remaining || 0;
         } else if (
           invoiceQtyMap.has(b.id) &&
           (invoiceQtyMap.get(b.id) || 0) > 0
@@ -346,6 +385,47 @@ export default function GenerateInvoice() {
           setStockSummary(summaryList);
           setPurchaseBatchDetails(result.batchDetails || null);
 
+          // Inherit Financial Year + Invoice Date range from the selected
+          // Purchase Batch — only when exactly ONE source is selected.
+          // With multiple sources, batchDetails only ever reflects the
+          // first-selected batch (a pre-existing behavior, not something
+          // introduced here — see the API route's own comment), so
+          // auto-filling from it in that case would silently pick an
+          // arbitrary batch's dates when the selected batches could span
+          // different ranges. Never overwrites a value the user already
+          // typed themselves beyond this single-selection moment (Sales
+          // form fields stay ordinary controlled inputs otherwise).
+          if (realBatchIds.length === 1 && result.batchDetails) {
+            const bd = result.batchDetails;
+            const fyMatch =
+              typeof bd.financial_year === "string"
+                ? bd.financial_year.match(/^FY(\d{4})-(\d{2})$/)
+                : null;
+
+            const parseLocalDate = (dateStr: string): Date | undefined => {
+              const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr || "");
+              if (!m) return undefined;
+              return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+            };
+
+            const dateFrom = parseLocalDate(bd.invoice_date_from);
+            const dateTo = parseLocalDate(bd.invoice_date_to);
+
+            setFormData((prev) => {
+              const next = { ...prev };
+              if (fyMatch) {
+                const startYear = Number(fyMatch[1]);
+                let endYear = startYear - (startYear % 100) + Number(fyMatch[2]);
+                if (endYear <= startYear) endYear += 100;
+                next.financialYearStart = startYear;
+                next.financialYearEnd = endYear;
+              }
+              if (dateFrom) next.invoiceDateFrom = dateFrom;
+              if (dateTo) next.invoiceDateTo = dateTo;
+              return next;
+            });
+          }
+
           // Inherit Product Occurrence Distribution & Category Split from Purchase Batch
           if (
             result.batchDetails &&
@@ -419,24 +499,32 @@ export default function GenerateInvoice() {
             }
           }
 
-          // Synchronize Leftover Stock Card to match live total_available in summary table (preserving Purchase Batch cards)
+          // Synchronize Leftover Stock Card to match live total_available in
+          // summary table (preserving Purchase Batch cards). This endpoint's
+          // summary is the COMBINED total across every selected source when
+          // more than one is picked — it must only ever be stamped onto a
+          // card's own number when that card is the SOLE selected source,
+          // otherwise a Leftover card ends up displaying leftover + every
+          // other selected source's stock as if it were its own remaining
+          // quantity. With multiple sources selected, each card keeps
+          // whatever fetchAvailableSources already computed for it
+          // individually; the combined total still shows correctly in the
+          // "Aggregated Available Inventory Summary" table below.
           const exactSum = summaryList.reduce(
             (sum: number, item: any) =>
               sum + Number(item.total_available || item.purchased || 0),
             0,
           );
 
-          if (exactSum > 0) {
+          if (exactSum > 0 && realBatchIds.length === 1) {
+            const soleSelectedId = realBatchIds[0];
             setAvailableSources((prevSources) =>
               prevSources.map((src) => {
                 // Business Rule: Purchase Batch cards represent ORIGINAL purchased quantity and must NEVER be overwritten.
                 if (src.sourceType === "Purchase Batch") {
                   return src;
                 }
-                if (
-                  src.id === formData.stockSourceBatchId ||
-                  formData.stockSourceBatchId?.includes(src.id)
-                ) {
+                if (src.id === soleSelectedId) {
                   return {
                     ...src,
                     remainingQty: Math.round(exactSum * 100) / 100,
@@ -883,6 +971,123 @@ export default function GenerateInvoice() {
           </CardContent>
         </Card>
 
+        {/* Invoice Configuration Card */}
+        <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+          <CardHeader className="p-3 pb-2 border-b border-slate-100">
+            <CardTitle className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+              Invoice Configuration
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-3.5">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="space-y-1">
+                <Label htmlFor="date-from">Invoice Date From *</Label>
+                <DatePicker
+                  date={formData.invoiceDateFrom}
+                  onDateChange={(date) =>
+                    setFormData({
+                      ...formData,
+                      invoiceDateFrom: date,
+                    })
+                  }
+                  className={
+                    errorField === "invoice-date-from"
+                      ? errorBorderClass
+                      : undefined
+                  }
+                />
+              </div>
+
+              <div className="space-y-1">
+                <Label htmlFor="date-to">Invoice Date To *</Label>
+                <DatePicker
+                  date={formData.invoiceDateTo}
+                  onDateChange={(date) =>
+                    setFormData({
+                      ...formData,
+                      invoiceDateTo: date,
+                    })
+                  }
+                  className={
+                    errorField === "invoice-date-to"
+                      ? errorBorderClass
+                      : undefined
+                  }
+                />
+              </div>
+
+              <div className="space-y-1">
+                <Label htmlFor="min-amount">Minimum Amount per Invoice *</Label>
+                <Input
+                  id="min-amount"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="Enter min amount"
+                  value={formData.minimumInvoiceAmount}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      minimumInvoiceAmount: e.target.value,
+                    })
+                  }
+                  required
+                  className={cn(
+                    "h-8 text-xs rounded-md",
+                    errorField === "minimum-invoice-amount" &&
+                      errorBorderClass,
+                  )}
+                />
+              </div>
+
+              <div className="space-y-1">
+                <Label htmlFor="max-amount">Maximum Amount per Invoice *</Label>
+                <Input
+                  id="max-amount"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="Enter max amount"
+                  value={formData.maximumInvoiceAmount}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      maximumInvoiceAmount: e.target.value,
+                    })
+                  }
+                  required
+                  className={cn(
+                    "h-8 text-xs rounded-md",
+                    errorField === "maximum-invoice-amount" &&
+                      errorBorderClass,
+                  )}
+                />
+              </div>
+
+              <div className="space-y-1 md:col-span-2">
+                <Label htmlFor="total-amount">
+                  Total Amount (All Invoices) *
+                </Label>
+                <Input
+                  id="total-amount"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="Enter total amount for all invoices"
+                  value={formData.totalAmount}
+                  onChange={(e) =>
+                    setFormData({ ...formData, totalAmount: e.target.value })
+                  }
+                  required
+                  className={cn(
+                    "h-8 text-xs rounded-md",
+                    errorField === "total-amount" && errorBorderClass,
+                  )}
+                />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
         {/* Customers */}
         <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
           <CardHeader className="p-3 pb-2 border-b border-slate-100 flex flex-row items-center justify-between">
@@ -1183,123 +1388,6 @@ export default function GenerateInvoice() {
           </CardContent>
         </Card>
 
-        {/* Invoice Configuration Card */}
-        <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
-          <CardHeader className="p-3 pb-2 border-b border-slate-100">
-            <CardTitle className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
-              Invoice Configuration
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-3.5">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-              <div className="space-y-1">
-                <Label htmlFor="date-from">Invoice Date From *</Label>
-                <DatePicker
-                  date={formData.invoiceDateFrom}
-                  onDateChange={(date) =>
-                    setFormData({
-                      ...formData,
-                      invoiceDateFrom: date,
-                    })
-                  }
-                  className={
-                    errorField === "invoice-date-from"
-                      ? errorBorderClass
-                      : undefined
-                  }
-                />
-              </div>
-
-              <div className="space-y-1">
-                <Label htmlFor="date-to">Invoice Date To *</Label>
-                <DatePicker
-                  date={formData.invoiceDateTo}
-                  onDateChange={(date) =>
-                    setFormData({
-                      ...formData,
-                      invoiceDateTo: date,
-                    })
-                  }
-                  className={
-                    errorField === "invoice-date-to"
-                      ? errorBorderClass
-                      : undefined
-                  }
-                />
-              </div>
-
-              <div className="space-y-1">
-                <Label htmlFor="min-amount">Minimum Amount per Invoice *</Label>
-                <Input
-                  id="min-amount"
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="Enter min amount"
-                  value={formData.minimumInvoiceAmount}
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      minimumInvoiceAmount: e.target.value,
-                    })
-                  }
-                  required
-                  className={cn(
-                    "h-8 text-xs rounded-md",
-                    errorField === "minimum-invoice-amount" &&
-                      errorBorderClass,
-                  )}
-                />
-              </div>
-
-              <div className="space-y-1">
-                <Label htmlFor="max-amount">Maximum Amount per Invoice *</Label>
-                <Input
-                  id="max-amount"
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="Enter max amount"
-                  value={formData.maximumInvoiceAmount}
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      maximumInvoiceAmount: e.target.value,
-                    })
-                  }
-                  required
-                  className={cn(
-                    "h-8 text-xs rounded-md",
-                    errorField === "maximum-invoice-amount" &&
-                      errorBorderClass,
-                  )}
-                />
-              </div>
-
-              <div className="space-y-1 md:col-span-2">
-                <Label htmlFor="total-amount">
-                  Total Amount (All Invoices) *
-                </Label>
-                <Input
-                  id="total-amount"
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="Enter total amount for all invoices"
-                  value={formData.totalAmount}
-                  onChange={(e) =>
-                    setFormData({ ...formData, totalAmount: e.target.value })
-                  }
-                  required
-                  className={cn(
-                    "h-8 text-xs rounded-md",
-                    errorField === "total-amount" && errorBorderClass,
-                  )}
-                />
-              </div>
-            </div>
-          </CardContent>
-        </Card>
 
         {/* Category Split Card */}
         <CategorySplitSection
@@ -1307,6 +1395,77 @@ export default function GenerateInvoice() {
           value={categorySplits}
           onChange={setCategorySplits}
         />
+
+        {/* Product Occurrence Quota Card (Sprint 1.7S) */}
+        <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
+          <CardHeader className="p-3 pb-2 border-b border-slate-100">
+            <CardTitle className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+              Product Occurrence Quota
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-3 space-y-3">
+            <div className="flex gap-4 text-xs">
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="occurrence-semantics"
+                  checked={occurrenceSemantics !== "CATEGORY"}
+                  onChange={() => setOccurrenceSemantics(null)}
+                />
+                Global (default — occurrence % applies across the whole batch)
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="occurrence-semantics"
+                  checked={occurrenceSemantics === "CATEGORY"}
+                  onChange={() => setOccurrenceSemantics("CATEGORY")}
+                />
+                By Category (split Meat/Fruits invoice quota separately)
+              </label>
+            </div>
+            {occurrenceSemantics === "CATEGORY" && (
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <Label className="text-[11px] text-slate-500">Meat %</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    value={categoryAllocation.Meat}
+                    onChange={(e) =>
+                      setCategoryAllocation({
+                        ...categoryAllocation,
+                        Meat: e.target.value,
+                      })
+                    }
+                    className="h-8 text-xs rounded-md"
+                  />
+                </div>
+                <div className="flex-1">
+                  <Label className="text-[11px] text-slate-500">
+                    Fruits %
+                  </Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    value={categoryAllocation.Fruits}
+                    onChange={(e) =>
+                      setCategoryAllocation({
+                        ...categoryAllocation,
+                        Fruits: e.target.value,
+                      })
+                    }
+                    className="h-8 text-xs rounded-md"
+                  />
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Products Card */}
         <Card className="border border-slate-200 shadow-2xs bg-white rounded-md">
@@ -1549,6 +1708,34 @@ export default function GenerateInvoice() {
               OK
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Generation wait dialog — the server now auto-retries generation
+          internally (fresh randomness each attempt) whenever a Major
+          Customer's invoice(s) don't quite fit on the first roll, instead
+          of surfacing that as an error for the user to manually retry.
+          This can take noticeably longer than a single attempt, so a
+          dedicated dialog (rather than just the button's inline spinner)
+          sets the right expectation instead of looking stuck. */}
+      <Dialog open={isValidating}>
+        <DialogContent
+          className="sm:max-w-[425px]"
+          onInteractOutside={(e) => e.preventDefault()}
+          onEscapeKeyDown={(e) => e.preventDefault()}
+          showCloseButton={false}
+        >
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-sm font-bold text-slate-800">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Optimizing Invoice Allocation
+            </DialogTitle>
+          </DialogHeader>
+          <div className="py-2 text-xs text-slate-600">
+            Generating a batch that fits every configured amount and Major
+            Customer requirement — this can take a few moments if the first
+            few attempts don't quite fit. Please wait...
+          </div>
         </DialogContent>
       </Dialog>
 

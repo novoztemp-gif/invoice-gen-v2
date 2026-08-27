@@ -60,6 +60,14 @@ export default function GeneratePurchaseInvoice() {
     selectedIssuingCompany,
     selectedCustomers,
     majorCustomers,
+    anticipatedMajorCustomers,
+    anticipatedCustomers,
+    anticipatedMajorCustomerOpen,
+    setAnticipatedMajorCustomerOpen,
+    tempAnticipatedMajorCustomer,
+    setTempAnticipatedMajorCustomer,
+    handleAddAnticipatedMajorCustomer,
+    handleRemoveAnticipatedMajorCustomer,
     customerOpen,
     setCustomerOpen,
     majorCustomerOpen,
@@ -92,6 +100,10 @@ export default function GeneratePurchaseInvoice() {
     categorySplits,
     setCategorySplits,
     sequencePreview,
+    occurrenceSemantics,
+    setOccurrenceSemantics,
+    categoryAllocation,
+    setCategoryAllocation,
   } = useInvoiceForm({ batchType: "PURCHASE" });
 
   const errorBorderClass = "border-red-500 ring-1 ring-red-500";
@@ -547,6 +559,147 @@ export default function GeneratePurchaseInvoice() {
           </CardContent>
         </Card>
 
+        {/* Invoice Configuration & Limits */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Invoice Configuration & Limits</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2 md:col-span-2">
+                <Label>Invoice Date Range *</Label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label
+                      htmlFor="invoice-date-from"
+                      className="text-sm text-slate-600"
+                    >
+                      From Date *
+                    </Label>
+                    <DatePicker
+                      date={formData.invoiceDateFrom}
+                      onDateChange={(date) =>
+                        setFormData({
+                          ...formData,
+                          invoiceDateFrom: date,
+                        })
+                      }
+                      placeholder="Select from date"
+                      required
+                      className={
+                        errorField === "invoice-date-from"
+                          ? errorBorderClass
+                          : undefined
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label
+                      htmlFor="invoice-date-to"
+                      className="text-sm text-slate-600"
+                    >
+                      To Date *
+                    </Label>
+                    <DatePicker
+                      date={formData.invoiceDateTo}
+                      onDateChange={(date) =>
+                        setFormData({
+                          ...formData,
+                          invoiceDateTo: date,
+                        })
+                      }
+                      placeholder="Select to date"
+                      required
+                      className={
+                        errorField === "invoice-date-to"
+                          ? errorBorderClass
+                          : undefined
+                      }
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="minimum-invoice-amount">
+                    Minimum Invoice Amount *
+                  </Label>
+                  <Input
+                    id="minimum-invoice-amount"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Enter minimum invoice amount"
+                    value={formData.minimumInvoiceAmount}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        minimumInvoiceAmount: e.target.value,
+                      })
+                    }
+                    required
+                    className={
+                      errorField === "minimum-invoice-amount"
+                        ? errorBorderClass
+                        : undefined
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="maximum-invoice-amount">
+                    Maximum Invoice Amount *
+                  </Label>
+                  <Input
+                    id="maximum-invoice-amount"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Enter maximum invoice amount"
+                    value={formData.maximumInvoiceAmount}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        maximumInvoiceAmount: e.target.value,
+                      })
+                    }
+                    required
+                    className={
+                      errorField === "maximum-invoice-amount"
+                        ? errorBorderClass
+                        : undefined
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="total-amount">Target Purchase Amount *</Label>
+                  <Input
+                    id="total-amount"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Enter target purchase amount"
+                    value={formData.totalAmount}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        totalAmount: e.target.value,
+                      })
+                    }
+                    required
+                    className={
+                      errorField === "total-amount"
+                        ? errorBorderClass
+                        : undefined
+                    }
+                  />
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
         {/* Suppliers */}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -866,153 +1019,74 @@ export default function GeneratePurchaseInvoice() {
           </CardContent>
         </Card>
 
-        {/* Invoice Configuration & Limits */}
+        {/* Product Occurrence Quota Card (Sprint 1.7S) */}
         <Card>
           <CardHeader>
-            <CardTitle>Invoice Configuration & Limits</CardTitle>
+            <CardTitle>Product Occurrence Quota</CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2 md:col-span-2">
-                <Label>Invoice Date Range *</Label>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label
-                      htmlFor="invoice-date-from"
-                      className="text-sm text-slate-600"
-                    >
-                      From Date *
-                    </Label>
-                    <DatePicker
-                      date={formData.invoiceDateFrom}
-                      onDateChange={(date) =>
-                        setFormData({
-                          ...formData,
-                          invoiceDateFrom: date,
-                        })
-                      }
-                      placeholder="Select from date"
-                      required
-                      className={
-                        errorField === "invoice-date-from"
-                          ? errorBorderClass
-                          : undefined
-                      }
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label
-                      htmlFor="invoice-date-to"
-                      className="text-sm text-slate-600"
-                    >
-                      To Date *
-                    </Label>
-                    <DatePicker
-                      date={formData.invoiceDateTo}
-                      onDateChange={(date) =>
-                        setFormData({
-                          ...formData,
-                          invoiceDateTo: date,
-                        })
-                      }
-                      placeholder="Select to date"
-                      required
-                      className={
-                        errorField === "invoice-date-to"
-                          ? errorBorderClass
-                          : undefined
-                      }
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="minimum-invoice-amount">
-                    Minimum Invoice Amount *
-                  </Label>
-                  <Input
-                    id="minimum-invoice-amount"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    placeholder="Enter minimum invoice amount"
-                    value={formData.minimumInvoiceAmount}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        minimumInvoiceAmount: e.target.value,
-                      })
-                    }
-                    required
-                    className={
-                      errorField === "minimum-invoice-amount"
-                        ? errorBorderClass
-                        : undefined
-                    }
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="maximum-invoice-amount">
-                    Maximum Invoice Amount *
-                  </Label>
-                  <Input
-                    id="maximum-invoice-amount"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    placeholder="Enter maximum invoice amount"
-                    value={formData.maximumInvoiceAmount}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        maximumInvoiceAmount: e.target.value,
-                      })
-                    }
-                    required
-                    className={
-                      errorField === "maximum-invoice-amount"
-                        ? errorBorderClass
-                        : undefined
-                    }
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="total-amount">Target Purchase Amount *</Label>
-                  <Input
-                    id="total-amount"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    placeholder="Enter target purchase amount"
-                    value={formData.totalAmount}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        totalAmount: e.target.value,
-                      })
-                    }
-                    required
-                    className={
-                      errorField === "total-amount"
-                        ? errorBorderClass
-                        : undefined
-                    }
-                  />
-                </div>
-              </div>
+          <CardContent className="space-y-3">
+            <div className="flex gap-4 text-xs">
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="occurrence-semantics-purchase"
+                  checked={occurrenceSemantics !== "CATEGORY"}
+                  onChange={() => setOccurrenceSemantics(null)}
+                />
+                Global (default — occurrence % applies across the whole batch)
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="occurrence-semantics-purchase"
+                  checked={occurrenceSemantics === "CATEGORY"}
+                  onChange={() => setOccurrenceSemantics("CATEGORY")}
+                />
+                By Category (split Meat/Fruits invoice quota separately)
+              </label>
             </div>
+            {occurrenceSemantics === "CATEGORY" && (
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <Label className="text-[11px] text-slate-500">Meat %</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    value={categoryAllocation.Meat}
+                    onChange={(e) =>
+                      setCategoryAllocation({
+                        ...categoryAllocation,
+                        Meat: e.target.value,
+                      })
+                    }
+                    className="h-8 text-xs rounded-md"
+                  />
+                </div>
+                <div className="flex-1">
+                  <Label className="text-[11px] text-slate-500">
+                    Fruits %
+                  </Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    value={categoryAllocation.Fruits}
+                    onChange={(e) =>
+                      setCategoryAllocation({
+                        ...categoryAllocation,
+                        Fruits: e.target.value,
+                      })
+                    }
+                    className="h-8 text-xs rounded-md"
+                  />
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
-
-        {/* Category Split Section */}
-        <CategorySplitSection
-          totalAmount={formData.totalAmount}
-          value={categorySplits}
-          onChange={setCategorySplits}
-        />
 
         {/* Products */}
         <Card>
@@ -1591,6 +1665,224 @@ export default function GeneratePurchaseInvoice() {
                 The requested Target Purchase Amount cannot be achieved using
                 the configured Product Rules. Please adjust either the Target
                 Purchase Amount or the Min/Max Invoice limits.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Category Split Section */}
+        <CategorySplitSection
+          totalAmount={formData.totalAmount}
+          value={categorySplits}
+          onChange={setCategorySplits}
+        />
+
+        {/* Anticipated Major Customer Demand — optional. Pre-declares a
+            Sales Major Customer's expected demand so this Purchase batch
+            deliberately concentrates enough same-day stock for it, instead
+            of leaving it to chance random spreading. Leave blank and
+            generation behaves exactly as before this feature. */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Anticipated Major Customer Demand</CardTitle>
+            <p className="text-sm text-slate-500 mt-1">
+              Optional — pre-declare known Sales Major Customer demand so
+              this Purchase batch concentrates enough same-day stock for
+              them. Leave blank to generate as usual.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="flex flex-col md:flex-row items-end gap-3 p-4 rounded-lg border border-slate-200 bg-slate-50">
+              <div className="w-full md:flex-1 space-y-1">
+                <Label className="text-xs">Sales Customer *</Label>
+                <Popover
+                  open={anticipatedMajorCustomerOpen}
+                  onOpenChange={setAnticipatedMajorCustomerOpen}
+                >
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      aria-expanded={anticipatedMajorCustomerOpen}
+                      className="w-full justify-between h-10"
+                    >
+                      {tempAnticipatedMajorCustomer.customer_id
+                        ? anticipatedCustomers.find(
+                            (c) =>
+                              c.id ===
+                              tempAnticipatedMajorCustomer.customer_id,
+                          )?.company_name
+                        : "Select customer..."}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    className="w-[300px] md:w-[400px] p-0"
+                    align="start"
+                  >
+                    <Command>
+                      <CommandInput placeholder="Search by name, GSTIN, or state..." />
+                      <CommandList>
+                        <CommandEmpty>No customer found.</CommandEmpty>
+                        <CommandGroup>
+                          {anticipatedCustomers
+                            .filter(
+                              (company) =>
+                                !anticipatedMajorCustomers.some(
+                                  (m) => m.customer_id === company.id,
+                                ),
+                            )
+                            .map((company) => (
+                              <CommandItem
+                                key={company.id}
+                                value={`${company.company_name} ${company.gstin || ""} ${company.state || ""}`}
+                                onSelect={() => {
+                                  setTempAnticipatedMajorCustomer((prev) => ({
+                                    ...prev,
+                                    customer_id: company.id,
+                                  }));
+                                  setAnticipatedMajorCustomerOpen(false);
+                                }}
+                              >
+                                <Check
+                                  className={cn(
+                                    "mr-2 h-4 w-4",
+                                    tempAnticipatedMajorCustomer.customer_id ===
+                                      company.id
+                                      ? "opacity-100"
+                                      : "opacity-0",
+                                  )}
+                                />
+                                <div className="flex flex-col">
+                                  <span>{company.company_name}</span>
+                                  <span className="text-xs text-slate-500">
+                                    {company.state}{" "}
+                                    {company.gstin
+                                      ? `| ${company.gstin}`
+                                      : ""}
+                                  </span>
+                                </div>
+                              </CommandItem>
+                            ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
+
+              <div className="w-full md:w-32 space-y-1">
+                <Label className="text-xs">Amount *</Label>
+                <Input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  placeholder="₹"
+                  value={tempAnticipatedMajorCustomer.amount}
+                  onChange={(e) =>
+                    setTempAnticipatedMajorCustomer((prev) => ({
+                      ...prev,
+                      amount: e.target.value,
+                    }))
+                  }
+                  className="h-10 bg-white"
+                />
+              </div>
+
+              <div className="w-full md:w-24 space-y-1">
+                <Label className="text-xs">Invoices *</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  step="1"
+                  placeholder="#"
+                  value={tempAnticipatedMajorCustomer.invoice_count}
+                  onChange={(e) =>
+                    setTempAnticipatedMajorCustomer((prev) => ({
+                      ...prev,
+                      invoice_count: e.target.value,
+                    }))
+                  }
+                  className="h-10 bg-white"
+                />
+              </div>
+
+              <div className="w-full md:w-36 space-y-1">
+                <Label className="text-xs">Max / Invoice *</Label>
+                <Input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  placeholder="₹"
+                  value={tempAnticipatedMajorCustomer.max_invoice_amount}
+                  onChange={(e) =>
+                    setTempAnticipatedMajorCustomer((prev) => ({
+                      ...prev,
+                      max_invoice_amount: e.target.value,
+                    }))
+                  }
+                  className="h-10 bg-white"
+                />
+              </div>
+
+              <Button
+                type="button"
+                onClick={handleAddAnticipatedMajorCustomer}
+                className="w-full md:w-auto h-10 px-6 gap-2"
+              >
+                <Plus className="h-4 w-4" /> Add
+              </Button>
+            </div>
+
+            {/* List of Added Anticipated Major Customers */}
+            {anticipatedMajorCustomers.length > 0 ? (
+              <div className="space-y-3">
+                {anticipatedMajorCustomers.map((entry, index) => {
+                  const company = anticipatedCustomers.find(
+                    (c) => c.id === entry.customer_id,
+                  );
+                  return (
+                    <div
+                      key={index}
+                      className="flex items-center justify-between p-3 rounded-lg border border-slate-200"
+                    >
+                      <div>
+                        <p className="font-semibold text-slate-900">
+                          {company?.company_name}
+                        </p>
+                        <p className="text-sm text-slate-500">
+                          ₹{parseFloat(entry.amount).toLocaleString()} •{" "}
+                          {entry.invoice_count} Invoices
+                          {entry.max_invoice_amount && (
+                            <>
+                              {" "}
+                              • Max: ₹
+                              {parseFloat(
+                                entry.max_invoice_amount,
+                              ).toLocaleString()}
+                              /inv
+                            </>
+                          )}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          handleRemoveAnticipatedMajorCustomer(index)
+                        }
+                        className="text-red-500 hover:text-red-700 hover:bg-red-50"
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-center py-6 text-slate-500 text-sm">
+                No anticipated Major Customer demand configured.
               </div>
             )}
           </CardContent>

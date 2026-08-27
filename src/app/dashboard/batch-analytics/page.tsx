@@ -31,10 +31,20 @@ export default function BatchAnalyticsPage() {
         const [{ data: batches }, invoices, ledgerRows] = await Promise.all([
           supabase.from("invoice_batch").select("*"),
           fetchAllQueryRows((from, to) =>
-            supabase.from("invoice").select("*").range(from, to),
+            supabase
+              .from("invoice")
+              .select("*")
+              .order("id", { ascending: true })
+              .range(from, to),
           ),
           fetchAllQueryRows((from, to) =>
-            supabase.from("daily_stock_ledger").select("*").range(from, to),
+            supabase
+              .from("daily_stock_ledger")
+              .select("*")
+              .order("purchase_batch_id", { ascending: true })
+              .order("ledger_date", { ascending: true })
+              .order("product_id", { ascending: true })
+              .range(from, to),
           ),
         ]);
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, FileText, Scale, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FileText, Scale, X } from "lucide-react";
 import React from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -44,6 +44,12 @@ export interface ImpactSummary {
     total_quantity_adjusted: number;
     total_amount_adjusted: number;
   };
+  // Populated only on the rare path where a product's batch-wide quantity
+  // couldn't be exactly conserved during this edit and the shortfall was
+  // absorbed as pure money-rebalancing instead — the edit still
+  // succeeded, but this product's total quantity may now differ slightly
+  // from what it was before the edit.
+  quantityConservationWarnings?: string[];
 }
 
 interface PurchaseAutoBalanceSummaryModalProps {
@@ -68,6 +74,7 @@ export function PurchaseAutoBalanceSummaryModal({
     rebalancedInvoices,
     productQuantityChanges,
     batchSummary,
+    quantityConservationWarnings,
   } = summary;
 
   const resolveParty = (invNumber: string, fallback?: string) => {
@@ -297,6 +304,28 @@ export function PurchaseAutoBalanceSummaryModal({
             </div>
           )}
         </div>
+
+        {quantityConservationWarnings &&
+          quantityConservationWarnings.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 rounded-xl p-5 shadow-2xs space-y-2">
+              <h3 className="text-sm font-semibold text-amber-900 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-amber-600" />
+                Quantity Not Fully Conserved
+              </h3>
+              <p className="text-xs text-amber-800">
+                The edit still saved successfully, but the batch ran out of
+                room to keep the product(s) below at their exact original
+                total quantity — the shortfall was absorbed as a rupee
+                adjustment instead. Review Product Rules or the products
+                below if exact quantity conservation matters here.
+              </p>
+              <ul className="text-xs text-amber-800 list-disc pl-5 space-y-1">
+                {quantityConservationWarnings.map((msg, idx) => (
+                  <li key={idx}>{msg}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
         {/* SECTION 4: Batch Summary */}
         <div className="bg-indigo-900 text-white rounded-xl p-5 shadow-sm space-y-3">

@@ -2,6 +2,10 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import { InvoiceNumberingService } from "@/lib/services/InvoiceNumberingService";
+import {
+  getFinalClosingStockByProduct,
+  type StockLedgerRow,
+} from "@/lib/services/StockCalculationService";
 import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 import { createClient } from "@/lib/supabase/server";
 import { roundToQuarterIncrement } from "@/lib/utils/quantity-rate-utils";
@@ -121,12 +125,15 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Leftover Stock sources: their net remaining (purchased - sold),
-    // summed across their own real historical days, becomes a single
-    // day-1 opening-stock seed for this generation's date range.
-    // Fresh Purchase Batch sources: their real per-day purchased_quantity
-    // is used as-is, keyed to its own actual date.
-    const leftoverSeedByProduct = new Map<string, number>();
+    // Leftover Stock sources: their net remaining, becomes a single day-1
+    // opening-stock seed for this generation's date range. Fresh Purchase
+    // Batch sources: their real per-day purchased_quantity is used as-is,
+    // keyed to its own actual date.
+    //
+    // The leftover seed is computed via the shared StockCalculationService
+    // (Sprint 1.2) — the same chronological recurrence used everywhere
+    // else, rather than a locally reimplemented loop.
+    const leftoverRows: StockLedgerRow[] = [];
     const freshPurchasedByKey = new Map<string, number>();
     const productIdsInScope = new Set<string>();
 
@@ -134,14 +141,7 @@ export async function POST(request: NextRequest) {
       if (!row.product_id) continue;
       productIdsInScope.add(row.product_id);
       if (touchedBatchIds.has(row.purchase_batch_id)) {
-        const net = Math.max(
-          0,
-          Number(row.purchased_quantity || 0) - Number(row.sold_quantity || 0),
-        );
-        leftoverSeedByProduct.set(
-          row.product_id,
-          (leftoverSeedByProduct.get(row.product_id) || 0) + net,
-        );
+        leftoverRows.push(row as StockLedgerRow);
       } else {
         const key = `${row.ledger_date}_${row.product_id}`;
         freshPurchasedByKey.set(
@@ -152,24 +152,32 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    const leftoverSeedByProduct = getFinalClosingStockByProduct(leftoverRows);
+
     // ── Build per-day stock picture across the requested date range ─────
     // Day 1's opening = the leftover seed (0 if no Leftover Stock source
     // was selected); every later day's carry-forward is tracked internally
     // by generateInvoiceSplitupsInternal's own runningRemaining tracker, so
     // only day-1's opening and each day's purchased figure need seeding
-    // here.
-    const availableStockMap = new Map<string, any>();
-    for (const dateStr of dateList) {
-      for (const productId of productIdsInScope) {
-        const key = `${dateStr}_${productId}`;
-        const purchased = freshPurchasedByKey.get(key) || 0;
-        const opening =
-          dateStr === dateList[0]
-            ? leftoverSeedByProduct.get(productId) || 0
-            : 0;
-        availableStockMap.set(key, { opening, purchased });
+    // here. A FRESH map is needed per generation attempt below —
+    // generateInvoiceSplitupsInternal deducts from it in place as it
+    // consumes stock, so reusing one across retries would carry over a
+    // failed attempt's partial consumption into the next.
+    const buildFreshStockMap = () => {
+      const map = new Map<string, any>();
+      for (const dateStr of dateList) {
+        for (const productId of productIdsInScope) {
+          const key = `${dateStr}_${productId}`;
+          const purchased = freshPurchasedByKey.get(key) || 0;
+          const opening =
+            dateStr === dateList[0]
+              ? leftoverSeedByProduct.get(productId) || 0
+              : 0;
+          map.set(key, { opening, purchased });
+        }
       }
-    }
+      return map;
+    };
 
     // Resolve starting invoice counter from invoice_sequences
     const canonicalFy = InvoiceNumberingService.normalizeFinancialYear(
@@ -224,14 +232,86 @@ export async function POST(request: NextRequest) {
       receiving_company_id: receivingCompanyId,
     };
 
-    // 3. Generate proposed invoices in-memory using the redesigned sequential allocator
-    const invoices = (InvoiceEngine as any).generateInvoiceSplitupsInternal(
-      mockBatch,
-      numberOfDays,
-      fromDate,
-      startingCounter,
-      availableStockMap,
-    );
+    // 3. Generate proposed invoices in-memory using the redesigned sequential
+    // allocator — auto-retried on failure. Generation is randomized
+    // (category/product/rate picks), so a "Major Customer balancing
+    // failed"/"exceeds configured maximum"/"cannot satisfy requested
+    // amount" failure on one attempt is frequently just an unlucky roll —
+    // confirmed repeatedly this session that simply regenerating (a fresh
+    // stock map, fresh randomness) often succeeds on the very next try.
+    // Previously this meant the user had to notice the error and manually
+    // click "Create Batch" again; now the server does that internally and
+    // only surfaces an error once every attempt has failed.
+    //
+    // Hotfix — was scoped to only Major-Customer-pattern messages, on the
+    // reasoning that other failures (e.g. "Minimum Invoice Amount
+    // Violation: no compatible same-category invoice ... had room")
+    // reflect a structural problem that won't change between attempts.
+    // Audited every throw site inside generateInvoiceSplitupsInternal
+    // (the function this route calls): every one of them depends on THIS
+    // attempt's random category/product/date placement (which invoices
+    // ended up small, which products got picked, which day a major
+    // customer landed on) — none of them are a fixed, attempt-independent
+    // config error the way "Product Occurrence Configuration Invalid"
+    // (percentages don't sum to 100%) would be — and that specific class
+    // of error is not reachable from this route at all (config-shape
+    // validation happens earlier, at the persistence route, not here).
+    // So every failure this function can actually throw is worth
+    // retrying — matching Purchase generation's own "retry everything"
+    // philosophy (generateWithAutoRetry has no message filter at all).
+    const MAX_GENERATION_ATTEMPTS = 100;
+    const isRetryableGenerationError = (_message: string): boolean => true;
+
+    let invoices: any[] | undefined;
+    let lastGenerationError: any = null;
+    for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+      try {
+        invoices = (InvoiceEngine as any).generateInvoiceSplitupsInternal(
+          mockBatch,
+          numberOfDays,
+          fromDate,
+          startingCounter,
+          buildFreshStockMap(),
+        );
+        lastGenerationError = null;
+        break;
+      } catch (err: any) {
+        lastGenerationError = err;
+        if (!isRetryableGenerationError(err?.message)) break;
+        console.warn(
+          `[generate-sales-dry-run] Attempt ${attempt}/${MAX_GENERATION_ATTEMPTS} failed (${err?.message}) — retrying with a fresh random pass.`,
+        );
+      }
+    }
+
+    if (lastGenerationError || !invoices) {
+      // Nothing was persisted here — a dry-run failure never creates a
+      // batch row (that only happens after this dry-run succeeds and the
+      // Daily Stock Ledger review is submitted), so there is nothing to
+      // "clear" or discard. Make that explicit instead of implying an
+      // action that doesn't apply to this failure point.
+      // Hint text is now selected by what the error actually says, not by
+      // whether it was retried (everything gets retried now — see above).
+      // The Major-Customer-specific hint only makes sense for a Major
+      // Customer failure; a generic hint covers everything else so a
+      // "Minimum Invoice Amount Violation" doesn't get told to check
+      // Anticipated Major Customer Demand.
+      const isMajorCustomerRelated = /Major Customer/i.test(
+        lastGenerationError?.message || "",
+      );
+      return NextResponse.json(
+        {
+          message:
+            (lastGenerationError?.message ||
+              "Sales invoice generation failed.") +
+            ` (auto-retried ${MAX_GENERATION_ATTEMPTS} times — this looks like a genuine capacity constraint, not a one-off random miss. Nothing was saved. ` +
+            (isMajorCustomerRelated
+              ? `Likely causes on the linked Purchase batch: (1) some products in this category have a 0% (or unset) Occurrence Percentage, so Purchase never buys them at all — check Product Rules for this category and give more products a non-zero Occurrence Percentage; (2) too few suppliers selected for this category — a supplier can never receive two invoices on the same day, so concentrating a large amount on one day needs enough distinct suppliers to cover it at the batch's own Maximum Invoice Amount; (3) a single invoice line can never exceed a product's own configured Maximum Quantity no matter how much stock accumulates, so raising Quantity/Rate maximums for that category's products can also help. Otherwise: link additional/larger Purchase stock, reduce the amount or increase the invoice count for this Major Customer, or set up "Anticipated Major Customer Demand" on the Purchase batch for this exact customer next time.)`
+              : `Try widening the date range, lowering the Minimum Invoice Amount, adjusting the batch's Quantity/Rate rules, or reducing the total amount so more combinations become reachable.)`),
+        },
+        { status: 400 },
+      );
+    }
 
     // Sum up the proposed quantities per date and product
     const proposedQtyMap = new Map<string, number>();
@@ -302,13 +382,23 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Adjust the invoices to match the normalized proposed quantities
+    // Adjust the invoices to match the normalized proposed quantities.
+    // Major Customer invoices already carry their own exact,
+    // separately-configured amount/category and must never be touched by
+    // this reconciliation, in the preview any more than at save time.
+    const majorCustomerIdsForReconcile = new Set<string>(
+      (majorCustomers || [])
+        .map((m: any) => m.customer_id)
+        .filter(Boolean),
+    );
     const reconciledInvoices = reconcileInvoicesToTargets(
       invoices,
       proposedQtyMap,
       mockBatch.products,
       mockBatch.receiving_company_id,
       Number(maximumInvoiceAmount) || undefined,
+      majorCustomerIdsForReconcile,
+      Number(minimumInvoiceAmount) || undefined,
     );
     invoices.length = 0;
     invoices.push(...reconciledInvoices);

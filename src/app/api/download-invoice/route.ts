@@ -17,6 +17,16 @@ export async function GET(request: NextRequest) {
 
   const supabase = await createClient();
 
+  // Hotfix — this route had no explicit auth check at all, unlike most
+  // of its siblings (download-summary, batch-status), relying entirely
+  // on the blanket middleware redirect for access control.
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+  }
+
   // 1. Fetch the invoice
   const { data: inv, error: invoiceError } = await supabase
     .from("invoice")
@@ -52,11 +62,35 @@ export async function GET(request: NextRequest) {
     ? batch.supplier_id || inv.products?.[0]?.customer_id
     : inv.products?.[0]?.customer_id || batch.receiving_company_id;
 
-  const { data: customer } = await supabase
+  // Hotfix — this fetch's error was never checked at all. On failure
+  // (a deleted counterparty, a customerId that never resolved from any
+  // source in the fallback chain above), `customer` silently became
+  // undefined and the download still generated — a GST voucher with a
+  // blank buyer/seller name, address, GSTIN, and PAN, with nothing
+  // telling anyone something was wrong. A real GST document without its
+  // counterparty is not a document that should ever be produced.
+  if (!customerId) {
+    return NextResponse.json(
+      {
+        message:
+          "Unable to determine the counterparty (supplier/customer) for this invoice — cannot generate a valid document.",
+      },
+      { status: 400 },
+    );
+  }
+  const { data: customer, error: customerError } = await supabase
     .from(isPurchaseBatch ? "suppliers" : "receiving_companies")
     .select("*")
     .eq("id", customerId)
     .single();
+  if (customerError || !customer) {
+    return NextResponse.json(
+      {
+        message: `Unable to load ${isPurchaseBatch ? "supplier" : "customer"} details for this invoice — cannot generate a valid document. ${customerError?.message || ""}`,
+      },
+      { status: 400 },
+    );
+  }
 
   const numberToWords = (num: number): string => {
     const a = [

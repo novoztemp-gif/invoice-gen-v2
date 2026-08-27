@@ -57,6 +57,13 @@ export class CandidateSolver {
     constraints: Map<string, ProductConstraint>,
     majorCustomerIds: Set<string> = new Set(),
     supplierCategory?: string,
+    // Hotfix — defense in depth (see CandidateGenerator's matching
+    // comment): threaded through so the candidate search itself avoids
+    // pushing a balancing invoice over the batch's own configured max,
+    // instead of relying solely on FinalValidator's final, after-the-fact
+    // rejection. Optional — omitting it (every pre-existing caller/test)
+    // is byte-identical to before.
+    thresholdMax?: number,
   ): SolverResult {
     const startTimeMs = Date.now();
     let statesExplored = 0;
@@ -215,6 +222,7 @@ export class CandidateSolver {
       const invCandidates = this.generateAndScoreInvoiceCandidates(
         inv,
         constraints,
+        thresholdMax,
       );
       candidatesPerInvoice.set(inv.id, invCandidates);
 
@@ -392,9 +400,14 @@ export class CandidateSolver {
   private static generateAndScoreInvoiceCandidates(
     invoice: PurchaseInvoice,
     constraints: Map<string, ProductConstraint>,
+    thresholdMax?: number,
   ): InvoiceCandidate[] {
     const rawLineCandidatesPerLine =
-      CandidateGenerator.generateInvoiceLineCandidates(invoice, constraints);
+      CandidateGenerator.generateInvoiceLineCandidates(
+        invoice,
+        constraints,
+        thresholdMax,
+      );
 
     // Score and retain top maxLineCandidates (24) per product line
     const scoredLineCandidatesPerLine: LineCandidate[][] =

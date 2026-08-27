@@ -1,9 +1,11 @@
 import { randomUUID } from "crypto";
+import { SupabaseClient } from "@supabase/supabase-js";
 import {
   computeLineAmount,
   roundToQuarterIncrement,
   roundToWholeInteger,
 } from "@/lib/utils/quantity-rate-utils";
+import { findMaxInvoiceSequenceForPrefix } from "../invoiceSequenceLookup";
 import { computeAddRoom, SalesAllocationTracker } from "./SalesLineCapacity";
 import {
   roundMoney,
@@ -38,10 +40,11 @@ export interface NewInvoiceCreationResult {
  * real remaining `daily_stock_ledger` availability for its date.
  */
 export class SalesNewInvoiceCreator {
-  public static createInvoicesForShortfall(
+  public static async createInvoicesForShortfall(
+    supabase: SupabaseClient,
     context: SalesBalanceContext,
     plan: SalesSolverPlan,
-  ): NewInvoiceCreationResult {
+  ): Promise<NewInvoiceCreationResult> {
     const newInvoices: SalesInvoice[] = [];
     const remainingProductDeltas = new Map(plan.productDeltas);
     const blockedReasons = new Map<string, Set<string>>();
@@ -59,18 +62,18 @@ export class SalesNewInvoiceCreator {
     }
 
     // Invoice numbering: parse the shared prefix from an existing invoice
-    // number and find the true next sequence — same approach as Purchase's
-    // AutoBalanceEngine.getNextInvoiceNumbering.
+    // number, then find the true next sequence from the GLOBAL invoice
+    // table for that exact company + financial year + invoice type — not
+    // just this batch's own invoices, which could already be behind
+    // another batch sharing the same prefix (Sprint 1.6B / Root Cause B).
+    // Same shared lookup and same prefix format Purchase's
+    // AutoBalanceEngine.getNextInvoiceNumbering already uses.
     const sampleNumber = context.invoices.find(
       (inv) => inv.invoice_number,
     )?.invoice_number;
     const prefix = (sampleNumber || "").split("-").slice(0, -1).join("-");
-    let nextSequence = 1;
-    for (const inv of context.invoices) {
-      const parts = (inv.invoice_number || "").split("-");
-      const seq = parseInt(parts[parts.length - 1], 10);
-      if (!isNaN(seq) && seq >= nextSequence) nextSequence = seq + 1;
-    }
+    const maxSeq = await findMaxInvoiceSequenceForPrefix(supabase, prefix);
+    let nextSequence = maxSeq + 1;
 
     // Candidate customers: anyone already appearing somewhere in this
     // batch (not fetched from the batch's full configured customer list —

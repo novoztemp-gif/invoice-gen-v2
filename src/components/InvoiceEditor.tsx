@@ -53,6 +53,7 @@ export default function InvoiceEditor({
   // fetched; a missing key just renders no badge for that product.
   const [capacities, setCapacities] = useState<Record<string, number>>({});
   const [capacitiesLoading, setCapacitiesLoading] = useState(false);
+  const [capacityDate, setCapacityDate] = useState<string | null>(null);
 
   const refreshCapacities = async (draftProducts?: any[]) => {
     if (!batch?.id || !invoice?.id) return;
@@ -73,6 +74,7 @@ export default function InvoiceEditor({
       });
       const data = await res.json();
       if (res.ok && data.capacities) setCapacities(data.capacities);
+      if (res.ok && data.date) setCapacityDate(data.date);
     } catch {
       // Purely advisory — a failed fetch just means no badges are shown.
       // Save-time validation is the real safety net either way.
@@ -111,6 +113,34 @@ export default function InvoiceEditor({
       (m: any) => m.customer_id === invoicePartyId,
     )
   );
+
+  // Major customer invoices can never be edited or used as a rebalancing
+  // target (Sales, this round — Purchase is a planned follow-up). Blocked
+  // here as the primary UX; InvoiceListPage disables the Edit button
+  // entirely, and SalesDayScopedEditEngine itself rejects it server-side
+  // as a backstop.
+  if (isMajorCustomerInvoice && batch?.batch_type === "SALES") {
+    return (
+      <Dialog
+        open={isOpen}
+        onOpenChange={(open) => !open && onClose()}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Invoice {invoice.invoice_number}</DialogTitle>
+          </DialogHeader>
+          <p className="text-slate-600">
+            This invoice belongs to a major customer and cannot be edited.
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={onClose}>
+              <X className="h-4 w-4 mr-2" /> Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   // Live Calculations
   let totalAmountBeforeTax = 0;
@@ -156,7 +186,7 @@ export default function InvoiceEditor({
     if (capacity === 0) {
       const proceed = window.confirm(
         batch?.batch_type === "SALES"
-          ? `${batchProduct.product_name} was never allocated any quantity in this batch — there's nothing to reallocate, saving will likely fail. Add it anyway?`
+          ? `No stock of ${batchProduct.product_name} is available on ${capacityDate || "this invoice's date"} — saving will likely fail. Add it anyway?`
           : `${batchProduct.product_name} currently has no available room in this batch to add cleanly — saving may require rebalancing an unrelated invoice, or fail if there's genuinely no capacity anywhere. Add it anyway?`,
       );
       if (!proceed) return;
@@ -255,6 +285,12 @@ export default function InvoiceEditor({
           <DialogTitle className="text-2xl font-semibold">
             Edit Invoice: {invoice.invoice_number}
           </DialogTitle>
+          {batch?.batch_type === "SALES" && invoice.invoice_date && (
+            <p className="text-sm text-slate-500">
+              Invoice date: {invoice.invoice_date} — edits can only use stock
+              available on this day.
+            </p>
+          )}
         </DialogHeader>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
@@ -326,11 +362,11 @@ export default function InvoiceEditor({
                           title={
                             hasNoRoom
                               ? batch?.batch_type === "SALES"
-                                ? `${bp.product_name} was never allocated any quantity in this batch — nothing to reallocate from.`
+                                ? `No stock of ${bp.product_name} is available on ${capacityDate || "this invoice's date"}.`
                                 : `${bp.product_name} currently has no room to be added cleanly without rebalancing an unrelated invoice.`
                               : capacity !== undefined
                                 ? batch?.batch_type === "SALES"
-                                  ? `${capacity} allocated to this product across the batch — adding here reallocates it from other invoices.`
+                                  ? `${capacity}kg available on ${capacityDate || "this invoice's date"}.`
                                   : `Up to ~${capacity} available to add cleanly right now.`
                                 : undefined
                           }

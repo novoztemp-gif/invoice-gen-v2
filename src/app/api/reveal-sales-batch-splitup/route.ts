@@ -1,6 +1,5 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import { createClient } from "@/lib/supabase/server";
 
 export async function POST(request: NextRequest) {
@@ -15,6 +14,15 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = await createClient();
+
+    // Hotfix — this route had no explicit auth check, unlike most of
+    // its siblings, relying entirely on the blanket middleware redirect.
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
 
     const { data: batch, error: batchError } = await supabase
       .from("invoice_batch")
@@ -69,13 +77,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Only now — once the user has actually revealed the split — does the
-    // source purchase batch's daily_stock_ledger sold_quantity update.
-    await InvoiceEngine.postSalesBatchStockLedger(
-      supabase,
-      batchId,
-      batch.stock_source_batch_id,
-    );
+    // The source purchase batch's daily_stock_ledger sold_quantity was
+    // already updated when this batch was created/confirmed in the Daily
+    // Stock Review modal — postSalesBatchStockLedger is not idempotent
+    // (it ADDS to whatever's already recorded), so this endpoint must
+    // only ever flip status, never post to the ledger again.
 
     return NextResponse.json({ success: true });
   } catch (error: any) {

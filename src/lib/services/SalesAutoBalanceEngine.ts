@@ -224,11 +224,15 @@ export class SalesAutoBalanceEngine {
         Array.from(trueProductDeltas.values()).some((d) => Math.abs(d) > 0.001)
       ) {
         const { newInvoices, remainingProductDeltas, blockedReasons } =
-          SalesNewInvoiceCreator.createInvoicesForShortfall(context, {
-            ...finalPlan,
-            batchDelta: trueBatchDelta,
-            productDeltas: trueProductDeltas,
-          });
+          await SalesNewInvoiceCreator.createInvoicesForShortfall(
+            this.supabase,
+            context,
+            {
+              ...finalPlan,
+              batchDelta: trueBatchDelta,
+              productDeltas: trueProductDeltas,
+            },
+          );
 
         const stillShort =
           newInvoices.length === 0 ||

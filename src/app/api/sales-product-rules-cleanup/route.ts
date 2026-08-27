@@ -21,9 +21,16 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
-    const { data: rules } = await supabase
+    // Hotfix — this fetch's error was never checked. If it failed, ruleMap
+    // ended up empty, and every product line in every invoice would then
+    // match the `if (!rule) return p;` no-op branch below — the cleanup
+    // would silently report "0 fixed" (identical to a healthy run that
+    // genuinely found nothing to fix), never revealing that it actually
+    // failed to load its own correction rules in the first place.
+    const { data: rules, error: rulesError } = await supabase
       .from("product_rules")
       .select("product_id, quantity_min, quantity_max, rate_min, rate_max");
+    if (rulesError) throw rulesError;
     const ruleMap = new Map(
       (rules || []).map((r: any) => [
         r.product_id,
@@ -36,11 +43,22 @@ export async function GET(request: NextRequest) {
       ]),
     );
 
-    const { data: batches } = await supabase
-      .from("invoice_batch")
-      .select("id, batch_status")
-      .eq("batch_type", "SALES");
-    const eligibleBatchIds = (batches || [])
+    // Hotfix — was a single unpaginated `.select()` with its error
+    // unchecked: on failure, or once total SALES batches (all-time, not
+    // just currently-open ones) crossed PostgREST's default 1000-row
+    // cap, this silently returned an incomplete/empty list and the route
+    // would report "No eligible batches" as if by design rather than a
+    // real failure. Paginated via fetchAllQueryRows, same as every other
+    // large scan in this codebase.
+    const batches = await fetchAllQueryRows((from, to) =>
+      supabase
+        .from("invoice_batch")
+        .select("id, batch_status")
+        .eq("batch_type", "SALES")
+        .order("id", { ascending: true })
+        .range(from, to),
+    );
+    const eligibleBatchIds = batches
       .filter((b: any) => b.batch_status !== "FINALIZED")
       .map((b: any) => b.id);
 
@@ -48,13 +66,27 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ message: "No eligible batches.", fixed: 0 });
     }
 
-    const salesInvoices = await fetchAllQueryRows((from, to) =>
-      supabase
-        .from("invoice")
-        .select("id, invoice_batch_id, products, total_amount")
-        .in("invoice_batch_id", eligibleBatchIds)
-        .range(from, to),
-    );
+    // Hotfix — eligibleBatchIds (every open SALES batch system-wide) used
+    // to be embedded whole into a single `.in()` filter, unbounded — the
+    // same growth-risk shape as the 469-supplier bug fixed earlier this
+    // session, just scoped to batches instead of suppliers. Chunked here,
+    // with each chunk still paginated via fetchAllQueryRows (a chunk of
+    // batches can easily have more than 1000 matching invoices on its
+    // own).
+    const BATCH_ID_CHUNK_SIZE = 150;
+    const salesInvoices: any[] = [];
+    for (let i = 0; i < eligibleBatchIds.length; i += BATCH_ID_CHUNK_SIZE) {
+      const idChunk = eligibleBatchIds.slice(i, i + BATCH_ID_CHUNK_SIZE);
+      const rows = await fetchAllQueryRows((from, to) =>
+        supabase
+          .from("invoice")
+          .select("id, invoice_batch_id, products, total_amount")
+          .in("invoice_batch_id", idChunk)
+          .order("id", { ascending: true })
+          .range(from, to),
+      );
+      salesInvoices.push(...rows);
+    }
 
     const batchTotals = new Map<string, number>();
     const invoiceUpdates: { id: string; products: any[]; total_amount: number }[] = [];

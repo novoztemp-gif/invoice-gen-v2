@@ -92,9 +92,13 @@ export class AutoBalanceEngine {
         context.constraints,
         context.majorCustomerIds,
         context.supplierCategory,
+        undefined,
+        undefined,
+        context.thresholdMax ?? undefined,
       );
       if (stage1.errors.length > 0) {
         const { prefix, nextSequence } = await this.getNextInvoiceNumbering(
+          context.batchId,
           context.invoices,
         );
         stage1 = ProductQuantityConservation.conserve(
@@ -106,6 +110,7 @@ export class AutoBalanceEngine {
           context.supplierCategory,
           prefix,
           nextSequence,
+          context.thresholdMax ?? undefined,
         );
       }
       // A residual here means this specific product has genuinely no more
@@ -120,9 +125,17 @@ export class AutoBalanceEngine {
       // never throw here — log for visibility and let Stage 2's existing,
       // battle-tested money-only solver close the batch total using
       // whatever capacity actually remains.
-      if (stage1.errors.length > 0) {
+      // Hotfix — this shortfall used to be logged server-side only, with
+      // nothing shown to the user: the save still succeeds (by design,
+      // see comment above), but the product's total quantity across the
+      // batch can end up quietly different from what conservation was
+      // supposed to guarantee, and the user had no way to know that
+      // happened. Carried through to impactSummary below so it's visible
+      // in the edit's own result instead of only a server log.
+      const quantityConservationWarnings = stage1.errors.slice();
+      if (quantityConservationWarnings.length > 0) {
         console.warn(
-          `[AutoBalanceEngine] Product-quantity conservation left a residual, falling back to money-only balancing for it: ${stage1.errors.join(" ")}`,
+          `[AutoBalanceEngine] Product-quantity conservation left a residual, falling back to money-only balancing for it: ${quantityConservationWarnings.join(" ")}`,
         );
       }
 
@@ -186,6 +199,7 @@ export class AutoBalanceEngine {
         context.constraints,
         context.majorCustomerIds,
         context.supplierCategory,
+        context.thresholdMax ?? undefined,
       );
 
       if (solverResult.outcome === "search_capacity_exceeded") {
@@ -208,9 +222,23 @@ export class AutoBalanceEngine {
       // Stage 1 modified but Stage 2 didn't separately re-touch would
       // silently fall back to its original, pre-edit state (or, for a new
       // invoice, be dropped entirely) — losing Stage 1's changes.
+      //
+      // Lowest precedence of all: loadContext's own self-healed header
+      // totals (see PurchaseInvoiceValidator.selfHealHeaderTotals) — a
+      // baseline correction for invoices neither stage has any other
+      // reason to touch, so it actually gets persisted instead of only
+      // fixing the batch in-memory for this one operation. The edited
+      // invoice is deliberately excluded here: it's already persisted via
+      // its own authoritative editedPayload below, and including it here
+      // too would risk writing its old, now-superseded total a second time.
       const otherInvoicesById = new Map<string, PurchaseInvoice>(
-        stage1.updatedInvoices,
+        Array.from(context.headerTotalCorrections.entries()).filter(
+          ([id]) => id !== editedInvoiceId,
+        ),
       );
+      for (const [id, inv] of stage1.updatedInvoices) {
+        otherInvoicesById.set(id, inv);
+      }
       for (const inv of stage1.newInvoices) {
         otherInvoicesById.set(inv.id, inv);
       }
@@ -263,6 +291,8 @@ export class AutoBalanceEngine {
         editedInvoiceId,
         context.majorCustomerIds,
         productConservedInvoiceIds,
+        context.thresholdMin,
+        context.thresholdMax,
       );
 
       if (!finalValidation.valid) {
@@ -281,6 +311,36 @@ export class AutoBalanceEngine {
       const finalBalancingInvoices = mergedOtherInvoices.filter(
         (inv) => !newInvoiceIds.has(inv.id),
       );
+
+      // Hotfix — real, reported bug: the atomic save RPC
+      // (save_purchase_invoice_edit_and_balance) independently checks
+      // that the sum of every persisted invoice total equals
+      // invoice_batch.total_amount as currently stored. context.batchTotal
+      // already accounts for any header-total self-heal correction (see
+      // PurchaseInvoiceValidator.loadContext), but the STORED batch row
+      // doesn't yet — so without this, the solver could find a perfectly
+      // valid plan and the RPC would still reject it as a "batch total
+      // mismatch," using the OLD figure. Updating the stored total to the
+      // corrected value right before persisting — only when a correction
+      // actually happened — makes this permanent: this batch never needs
+      // this same correction re-applied on a future edit. Not part of the
+      // same atomic transaction as the RPC below, but the correction is
+      // purely additive and idempotent (recomputes to the same value every
+      // time), so a failure between this and the RPC call below leaves
+      // nothing inconsistent — at worst, this update simply reapplies
+      // itself, harmlessly, on the next edit attempt.
+      if (context.headerTotalCorrections.size > 0) {
+        const { error: batchTotalError } = await this.supabase
+          .from("invoice_batch")
+          .update({ total_amount: context.batchTotal })
+          .eq("id", batchId);
+        if (batchTotalError) {
+          throw new Error(
+            `Failed to persist corrected batch total: ${batchTotalError.message}`,
+          );
+        }
+      }
+
       const persistResult = await this.persistence.persistBalancePlan(
         batchId,
         editedInvoiceId,
@@ -379,6 +439,17 @@ export class AutoBalanceEngine {
             Math.round(totalQuantityAdjusted * 100) / 100,
           total_amount_adjusted: Math.round(totalAmountAdjusted * 100) / 100,
         },
+        // Populated only on the rare path where a product's batch-wide
+        // quantity couldn't be exactly conserved and the shortfall was
+        // absorbed as pure money-rebalancing instead — the edit still
+        // succeeded, but this product's total quantity may now differ
+        // slightly from what it was before the edit. See the comment on
+        // quantityConservationWarnings above for why this doesn't block
+        // the save.
+        quantityConservationWarnings:
+          quantityConservationWarnings.length > 0
+            ? quantityConservationWarnings
+            : undefined,
       };
 
       return {
@@ -439,12 +510,27 @@ export class AutoBalanceEngine {
   // Product-quantity conservation's last-resort fallback (Priority 3) needs
   // to number brand-new invoices sequentially. Every invoice in a batch
   // shares the same <abbreviation>-<FY>-<P|S> prefix, so it's derived from
-  // any existing invoice's own number rather than a fresh company/FY
-  // lookup. The starting sequence is the highest existing number for that
-  // exact prefix across the WHOLE invoice table (not just this batch),
-  // matching the same auto-detect query used during generation — other
-  // batches can share the same company + financial year.
+  // any existing invoice's own number rather than a fresh string lookup.
+  //
+  // Hotfix — this used to just scan public.invoice for the current max and
+  // add 1 (findMaxInvoiceSequenceForPrefix), entirely bypassing
+  // invoice_sequences and its FOR UPDATE lock: two edits landing at the
+  // same moment on batches sharing a company+FY+type could compute the
+  // same "next" number (invoice_number's UNIQUE constraint would catch the
+  // collision, but as a database error, not a race actually avoided), and
+  // it never advanced the real counter, leaving it stale for
+  // delete-time sequence reclaim. Now reserves a real range through
+  // reserve_invoice_sequence_range — the same locked, self-healing counter
+  // commit_invoice_batch_with_sequences uses for generation — so this can
+  // never collide and the counter never goes stale. A generous fixed
+  // buffer (Priority 3 realistically needs at most a handful of new
+  // invoices for one edit's product delta): any reserved numbers this
+  // edit doesn't end up using are simply never assigned to an invoice — a
+  // small permanent gap, never a collision.
+  private static readonly NEW_INVOICE_SEQUENCE_RESERVATION = 25;
+
   private async getNextInvoiceNumbering(
+    batchId: string,
     batchInvoices: { invoice_number: string }[],
   ): Promise<{ prefix: string; nextSequence: number }> {
     const sampleNumber = batchInvoices.find((inv) => inv.invoice_number)
@@ -452,31 +538,35 @@ export class AutoBalanceEngine {
     const parts = (sampleNumber || "").split("-");
     const prefix = parts.slice(0, -1).join("-");
 
-    let maxSeq = 0;
-    let page = 0;
-    const pageSize = 1000;
-    let hasMore = true;
-    while (hasMore) {
-      const { data } = await this.supabase
-        .from("invoice")
-        .select("invoice_number")
-        .like("invoice_number", `${prefix}-%`)
-        .range(page * pageSize, (page + 1) * pageSize - 1);
+    const { data: batchRow, error: batchError } = await this.supabase
+      .from("invoice_batch")
+      .select("issuing_company_id, financial_year")
+      .eq("id", batchId)
+      .single();
 
-      if (data && data.length > 0) {
-        for (const row of data) {
-          const rowParts = (row.invoice_number || "").split("-");
-          const seq = parseInt(rowParts[rowParts.length - 1], 10);
-          if (!isNaN(seq) && seq > maxSeq) maxSeq = seq;
-        }
-        hasMore = data.length === pageSize;
-        page++;
-      } else {
-        hasMore = false;
-      }
+    if (batchError || !batchRow) {
+      throw new Error(
+        `Failed to load batch for invoice number reservation: ${batchError?.message || "batch not found"}`,
+      );
     }
 
-    return { prefix, nextSequence: maxSeq + 1 };
+    const { data: startSeq, error: rpcError } = await this.supabase.rpc(
+      "reserve_invoice_sequence_range",
+      {
+        p_issuing_company_id: batchRow.issuing_company_id,
+        p_financial_year: batchRow.financial_year,
+        p_invoice_type: "P",
+        p_count: AutoBalanceEngine.NEW_INVOICE_SEQUENCE_RESERVATION,
+      },
+    );
+
+    if (rpcError) {
+      throw new Error(
+        `Failed to reserve invoice number range: ${rpcError.message}`,
+      );
+    }
+
+    return { prefix, nextSequence: Number(startSeq) + 1 };
   }
 
   private async unlockBatch(batchId: string) {

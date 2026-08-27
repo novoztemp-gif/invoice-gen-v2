@@ -1,5 +1,5 @@
 import { SupabaseClient } from "@supabase/supabase-js";
-import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
+import { fetchAllInvoicesForBatch, fetchRowsByIds } from "@/lib/supabase/fetchAll";
 import {
   computeLineAmount,
   isValidWholeNumber,
@@ -23,7 +23,7 @@ export class PurchaseInvoiceValidator {
     const { data: batch, error: batchError } = await this.supabase
       .from("invoice_batch")
       .select(
-        "id, batch_type, batch_status, total_amount, supplier_id, major_customers",
+        "id, batch_type, batch_status, total_amount, supplier_id, major_customers, minimum_invoice_amount, maximum_invoice_amount",
       )
       .eq("id", batchId)
       .single();
@@ -77,14 +77,130 @@ export class PurchaseInvoiceValidator {
         .filter(Boolean),
     );
 
+    const clonedInvoices = invoices.map((invoice) =>
+      this.cloneInvoice(invoice),
+    );
+    const originalTotalsById = new Map(
+      invoices.map((inv) => [inv.id, Number(inv.total_amount) || 0]),
+    );
+    const headerTotalCorrections =
+      this.selfHealHeaderTotals(clonedInvoices);
+
+    // Hotfix — confirmed as a real, reported bug: when this self-heal
+    // corrects one or more invoices' stale header totals, the BATCH's own
+    // total_amount (set once at generation/last-save time) never learns
+    // about that correction on its own. Every downstream consumer of
+    // "the batch total" (the money solver's target, FinalValidator's
+    // expected-total check) was still comparing against the STALE raw
+    // value — so a batch with even a few drifted invoices made EVERY edit
+    // fail with "no valid rebalance plan," demanding an adjustment that
+    // had nothing to do with the actual edit (confirmed on a real batch:
+    // 15 corrected invoices, +55,713 net correction, batch total left
+    // untouched -> the solver was asked to close a ~55,873 gap for a
+    // ~160 edit). Folding the correction into batchTotal here — the ONE
+    // place every downstream consumer already reads it from — fixes this
+    // at the root without needing every call site updated separately.
+    // This does NOT persist the correction back to invoice_batch.total_amount
+    // in the database (that goes through a separate RPC not touched here)
+    // — it's recomputed the same way, safely, on every future edit to this
+    // batch until that's addressed too.
+    let headerTotalNetCorrection = 0;
+    for (const inv of headerTotalCorrections.values()) {
+      headerTotalNetCorrection +=
+        Number(inv.total_amount || 0) - (originalTotalsById.get(inv.id) || 0);
+    }
+    headerTotalNetCorrection = Math.round(headerTotalNetCorrection * 100) / 100;
+    if (headerTotalCorrections.size > 0) {
+      console.log("[HEADERHEAL-DEBUG]", {
+        batchId,
+        correctedInvoiceCount: headerTotalCorrections.size,
+        netCorrection: headerTotalNetCorrection,
+        batchTotalOnRecord: Number(batch.total_amount),
+        effectiveBatchTotal:
+          Number(batch.total_amount) + headerTotalNetCorrection,
+      });
+    }
+
     return {
       batchId,
-      batchTotal: Number(batch.total_amount),
+      batchTotal: Number(batch.total_amount) + headerTotalNetCorrection,
       supplierCategory: normaliseCategory(supplier.category),
-      invoices: invoices.map((invoice) => this.cloneInvoice(invoice)),
+      invoices: clonedInvoices,
       constraints,
       majorCustomerIds,
+      thresholdMin:
+        batch.minimum_invoice_amount !== null &&
+        batch.minimum_invoice_amount !== undefined
+          ? Number(batch.minimum_invoice_amount)
+          : null,
+      thresholdMax:
+        batch.maximum_invoice_amount !== null &&
+        batch.maximum_invoice_amount !== undefined
+          ? Number(batch.maximum_invoice_amount)
+          : null,
+      headerTotalCorrections,
     };
+  }
+
+  /**
+   * Real, confirmed case (not theoretical): a small number of older
+   * invoices have a stored total_amount that doesn't match the sum of
+   * their own lines, even though every individual line is itself exactly
+   * correct (amount === quantity x rate) — e.g. a real invoice with lines
+   * summing to 7200 but a stored total of 6254. Left alone,
+   * FinalValidator's own total-vs-lines check (the identical computation,
+   * correctly enforced) permanently blocks every future edit to the WHOLE
+   * batch, not just that one invoice, since every edit revalidates every
+   * invoice in the batch.
+   *
+   * Since every line is already individually exact, the invoice's own
+   * header total is unambiguously the wrong number, not the lines —
+   * there's nothing to guess. Recomputing it from its own lines here, once
+   * per load, self-heals it: the corrected value flows through the rest
+   * of this edit like any other change and gets persisted (see
+   * AutoBalanceEngine's merge of headerTotalCorrections), so the
+   * underlying data is actually fixed, not just worked around in memory.
+   *
+   * Deliberately narrow: never touches a line's own quantity/rate/amount,
+   * and only acts when EVERY line on the invoice is already internally
+   * exact. An invoice where a LINE itself is wrong is a genuinely
+   * ambiguous kind of corruption (which value is the mistake?) — left
+   * alone, and still surfaces as a real validation error requiring a
+   * human decision, exactly as it did before this fix.
+   */
+  private selfHealHeaderTotals(
+    invoices: PurchaseInvoice[],
+  ): Map<string, PurchaseInvoice> {
+    const corrections = new Map<string, PurchaseInvoice>();
+    for (const invoice of invoices) {
+      if (!invoice.products || invoice.products.length === 0) continue;
+
+      let everyLineExact = true;
+      let realTotal = 0;
+      for (const line of invoice.products) {
+        const expected = computeLineAmount(
+          Number(line.quantity),
+          Number(line.rate),
+        );
+        if (Math.abs(Number(line.amount) - expected) > MONEY_TOLERANCE) {
+          everyLineExact = false;
+          break;
+        }
+        realTotal += Number(line.amount);
+      }
+      if (!everyLineExact) continue;
+
+      realTotal = roundMoney(realTotal);
+      if (
+        realTotal > 0 &&
+        Math.abs(realTotal - roundMoney(invoice.total_amount)) >
+          MONEY_TOLERANCE
+      ) {
+        invoice.total_amount = realTotal;
+        corrections.set(invoice.id, invoice);
+      }
+    }
+    return corrections;
   }
 
   /**
@@ -101,23 +217,30 @@ export class PurchaseInvoiceValidator {
     const ids = [...new Set(productIds)].filter((id) => !constraints.has(id));
     if (ids.length === 0) return;
 
-    const [
-      { data: rules, error: ruleError },
-      { data: products, error: productError },
-    ] = await Promise.all([
-      this.supabase
-        .from("product_rules")
-        .select("product_id, quantity_min, quantity_max, rate_min, rate_max")
-        .in("product_id", ids),
-      this.supabase
-        .from("products")
-        .select("id, category, unit_of_measure, hsn_code, product_name")
-        .in("id", ids),
+    const [rules, products] = await Promise.all([
+      fetchRowsByIds(
+        (chunk) =>
+          this.supabase
+            .from("product_rules")
+            .select(
+              "product_id, quantity_min, quantity_max, rate_min, rate_max",
+            )
+            .in("product_id", chunk),
+        ids,
+      ).catch((error) => {
+        throw new Error(`Unable to load product rules: ${error.message}`);
+      }),
+      fetchRowsByIds(
+        (chunk) =>
+          this.supabase
+            .from("products")
+            .select("id, category, unit_of_measure, hsn_code, product_name")
+            .in("id", chunk),
+        ids,
+      ).catch((error) => {
+        throw new Error(`Unable to load products: ${error.message}`);
+      }),
     ]);
-    if (ruleError)
-      throw new Error(`Unable to load product rules: ${ruleError.message}`);
-    if (productError)
-      throw new Error(`Unable to load products: ${productError.message}`);
 
     const productMap = new Map(
       (products || []).map((product) => [product.id, product]),
@@ -237,9 +360,14 @@ export class PurchaseInvoiceValidator {
     const partyId = (invoice.products?.[0] as any)?.customer_id;
     const isMajorCustomerInvoice =
       !!partyId && context.majorCustomerIds?.has(partyId);
+    // Grandfathered: an invoice that already had more than maxInvoiceLines
+    // before this edit (e.g. from a generation-time merge bug) must stay
+    // editable — only block the count from growing further past whatever
+    // it already was. See the matching grandfather in FinalValidator.
     if (
       !isMajorCustomerInvoice &&
-      invoice.products.length > BALANCE_LIMITS.maxInvoiceLines
+      invoice.products.length > BALANCE_LIMITS.maxInvoiceLines &&
+      invoice.products.length > (original?.products.length ?? 0)
     ) {
       throw new Error(
         `Purchase invoices may contain at most ${BALANCE_LIMITS.maxInvoiceLines} products.`,

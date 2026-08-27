@@ -86,11 +86,26 @@ export class InvoiceNumberingService {
 
   /**
    * Fetches current sequence state & next sequence preview with rich accounting information.
-   * The next sequence number is always auto-detected from the highest existing
-   * invoice number for this company + financial year + type — there is no
-   * manual override. A new financial year (or a deleted batch/sequence)
-   * naturally starts back at 1 since the detection is scoped to that exact
-   * prefix.
+   *
+   * Hotfix history — this used to auto-detect the next number by scanning
+   * the `invoice` table for the highest existing row matching this prefix,
+   * which disagreed with real generation (commit_invoice_batch_with_sequences
+   * reads the separate invoice_sequences counter, not a table scan). That
+   * was fixed by reading the same counter, gated behind a client-side
+   * existence check on `invoice` (only self-heal to 0 if truly nothing
+   * exists for this prefix).
+   *
+   * That existence check itself was the next bug: `invoice`'s RLS only
+   * grants SELECT to the `authenticated` role (invoice_sequences grants
+   * both `authenticated` and `anon`), so if this ran before the browser's
+   * Supabase session finished hydrating, the check silently came back
+   * empty and the preview showed "Next: 1" for a batch that already had
+   * many real invoices — even though real generation (SECURITY DEFINER,
+   * bypasses RLS) was unaffected and continued correctly. Fixed by moving
+   * the whole decision into get_invoice_sequence_preview (see
+   * 20260827000000_rls_safe_sequence_preview_rpc.sql), a SECURITY DEFINER
+   * RPC that mirrors commit_invoice_batch_with_sequences' own forward/
+   * backward self-heal logic exactly, immune to client auth timing.
    */
   public static async fetchSequencePreview(
     supabase: SupabaseClient,
@@ -119,36 +134,19 @@ export class InvoiceNumberingService {
         .toUpperCase()
         .replace(/[^A-Z0-9]/g, "");
 
-    const prefix = `${abbreviation}-${canonicalFy}-${invoiceType}`;
-    let currentSeq = 0;
-    let page = 0;
-    const pageSize = 1000;
-    let hasMore = true;
-    while (hasMore) {
-      const { data: pageInvoices } = await supabase
-        .from("invoice")
-        .select("invoice_number")
-        .like("invoice_number", `${prefix}-%`)
-        .range(page * pageSize, (page + 1) * pageSize - 1);
+    // Server-side, RLS-immune: the same self-heal decision real generation
+    // makes, computed fresh every call rather than trusted from a
+    // client-readable table.
+    const { data: previewSeq } = await supabase.rpc(
+      "get_invoice_sequence_preview",
+      {
+        p_issuing_company_id: issuingCompanyId,
+        p_financial_year: canonicalFy,
+        p_invoice_type: invoiceType,
+      },
+    );
 
-      if (pageInvoices && pageInvoices.length > 0) {
-        for (const row of pageInvoices) {
-          const parts = (row.invoice_number || "").split("-");
-          const seqNum = parseInt(parts[parts.length - 1], 10);
-          if (!isNaN(seqNum) && seqNum > currentSeq) {
-            currentSeq = seqNum;
-          }
-        }
-        if (pageInvoices.length < pageSize) {
-          hasMore = false;
-        } else {
-          page++;
-        }
-      } else {
-        hasMore = false;
-      }
-    }
-
+    const currentSeq = Number(previewSeq || 0);
     const nextSeq = currentSeq + 1;
 
     const currentInvoiceNumber =

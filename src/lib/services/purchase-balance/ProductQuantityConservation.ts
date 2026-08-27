@@ -79,6 +79,13 @@ export class ProductQuantityConservation {
     // non-empty from a first pass — see AutoBalanceEngine.
     invoiceNumberPrefix?: string,
     startingSequence?: number,
+    // Hotfix — defense in depth. Priorities 1-3 used to be able to grow
+    // any OTHER invoice's total by an unbounded amount while conserving
+    // quantity, relying entirely on FinalValidator's final check to catch
+    // an over-cap result after the fact (Sales' equivalent balancing code
+    // already bounds every line/invoice it touches this way). Optional —
+    // omitting it is byte-identical to before.
+    thresholdMax?: number,
   ): ConservationResult {
     const errors: string[] = [];
     const newInvoices: PurchaseInvoice[] = [];
@@ -243,7 +250,31 @@ export class ProductQuantityConservation {
           constraint,
         );
         if (candidates.length === 0) continue;
-        const chosenQty = candidates[0];
+        // Hotfix — defense in depth. Prefer the closest candidate that
+        // keeps this OTHER invoice within the batch's maximum invoice
+        // amount (or at least doesn't push it any higher than its current
+        // total already is) over the raw closest-to-target candidate.
+        // Falls back to the unbounded choice when no candidate satisfies
+        // that — this must never make a previously-possible conservation
+        // outcome impossible, only steer it toward a safer one when one
+        // exists.
+        const currentLineAmount = computeLineAmount(currentQty, ownRate);
+        const otherLinesTotalOnInv = roundMoney(
+          (w.total_amount || 0) - currentLineAmount,
+        );
+        const maxLineAmountForThisLine =
+          thresholdMax && thresholdMax > 0
+            ? Math.max(0, thresholdMax - otherLinesTotalOnInv)
+            : undefined;
+        const withinCapQty = candidates.find((q) => {
+          const amt = computeLineAmount(q, ownRate);
+          return (
+            maxLineAmountForThisLine === undefined ||
+            amt <= maxLineAmountForThisLine + 0.5 ||
+            amt <= currentLineAmount + MONEY_TOLERANCE
+          );
+        });
+        const chosenQty = withinCapQty !== undefined ? withinCapQty : candidates[0];
         const achievedDelta = roundMoney(chosenQty - currentQty);
         if (Math.abs(achievedDelta) < MONEY_TOLERANCE) continue;
 
@@ -279,7 +310,24 @@ export class ProductQuantityConservation {
             constraint,
           );
           if (candidates.length === 0) continue;
-          const chosenQty = candidates[0];
+          // Hotfix — defense in depth. A brand-new line only ever ADDS to
+          // this invoice's total, so skip straight to the next invoice if
+          // no available quantity leaves it within the batch's own maximum
+          // invoice amount, rather than forcing an over-cap addition
+          // FinalValidator would reject anyway.
+          const maxLineAmountForThisLine =
+            thresholdMax && thresholdMax > 0
+              ? Math.max(0, thresholdMax - (w.total_amount || 0))
+              : undefined;
+          const withinCapQty = candidates.find(
+            (q) =>
+              maxLineAmountForThisLine === undefined ||
+              computeLineAmount(q, rateForP) <= maxLineAmountForThisLine + 0.5,
+          );
+          if (maxLineAmountForThisLine !== undefined && withinCapQty === undefined) {
+            continue;
+          }
+          const chosenQty = withinCapQty !== undefined ? withinCapQty : candidates[0];
           if (chosenQty <= 0) continue;
 
           const sibling = w.products[0] as any;
@@ -376,7 +424,19 @@ export class ProductQuantityConservation {
               constraint,
             );
             if (candidates.length === 0) continue;
-            const chosenQty = candidates[0];
+            // Hotfix — defense in depth. This is a brand-new invoice
+            // starting from zero, so its whole total is this one line —
+            // prefer the closest candidate that stays within the batch's
+            // own maximum invoice amount, falling back to the raw closest
+            // candidate only if none do (an expensive product whose
+            // cheapest valid quantity alone already exceeds the cap).
+            const withinCapQty = candidates.find(
+              (q) =>
+                !thresholdMax ||
+                thresholdMax <= 0 ||
+                computeLineAmount(q, rateForP) <= thresholdMax + 0.5,
+            );
+            const chosenQty = withinCapQty !== undefined ? withinCapQty : candidates[0];
             if (chosenQty <= 0) continue;
 
             const newLineObj: PurchaseLine = {
@@ -452,9 +512,17 @@ export class ProductQuantityConservation {
           const lineConstraint = constraints.get(line.product_id);
           if (!lineConstraint) continue;
 
+          const otherLinesTotalOnEdited = roundMoney(
+            (we.total_amount || 0) - (line.amount || 0),
+          );
+          const maxLineAmountForThisLine =
+            thresholdMax && thresholdMax > 0
+              ? Math.max(0, thresholdMax - otherLinesTotalOnEdited)
+              : undefined;
           const lineCandidates = CandidateGenerator.generateLineCandidates(
             line,
             lineConstraint,
+            maxLineAmountForThisLine,
           );
           if (lineCandidates.length === 0) continue;
 
@@ -503,90 +571,5 @@ export class ProductQuantityConservation {
       updatedEditedInvoice: workingEdited,
       errors,
     };
-  }
-
-  /**
-   * Read-only estimate of how much of `productId` could be ADDED to
-   * `editedInvoice` right now (as a brand-new line, or on top of however
-   * much it already has) without the save needing to touch any OTHER
-   * invoice's product it doesn't already carry — i.e. an upper bound on
-   * what Priority 1 (shrink this product's existing lines elsewhere) +
-   * Priority 4 (shrink the edited invoice's own other lines) could actually
-   * absorb, computed with simple sums instead of running the full
-   * candidate search. Used by the UI to show "up to X available" on Quick
-   * Add before the user commits to an edit, so the shortfall this function
-   * predicts is caught before Save rather than after.
-   *
-   * Deliberately approximate (real amounts are always finalised exactly at
-   * save time by conserve()) and deliberately cheap — no DP, no candidate
-   * generation, just addition — so it's safe to call for every product in
-   * a batch's product list on every dialog open without noticeable lag.
-   */
-  public static estimateAddCapacity(
-    productId: string,
-    editedInvoice: PurchaseInvoice,
-    allOtherInvoices: PurchaseInvoice[],
-    constraints: Map<string, ProductConstraint>,
-    majorCustomerIds: Set<string>,
-    supplierCategory: string,
-  ): number {
-    const constraint = constraints.get(productId);
-    if (!constraint) return 0;
-    const productCategory = normaliseCategory(constraint.category);
-
-    const invoiceBaselineCategory = (inv: PurchaseInvoice): string => {
-      const firstProductId = inv.products?.[0]?.product_id;
-      const c = firstProductId ? constraints.get(firstProductId) : undefined;
-      return normaliseCategory(c ? c.category : supplierCategory);
-    };
-
-    const eligibleOtherInvoices = allOtherInvoices.filter((inv) => {
-      const partyId = (inv.products?.[0] as any)?.customer_id;
-      if (partyId && majorCustomerIds.has(partyId)) return false;
-      return invoiceBaselineCategory(inv) === productCategory;
-    });
-
-    // Priority 1 room: how far this product's EXISTING lines elsewhere
-    // could shrink toward quantityMin.
-    let priority1Room = 0;
-    let existingRate: number | undefined;
-    for (const inv of eligibleOtherInvoices) {
-      const line = inv.products.find((p) => p.product_id === productId);
-      if (!line) continue;
-      if (existingRate === undefined) existingRate = Number(line.rate);
-      const qty = Number(line.quantity) || 0;
-      priority1Room += Math.max(0, qty - constraint.quantityMin);
-    }
-
-    // Priority 4 room: how far the EDITED invoice's own OTHER lines could
-    // shrink toward their own quantityMin, converted to this product's
-    // rate-equivalent quantity. Falls back to the midpoint of this
-    // product's configured rate range when it has no existing rate
-    // anywhere yet (a genuinely brand-new product) — the real rate used at
-    // save time may differ slightly, hence this being an estimate.
-    const rateForP = existingRate ?? (constraint.rateMin + constraint.rateMax) / 2;
-    let priority4RoomMoney = 0;
-    for (const line of editedInvoice.products) {
-      if (line.product_id === productId) continue;
-      const lineConstraint = constraints.get(line.product_id);
-      if (!lineConstraint) continue;
-      const qty = Number(line.quantity) || 0;
-      const rate = Number(line.rate) || 0;
-      const minAmount = computeLineAmount(lineConstraint.quantityMin, rate);
-      priority4RoomMoney += Math.max(0, qty * rate - minAmount);
-    }
-    const priority4Room = rateForP > 0 ? priority4RoomMoney / rateForP : 0;
-
-    const totalRoom = priority1Room + priority4Room;
-    if (totalRoom <= 0) return 0;
-
-    // Round down to a valid commercial step so the displayed number is
-    // something the user could actually enter.
-    const candidates = CandidateGenerator.generateQuantityCandidates(
-      totalRoom,
-      constraint,
-    ).filter((q) => q <= totalRoom + MONEY_TOLERANCE);
-    if (candidates.length === 0) return 0;
-    return Math.max(...candidates);
   }
 }

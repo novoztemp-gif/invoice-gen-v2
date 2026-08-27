@@ -3,7 +3,7 @@ import JSZip from "jszip";
 import { NextRequest, NextResponse } from "next/server";
 import { generatePurchasePDFBuffer } from "@/lib/services/PdfExportService";
 import { createClient } from "@/lib/supabase/server";
-import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
+import { fetchAllInvoicesForBatch, fetchRowsByIds } from "@/lib/supabase/fetchAll";
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -67,10 +67,10 @@ export async function GET(request: NextRequest) {
     ),
   ];
 
-  const { data: customers } = await supabase
-    .from("receiving_companies")
-    .select("*")
-    .in("id", customerIds.length > 0 ? customerIds : ["dummy-id"]);
+  const customers = await fetchRowsByIds(
+    (chunk) => supabase.from("receiving_companies").select("*").in("id", chunk),
+    customerIds,
+  );
 
   const customerMap = (customers || []).reduce((acc: any, c: any) => {
     acc[c.id] = c;

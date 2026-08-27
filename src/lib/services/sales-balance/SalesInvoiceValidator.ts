@@ -1,5 +1,13 @@
 import { SupabaseClient } from "@supabase/supabase-js";
-import { fetchAllInvoicesForBatch, fetchAllQueryRows } from "@/lib/supabase/fetchAll";
+import {
+  fetchAllInvoicesForBatch,
+  fetchAllQueryRows,
+  fetchRowsByIds,
+} from "@/lib/supabase/fetchAll";
+import {
+  computeDailyChronologicalStock,
+  StockLedgerRow,
+} from "@/lib/services/StockCalculationService";
 import {
   computeLineAmount,
   isValidQuarterIncrement,
@@ -99,15 +107,25 @@ export class SalesInvoiceValidator {
 
     if (productIds.size > 0) {
       const pIdArray = Array.from(productIds);
-      const [{ data: rules }, { data: prods }] = await Promise.all([
-        supabase
-          .from("product_rules")
-          .select("product_id, quantity_min, quantity_max, rate_min, rate_max")
-          .in("product_id", pIdArray),
-        supabase
-          .from("products")
-          .select("id, product_name, unit_of_measure, category, category_id")
-          .in("id", pIdArray),
+      const [rules, prods] = await Promise.all([
+        fetchRowsByIds(
+          (chunk) =>
+            supabase
+              .from("product_rules")
+              .select(
+                "product_id, quantity_min, quantity_max, rate_min, rate_max",
+              )
+              .in("product_id", chunk),
+          pIdArray,
+        ),
+        fetchRowsByIds(
+          (chunk) =>
+            supabase
+              .from("products")
+              .select("id, product_name, unit_of_measure, category")
+              .in("id", chunk),
+          pIdArray,
+        ),
       ]);
 
       const ruleMap = new Map(
@@ -121,7 +139,7 @@ export class SalesInvoiceValidator {
 
         constraints.set(pid, {
           productId: pid,
-          category: String(p?.category || p?.category_id || "Meat"),
+          category: String(p?.category || "Meat"),
           unitOfMeasure: String(p?.unit_of_measure || "kg"),
           // A minimum commercial order quantity only matters at GENERATION
           // time (enforced separately in InvoiceEngine.ts) — it must never
@@ -166,6 +184,25 @@ export class SalesInvoiceValidator {
         );
 
         if (ledgerRows && ledgerRows.length > 0) {
+          // Chronological day-by-day availability — sourced from the
+          // shared StockCalculationService (Sprint 1.2) rather than a
+          // locally reimplemented recurrence.
+          const dailyStock = computeDailyChronologicalStock(
+            ledgerRows as StockLedgerRow[],
+          );
+          for (const day of dailyStock) {
+            const key = `${day.ledger_date}_${day.product_id}`;
+            availableStockMap.set(key, day.closing);
+          }
+
+          // True physical ceiling for this product, batch-wide, ignoring
+          // date: opening stock of the very first ledger row plus every
+          // day's purchased_quantity. This is a DIFFERENT metric from
+          // "remaining stock" (it never subtracts sold_quantity at all —
+          // balancing must never sell more of a product than was ever
+          // actually purchased, in aggregate), so it stays a direct
+          // computation here rather than going through the chronological
+          // closing-stock service.
           const productGroups = new Map<string, any[]>();
           for (const row of ledgerRows) {
             if (!productGroups.has(row.product_id)) {
@@ -173,41 +210,18 @@ export class SalesInvoiceValidator {
             }
             productGroups.get(row.product_id)!.push(row);
           }
-
           for (const [pId, rows] of productGroups.entries()) {
-            rows.sort((a: any, b: any) =>
+            const sorted = [...rows].sort((a: any, b: any) =>
               a.ledger_date.localeCompare(b.ledger_date),
             );
-            let carryForward = Number(rows[0].opening_stock) || 0;
-
-            // True physical ceiling for this product, batch-wide, ignoring
-            // date: opening stock of the very first ledger row plus every
-            // day's purchased_quantity. Balancing no longer cares which day
-            // a unit lands on, but it must never — in aggregate — sell more
-            // of a product than was ever actually purchased.
             totalPurchasedByProduct.set(
               pId,
-              (Number(rows[0].opening_stock) || 0) +
-                rows.reduce(
+              (Number(sorted[0].opening_stock) || 0) +
+                sorted.reduce(
                   (s: number, r: any) => s + Number(r.purchased_quantity || 0),
                   0,
                 ),
             );
-
-            for (const row of rows) {
-              const opening = carryForward;
-              const purchased = Number(row.purchased_quantity || 0);
-              const prevSold = Number(row.sold_quantity || 0);
-
-              const availableBeforeCurrentBatch = Math.max(
-                0,
-                opening + purchased - prevSold,
-              );
-              const key = `${row.ledger_date}_${pId}`;
-              availableStockMap.set(key, availableBeforeCurrentBatch);
-
-              carryForward = availableBeforeCurrentBatch;
-            }
           }
         }
       }

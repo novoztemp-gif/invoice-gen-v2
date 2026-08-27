@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
+import { fetchAllInvoicesForBatch, fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 
 // Function to convert number to words in Indian format
 function numberToWords(num: number): string {
@@ -140,6 +140,15 @@ export async function POST(request: NextRequest) {
 
     const supabase = await createClient();
 
+    // Hotfix — this route had no explicit auth check, unlike most of
+    // its siblings, relying entirely on the blanket middleware redirect.
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    }
+
     const { data: batch, error: batchError } = await supabase
       .from("invoice_batch")
       .select("*")
@@ -175,12 +184,24 @@ export async function POST(request: NextRequest) {
       .eq("id", batch.issuing_company_id)
       .single();
 
-    const { data: receivingCompaniesList } = await supabase
-      .from("receiving_companies")
-      .select("*");
-    const { data: suppliersList } = await supabase
-      .from("suppliers")
-      .select("*");
+    // Hotfix — same growth-risk shape as download-summary: unpaginated,
+    // unchecked full-table reads. Once either table crosses PostgREST's
+    // default 1000-row page cap, newer companies silently drop out of
+    // this sheet's payload with no error raised.
+    const receivingCompaniesList = await fetchAllQueryRows((from, to) =>
+      supabase
+        .from("receiving_companies")
+        .select("*")
+        .order("id", { ascending: true })
+        .range(from, to),
+    );
+    const suppliersList = await fetchAllQueryRows((from, to) =>
+      supabase
+        .from("suppliers")
+        .select("*")
+        .order("id", { ascending: true })
+        .range(from, to),
+    );
 
     const partnerMap = new Map();
     if (receivingCompaniesList) {

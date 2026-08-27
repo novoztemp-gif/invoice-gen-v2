@@ -692,6 +692,21 @@ export function DailyStockReviewModal({
     return Array.from(productMap.values());
   }, [rows]);
 
+  // Grand total across every product, grouped by unit — products can use
+  // different units (kg, pieces, ...), so a single summed figure would be
+  // meaningless; one subtotal per unit is the only mathematically sound
+  // "total including all" here.
+  const totalRemainingByUnit = useMemo(() => {
+    const unitMap = new Map<string, number>();
+    for (const p of finalProductSummaries) {
+      unitMap.set(p.unit, (unitMap.get(p.unit) || 0) + p.remaining);
+    }
+    return Array.from(unitMap.entries()).map(([unit, total]) => ({
+      unit,
+      total: Math.round(total * 100) / 100,
+    }));
+  }, [finalProductSummaries]);
+
   const toggleRetainedProduct = (pId: string) => {
     const next = new Set(retainedProductIds);
     if (next.has(pId)) {
@@ -947,6 +962,31 @@ export function DailyStockReviewModal({
               </tbody>
             </table>
           </div>
+
+          {/* Total Stock Leftover — grand total across every product (grouped
+              by unit), so it's visible right where the user is evaluating
+              the result of AUTO ALLOCATE, not just per-product further up. */}
+          {totalRemainingByUnit.length > 0 && (
+            <div className="mb-4 bg-slate-900 text-white p-3.5 rounded-lg border border-slate-800 flex flex-wrap items-center gap-4">
+              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Total Stock Leftover (All Products):
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {totalRemainingByUnit.map(({ unit, total }) => (
+                  <span
+                    key={unit}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-mono font-bold border ${
+                      total < 0
+                        ? "bg-red-500/20 text-red-300 border-red-500/30"
+                        : "bg-slate-800 text-emerald-400 border-slate-700"
+                    }`}
+                  >
+                    {total.toFixed(2)} {unit}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           </div>
 
           <DialogFooter className="pt-3 border-t border-slate-100 flex items-center justify-between shrink-0">

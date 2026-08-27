@@ -1,22 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SalesInvoiceValidator } from "@/lib/services/sales-balance/SalesInvoiceValidator";
+import {
+  computeAvailableForEdit,
+  loadDayAvailability,
+} from "@/lib/services/sales-balance/SalesDayStockAvailability";
 import { createClient } from "@/lib/supabase/server";
 
 /**
- * Read-only "how much of this product is allocated in this Sales batch"
- * figure — powers the Quick Add stock hints in InvoiceEditor for Sales
- * batches.
+ * Read-only "how much of this product can be added to THIS invoice right
+ * now" figure — powers the Quick Add stock hints in InvoiceEditor for
+ * Sales batches.
  *
- * A generated Sales batch is a closed system: every unit of every product
- * was already fully allocated across the batch's invoices at generation/
- * Auto Allocate time (any leftover became carry-forward for the NEXT
- * batch, not something this one can still draw on). Editing never adds or
- * removes stock from that pool — it only moves quantity of the SAME
- * product between invoices, or spins up a new invoice for it — so the
- * number that matters here is the fixed total already allocated to that
- * product across the whole batch (context.originalProductTotals), not any
- * notion of "unsold" or "remaining" stock, which doesn't meaningfully
- * exist inside an already-generated batch.
+ * Sales invoice editing is day-scoped (see SalesDayScopedEditEngine): an
+ * edit can only draw on stock physically available on the edited
+ * invoice's own day, no cross-day borrowing. This mirrors exactly what
+ * the engine enforces at save time via the same
+ * loadDayAvailability/computeAvailableForEdit helpers, so the badge shown
+ * here can never drift from what saving will actually allow.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -62,14 +62,32 @@ export async function POST(request: NextRequest) {
       ),
     );
 
+    const invoiceDate = editedInvoiceFromDb.invoice_date;
+    const stockSourceBatchIds = context.stockSourceBatchId
+      ? context.stockSourceBatchId
+          .split(",")
+          .map((s: string) => s.trim())
+          .filter(Boolean)
+      : [];
+    const staticAvailable = await loadDayAvailability(
+      supabase,
+      stockSourceBatchIds,
+      invoiceDate,
+    );
+    const availableForEdit = computeAvailableForEdit(
+      context,
+      staticAvailable,
+      invoiceDate,
+      invoiceId,
+    );
+
     const capacities: Record<string, number> = {};
     for (const productId of batchProductIds) {
       capacities[productId] =
-        Math.round((context.originalProductTotals.get(productId) || 0) * 100) /
-        100;
+        Math.round((availableForEdit.get(productId) || 0) * 100) / 100;
     }
 
-    return NextResponse.json({ capacities });
+    return NextResponse.json({ capacities, date: invoiceDate });
   } catch (error: any) {
     console.error("Sales invoice product capacity error:", error);
     return NextResponse.json(

@@ -5,16 +5,17 @@ import { useEffect, useState } from "react";
 import type { CategorySplitItem } from "@/components/CategorySplitSection";
 import type { ValidationGuidanceData } from "@/components/ValidationGuidanceModal";
 import { MAX_INVOICES_PER_BATCH } from "@/lib/constants/invoice";
-import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import {
   InvoiceNumberingService,
   type InvoiceSequencePreview,
   type InvoiceType,
 } from "@/lib/services/InvoiceNumberingService";
+import { validateCategoryOccurrenceConfiguration } from "@/lib/services/ProductOccurrenceService";
 import { createClient } from "@/lib/supabase/client";
 import {
   enforceMinimumInvoiceAmount,
   reconcileInvoicesToTargets,
+  solveRatesToHitTotal,
 } from "@/lib/utils/reconcile-invoice-quantities";
 
 function formatDateForStorage(date: Date): string {
@@ -83,6 +84,20 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     { category_name: "Meat", percentage: 70, amount: 0 },
     { category_name: "Fruits", percentage: 30, amount: 0 },
   ]);
+  // Sprint 1.7S — Product Occurrence quota configuration. `null` (the
+  // default) preserves legacy behavior exactly: InvoiceEngine/
+  // ProductOccurrenceService treat NULL occurrence_semantics identically to
+  // "GLOBAL", never auto-promoting it to CATEGORY (Sprint 1.7I/1.7J), and
+  // an existing batch created before this sprint has both fields NULL in
+  // the database — nothing about that batch's stored config or generation
+  // behavior changes just because this UI now exists.
+  const [occurrenceSemantics, setOccurrenceSemantics] = useState<
+    "GLOBAL" | "CATEGORY" | null
+  >(null);
+  const [categoryAllocation, setCategoryAllocation] = useState<{
+    Meat: string;
+    Fruits: string;
+  }>({ Meat: "70", Fruits: "30" });
   const [errorPopup, setErrorPopup] = useState<string | null>(null);
   const [errorField, setErrorField] = useState<string | null>(null);
   const [validationGuidance, setValidationGuidance] =
@@ -110,6 +125,40 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     invoice_count: "1",
     max_invoice_amount: "",
   });
+
+  // Anticipated Major Customer Demand — Purchase batches only, and
+  // entirely optional. Lets the user pre-declare a Sales Major Customer's
+  // expected amount/invoice_count/max/category at Purchase time, purely to
+  // bias Purchase generation into concentrating enough same-day stock for
+  // it later — a Sales Major Customer invoice can only ever draw from ONE
+  // day, and Purchase generation otherwise spreads stock randomly and
+  // evenly across every day, which can leave no single day with enough
+  // concentrated stock even when the total across the whole range is
+  // plenty. Deliberately a SEPARATE field from `majorCustomers` above,
+  // which on Purchase batches means major SUPPLIERS — a different concept.
+  const [anticipatedMajorCustomers, setAnticipatedMajorCustomers] = useState<
+    Array<{
+      customer_id: string;
+      amount: string;
+      invoice_count: string;
+      max_invoice_amount: string;
+    }>
+  >([]);
+  // Sourced from the real Sales customer master (`receiving_companies`) —
+  // distinct from `receivingCompanies` above, which for a PURCHASE batch
+  // holds SUPPLIERS, not Sales customers. Only fetched for PURCHASE.
+  const [anticipatedCustomers, setAnticipatedCustomers] = useState<
+    ReceivingCompany[]
+  >([]);
+  const [anticipatedMajorCustomerOpen, setAnticipatedMajorCustomerOpen] =
+    useState(false);
+  const [tempAnticipatedMajorCustomer, setTempAnticipatedMajorCustomer] =
+    useState({
+      customer_id: "",
+      amount: "",
+      invoice_count: "1",
+      max_invoice_amount: "",
+    });
 
   const [selectedProducts, setSelectedProducts] = useState<
     SelectedProductItem[]
@@ -161,7 +210,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       const partyTable =
         batchType === "PURCHASE" ? "suppliers" : "receiving_companies";
 
-      const [issuingRes, receivingRes, productsRes, rulesRes] =
+      const [issuingRes, receivingRes, productsRes, rulesRes, anticipatedRes] =
         await Promise.all([
           supabase
             .from("issuing_companies")
@@ -176,12 +225,23 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             .select("*")
             .order("product_name", { ascending: true }),
           supabase.from("product_rules").select("*"),
+          // Anticipated Major Customer Demand (PURCHASE only) picks from
+          // the real Sales customer master, not `partyTable` (suppliers,
+          // for Purchase) — a separate fetch since the two lists differ.
+          batchType === "PURCHASE"
+            ? supabase
+                .from("receiving_companies")
+                .select("*")
+                .order("company_name", { ascending: true })
+            : Promise.resolve({ data: null }),
         ]);
 
       if (issuingRes.data) setIssuingCompanies(issuingRes.data);
       if (receivingRes.data) setReceivingCompanies(receivingRes.data);
       if (productsRes.data) setProducts(productsRes.data);
       if (rulesRes.data) setProductRules(rulesRes.data);
+      if (anticipatedRes.data)
+        setAnticipatedCustomers(anticipatedRes.data as any);
     };
 
     fetchData();
@@ -312,6 +372,75 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       return;
     }
 
+    // Hard mathematical ceiling check — a single invoice line can NEVER
+    // exceed its product's own configured maximum quantity, no matter how
+    // much stock accumulates for it, so a single invoice's total can never
+    // exceed the sum of every eligible (non-zero Occurrence Percentage)
+    // product's own maximum-quantity x maximum-rate line, for WHICHEVER
+    // category that invoice ends up in. Since this customer/supplier isn't
+    // locked to one category, this only blocks when EVERY category is
+    // individually below the target — if at least one category can reach
+    // it, generation's own category rescue can still find it.
+    if (selectedProducts.length > 0) {
+      const capacityByCategory = new Map<string, number>();
+      for (const item of selectedProducts) {
+        const occ = parseFloat(item.occurrencePercentage || "0");
+        if (isNaN(occ) || occ <= 0) continue;
+        const cat = (item.product as any).category_name || "Meat";
+        const q = parseFloat(item.perDayQtyMax) || 0;
+        const r = parseFloat(item.perDayRateMax) || 0;
+        capacityByCategory.set(
+          cat,
+          (capacityByCategory.get(cat) || 0) + q * r,
+        );
+      }
+      const bestCategoryCapacity = Math.max(
+        0,
+        ...Array.from(capacityByCategory.values()),
+      );
+      if (capacityByCategory.size > 0 && maxAmt > bestCategoryCapacity) {
+        const breakdown = Array.from(capacityByCategory.entries())
+          .map(
+            ([cat, cap]) => `${cat}: ₹${Math.round(cap).toLocaleString("en-IN")}`,
+          )
+          .join(", ");
+        setErrorPopup(
+          `The maximum invoice amount (₹${maxAmt.toLocaleString("en-IN")}) can never be reached in ANY configured category — even selling every eligible product at its absolute maximum quantity and rate in a single day tops out at ${breakdown}. A single invoice line can never exceed a product's own configured maximum quantity, no matter how much stock accumulates. Lower the max amount per invoice, raise Quantity/Rate maximums, give more products a non-zero Occurrence Percentage, or split into more invoices.`,
+        );
+        return;
+      }
+    }
+
+    // A customer/supplier can only ever receive ONE invoice per day —
+    // generation has no mechanism to place more than one of this same
+    // customer's invoices on the same day. Catch this here, at
+    // configuration time, instead of letting generation silently double
+    // up invoices on a day once invoice_count exceeds the days available.
+    const fromDateForDayCheck = formData.invoiceDateFrom
+      ? new Date(formData.invoiceDateFrom)
+      : undefined;
+    const toDateForDayCheck = formData.invoiceDateTo
+      ? new Date(formData.invoiceDateTo)
+      : undefined;
+    const numberOfDaysForMajorCheck =
+      fromDateForDayCheck && toDateForDayCheck
+        ? Math.ceil(
+            Math.abs(
+              toDateForDayCheck.getTime() - fromDateForDayCheck.getTime(),
+            ) /
+              (1000 * 3600 * 24),
+          ) + 1
+        : undefined;
+    if (
+      numberOfDaysForMajorCheck !== undefined &&
+      invCount > numberOfDaysForMajorCheck
+    ) {
+      setErrorPopup(
+        `This customer requests ${invCount} invoices, but the batch's date range only has ${numberOfDaysForMajorCheck} day(s) — a customer can only receive one invoice per day. Either reduce the invoice count to ${numberOfDaysForMajorCheck} or fewer, raise the Maximum Invoice Amount per invoice so fewer, larger invoices cover the same total, or widen the date range.`,
+      );
+      return;
+    }
+
     const addedObj = { ...tempMajorCustomer };
     console.log(
       "[Major Supplier/Customer] Object passed to Add handler:",
@@ -337,6 +466,140 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
 
   const handleRemoveMajorCustomer = (index: number) => {
     setMajorCustomers(majorCustomers.filter((_, i) => i !== index));
+  };
+
+  const handleAddAnticipatedMajorCustomer = () => {
+    if (!tempAnticipatedMajorCustomer.customer_id) return;
+    const amt = parseFloat(tempAnticipatedMajorCustomer.amount);
+    if (!tempAnticipatedMajorCustomer.amount || isNaN(amt) || amt <= 0) {
+      setErrorPopup("Anticipated amount must be greater than 0");
+      return;
+    }
+    const invCount = parseInt(tempAnticipatedMajorCustomer.invoice_count, 10);
+    if (
+      !tempAnticipatedMajorCustomer.invoice_count ||
+      isNaN(invCount) ||
+      invCount < 1
+    ) {
+      setErrorPopup("Anticipated invoice count must be at least 1");
+      return;
+    }
+    const maxAmt = parseFloat(
+      tempAnticipatedMajorCustomer.max_invoice_amount,
+    );
+    if (
+      !tempAnticipatedMajorCustomer.max_invoice_amount ||
+      isNaN(maxAmt) ||
+      maxAmt <= 0
+    ) {
+      setErrorPopup(
+        "Anticipated maximum amount per invoice is required and must be greater than 0",
+      );
+      return;
+    }
+    if (maxAmt * invCount < amt) {
+      setErrorPopup(
+        "The specified maximum invoice amount is too low to cover the anticipated total across the given invoice count. Please increase the max per invoice or the invoice count.",
+      );
+      return;
+    }
+
+    // Hard mathematical ceiling check — a single Sales invoice line can
+    // NEVER exceed its product's own configured maximum quantity, no
+    // matter how much stock Purchase accumulates for it (confirmed as a
+    // real failure: a customer configured to match this exact category
+    // still failed after 15 auto-retries because only a handful of
+    // products in the category had any non-zero Occurrence Percentage in
+    // this batch, capping the category's true achievable single-day/
+    // single-invoice ceiling far below the anticipated amount). Catching
+    // this here, at config time, surfaces it immediately instead of after
+    // a silent Purchase generation and a much later, confusing Sales
+    // failure.
+    //
+    // A reservation is no longer pinned to one category — unlike a
+    // supplier, the Sales customer this anticipates isn't category-locked
+    // (can buy both, just never both on one bill), so Purchase now decides
+    // each reservation invoice's category day by day, the same way every
+    // other invoice's category gets decided. This only needs to confirm AT
+    // LEAST ONE category can actually support the configured amount, not a
+    // single user-picked one.
+    const capacityByCategory = (["Meat", "Fruits"] as const).map((cat) => {
+      const productsWithOccurrence = selectedProducts.filter((item) => {
+        const productCat = (item.product as any).category_name || "Meat";
+        if (productCat !== cat) return false;
+        const occ = parseFloat(item.occurrencePercentage || "0");
+        return !isNaN(occ) && occ > 0;
+      });
+      const maxDailyCapacity = productsWithOccurrence.reduce((sum, item) => {
+        const q = parseFloat(item.perDayQtyMax) || 0;
+        const r = parseFloat(item.perDayRateMax) || 0;
+        return sum + q * r;
+      }, 0);
+      return {
+        category: cat,
+        hasProducts: productsWithOccurrence.length > 0,
+        maxDailyCapacity,
+      };
+    });
+    const viableCategory = capacityByCategory.find(
+      (c) => c.hasProducts && maxAmt <= c.maxDailyCapacity,
+    );
+    if (!viableCategory) {
+      if (!capacityByCategory.some((c) => c.hasProducts)) {
+        setErrorPopup(
+          "No Meat or Fruits products have a non-zero Occurrence Percentage in this batch — Purchase generation will never buy anything, so no stock can ever be reserved for this demand. Set an Occurrence Percentage above 0% for at least one product first.",
+        );
+      } else {
+        const bestCapacity = Math.max(
+          ...capacityByCategory.map((c) => c.maxDailyCapacity),
+        );
+        setErrorPopup(
+          `The maximum invoice amount (₹${maxAmt.toLocaleString("en-IN")}) can never be reached in either category — even the best category tops out at ₹${Math.round(bestCapacity).toLocaleString("en-IN")} (a single invoice line can never exceed a product's own configured maximum quantity, no matter how much stock Purchase accumulates for it). Lower the max amount per invoice, raise the Quantity/Rate maximums in Product Rules, give more products a non-zero Occurrence Percentage, or split this demand into more invoices.`,
+        );
+      }
+      return;
+    }
+
+    // Hard mathematical ceiling check #2 — a supplier can never receive
+    // two invoices on the same day (real, mandatory business rule), so
+    // reserving enough stock for ONE day can never exceed
+    // `(suppliers available that day) x (this batch's own Maximum
+    // Invoice Amount)` — no matter how much room the product Quantity/
+    // Rate maximums leave. Uses the batch's TOTAL selected supplier count
+    // as a necessary-condition upper bound (the real per-category count
+    // may be smaller, in which case this can still fail later even after
+    // passing here — but it can never wrongly block a config that would
+    // actually have worked).
+    const perDayAverage = amt / invCount;
+    const batchMaxInvoiceAmount = parseFloat(formData.maximumInvoiceAmount) || 0;
+    const supplierDayCeiling = selectedCustomers.length * batchMaxInvoiceAmount;
+    if (
+      selectedCustomers.length > 0 &&
+      batchMaxInvoiceAmount > 0 &&
+      perDayAverage > supplierDayCeiling
+    ) {
+      setErrorPopup(
+        `The anticipated amount needs ~₹${Math.round(perDayAverage).toLocaleString("en-IN")} concentrated on a single day, but this batch only has ${selectedCustomers.length} supplier(s) selected and a supplier can never receive two invoices on the same day — even giving every selected supplier one invoice at this batch's own Maximum Invoice Amount (₹${batchMaxInvoiceAmount.toLocaleString("en-IN")}) tops out at ₹${Math.round(supplierDayCeiling).toLocaleString("en-IN")} for one day. Select more suppliers for this batch, raise the batch's Maximum Invoice Amount, or increase this entry's invoice count so the amount spreads across more days.`,
+      );
+      return;
+    }
+
+    setAnticipatedMajorCustomers([
+      ...anticipatedMajorCustomers,
+      { ...tempAnticipatedMajorCustomer },
+    ]);
+    setTempAnticipatedMajorCustomer({
+      customer_id: "",
+      amount: "",
+      invoice_count: "1",
+      max_invoice_amount: "",
+    });
+  };
+
+  const handleRemoveAnticipatedMajorCustomer = (index: number) => {
+    setAnticipatedMajorCustomers(
+      anticipatedMajorCustomers.filter((_, i) => i !== index),
+    );
   };
 
   const handleToggleCustomer = (customerId: string) => {
@@ -414,6 +677,8 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       financialYearStart: currentYear,
       financialYearEnd: currentYear + 1,
     });
+    setOccurrenceSemantics(null);
+    setCategoryAllocation({ Meat: "70", Fruits: "30" });
   };
 
   const validateInvoiceBatch = async () => {
@@ -634,6 +899,14 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             ? parseFloat(m.max_invoice_amount)
             : undefined,
         })),
+        anticipated_major_customers: anticipatedMajorCustomers.map((m) => ({
+          customer_id: m.customer_id,
+          amount: parseFloat(m.amount) || 0,
+          invoice_count: parseInt(m.invoice_count, 10) || 1,
+          max_invoice_amount: m.max_invoice_amount
+            ? parseFloat(m.max_invoice_amount)
+            : undefined,
+        })),
         batch_type: formData.invoiceType,
         transport_mode: formData.transportMode,
         vehicle_number: formData.vehicleNumber || "",
@@ -675,6 +948,19 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             : null,
         })),
         recurring_products: [],
+        // Sprint 1.7S — NULL (the default, unless the user explicitly
+        // picks CATEGORY below) preserves exactly what every pre-1.7S
+        // batch already has stored: both columns NULL, which
+        // InvoiceEngine/ProductOccurrenceService treat as legacy GLOBAL,
+        // never auto-promoted to CATEGORY.
+        category_allocation:
+          occurrenceSemantics === "CATEGORY"
+            ? {
+                Meat: parseFloat(categoryAllocation.Meat) || 0,
+                Fruits: parseFloat(categoryAllocation.Fruits) || 0,
+              }
+            : null,
+        occurrence_semantics: occurrenceSemantics,
         status: "pending",
         batch_status: "REOPENED",
         created_by: user.id,
@@ -833,12 +1119,30 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       occurrencePercentage: parseFloat(p.occurrencePercentage || "0") || 0,
     }));
 
-    const occValidation = InvoiceEngine.validateOccurrenceDistribution(
+    // Sprint 1.7S: semantics-aware — under CATEGORY, per-category
+    // percentages legitimately sum to 100% WITHIN each category (and can
+    // sum to e.g. 200% across the whole batch), which the old GLOBAL-only
+    // InvoiceEngine.validateOccurrenceDistribution would incorrectly
+    // reject. validateCategoryOccurrenceConfiguration is the single
+    // existing authoritative validator for both cases (delegates straight
+    // to the GLOBAL check when occurrenceSemantics is "GLOBAL" or null) —
+    // reused as-is, no percentage/category math duplicated here.
+    const categoryAllocationForValidation =
+      occurrenceSemantics === "CATEGORY"
+        ? {
+            Meat: parseFloat(categoryAllocation.Meat) || 0,
+            Fruits: parseFloat(categoryAllocation.Fruits) || 0,
+          }
+        : null;
+    const occValidation = validateCategoryOccurrenceConfiguration(
       formattedProductsForVal,
+      categoryAllocationForValidation,
+      occurrenceSemantics,
     );
-    if (!occValidation.isValid) {
+    if (!occValidation.valid) {
       setErrorPopup(
-        occValidation.error || "Invalid Product Occurrence Distribution.",
+        occValidation.errors.join(" ") ||
+          "Invalid Product Occurrence Distribution.",
       );
       return;
     }
@@ -899,6 +1203,19 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     if (totalMajor > totalAmount) {
       setErrorPopup("Major customer allocation exceeds total amount.");
       return;
+    }
+
+    if (batchType === "PURCHASE") {
+      const totalAnticipated = anticipatedMajorCustomers.reduce(
+        (sum, m) => sum + (parseFloat(m.amount) || 0),
+        0,
+      );
+      if (totalMajor + totalAnticipated > totalAmount) {
+        setErrorPopup(
+          "Major Supplier allocation plus Anticipated Major Customer Demand exceeds the batch's total amount.",
+        );
+        return;
+      }
     }
 
     for (let i = 0; i < majorCustomers.length; i++) {
@@ -1082,20 +1399,70 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           (item.product as any).category ||
           undefined,
       }));
-      const fallbackCustomerId =
-        selectedCustomers[0] ||
-        (majorCustomers[0] ? majorCustomers[0].customer_id : null);
+      // Major Customer invoices already carry their own exact,
+      // separately-configured amount/category from generation and must
+      // never be touched by Null mode/Auto Allocate reconciliation below
+      // — computed up front so it can be threaded through every pass.
+      const majorCustomerIds = new Set(
+        majorCustomers.map((m) => m.customer_id).filter(Boolean),
+      );
+      const fallbackCustomerId = selectedCustomers[0] || null;
       const reconciledInvoicesRaw = reconcileInvoicesToTargets(
         JSON.parse(JSON.stringify(adjustedInvoices || [])),
         targetQtyMap,
         productConfigs,
         fallbackCustomerId,
         parseFloat(formData.maximumInvoiceAmount) || undefined,
+        majorCustomerIds,
+        parseFloat(formData.minimumInvoiceAmount) || undefined,
       );
-      const reconciledInvoices = enforceMinimumInvoiceAmount(
+      let reconciledInvoices = enforceMinimumInvoiceAmount(
         reconciledInvoicesRaw,
         parseFloat(formData.minimumInvoiceAmount) || 0,
         parseFloat(formData.maximumInvoiceAmount) || Infinity,
+        majorCustomerIds,
+      );
+
+      // Quantities are now final (Null mode's 100% sell, Auto Allocate's
+      // leftover pacing, or manual per-cell edits — whichever the user
+      // picked). Solve a single price per product, within its configured
+      // Product Rule [rate_min, rate_max], so the batch's total value
+      // actually matches the Total Amount the user entered, instead of
+      // random per-line rates from the dry-run producing an unrelated
+      // total. Major Customer invoices already have their own
+      // separately-configured amount and are excluded, with their total
+      // subtracted out of the target.
+      const majorCustomersTotal = majorCustomers.reduce(
+        (sum, m) => sum + (parseFloat(m.amount) || 0),
+        0,
+      );
+      const regularTargetTotal = Math.max(
+        0,
+        (parseFloat(formData.totalAmount) || 0) - majorCustomersTotal,
+      );
+      const majorInvoices = reconciledInvoices.filter((inv: any) =>
+        majorCustomerIds.has(inv.customer_id),
+      );
+      const regularInvoicesForSolve = reconciledInvoices.filter(
+        (inv: any) => !majorCustomerIds.has(inv.customer_id),
+      );
+      // solveRatesToHitTotal can open brand-new invoices (never sheds sold
+      // quantity — Null mode/Auto Allocate already decided exactly how
+      // much gets sold) — its return value is the source of truth, not
+      // the array reference passed in.
+      const solvedRegularInvoices = solveRatesToHitTotal(
+        regularInvoicesForSolve,
+        productConfigs,
+        regularTargetTotal,
+        parseFloat(formData.maximumInvoiceAmount) || undefined,
+        fallbackCustomerId,
+      );
+      reconciledInvoices = [...majorInvoices, ...solvedRegularInvoices];
+      reconciledInvoices = enforceMinimumInvoiceAmount(
+        reconciledInvoices,
+        parseFloat(formData.minimumInvoiceAmount) || 0,
+        parseFloat(formData.maximumInvoiceAmount) || Infinity,
+        majorCustomerIds,
       );
 
       console.log("reconciledInvoices length:", reconciledInvoices?.length);
@@ -1168,11 +1535,32 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
             perDayQtyMax: item.perDayQtyMax,
             perDayRateMin: item.perDayRateMin,
             perDayRateMax: item.perDayRateMax,
+            // Sprint 1.7S — this final-save payload previously dropped
+            // occurrencePercentage entirely (unlike the Purchase payload
+            // and Sales' own dry-run payload, both of which already carry
+            // it), which meant CATEGORY's own per-category occurrence
+            // check (validateCategoryOccurrenceConfiguration ->
+            // validateOccurrenceConfiguration on each category's product
+            // subset) could never be satisfied for a Sales batch. Wired
+            // through here to match Purchase exactly (item 6).
+            occurrencePercentage: item.occurrencePercentage
+              ? parseFloat(item.occurrencePercentage)
+              : null,
           })),
           recurringProducts: [],
           stockSourceBatchId: formData.stockSourceBatchId,
           userId: user.id,
           invoicesOverride: reconciledInvoices,
+          // Sprint 1.7S — same fields, same shape as the Purchase path
+          // (Sales and Purchase share this configuration).
+          occurrenceSemantics,
+          categoryAllocation:
+            occurrenceSemantics === "CATEGORY"
+              ? {
+                  Meat: parseFloat(categoryAllocation.Meat) || 0,
+                  Fruits: parseFloat(categoryAllocation.Fruits) || 0,
+                }
+              : null,
         }),
       });
 
@@ -1193,7 +1581,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       }
 
       setIsReviewOpen(false);
-      setErrorPopup("Sales batch and invoices created successfully!");
+      setErrorPopup(
+        result?.message || "Sales batch and invoices created successfully!",
+      );
       resetForm();
       router.push("/invoice-batches");
     } catch (err: any) {
@@ -1214,6 +1604,14 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     selectedIssuingCompany,
     selectedCustomers,
     majorCustomers,
+    anticipatedMajorCustomers,
+    anticipatedCustomers,
+    anticipatedMajorCustomerOpen,
+    setAnticipatedMajorCustomerOpen,
+    tempAnticipatedMajorCustomer,
+    setTempAnticipatedMajorCustomer,
+    handleAddAnticipatedMajorCustomer,
+    handleRemoveAnticipatedMajorCustomer,
     customerOpen,
     setCustomerOpen,
     majorCustomerOpen,
@@ -1254,5 +1652,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     categorySplits,
     setCategorySplits,
     sequencePreview,
+    occurrenceSemantics,
+    setOccurrenceSemantics,
+    categoryAllocation,
+    setCategoryAllocation,
   };
 }

@@ -100,21 +100,17 @@ export default function InvoiceBatches() {
     try {
       const supabase = createClient();
 
-      // Fetch batch metadata before deletion for sequence rollback
-      const { data: targetBatch } = await supabase
-        .from("invoice_batch")
-        .select("issuing_company_id, financial_year, batch_type")
-        .eq("id", id)
-        .maybeSingle();
-
-      // Delete associated invoices first (to prevent orphaned records)
-      await supabase.from("invoice").delete().eq("invoice_batch_id", id);
-
-      // Delete the batch itself
-      const { error } = await supabase
-        .from("invoice_batch")
-        .delete()
-        .eq("id", id);
+      // Atomic RPC: deletes the batch's invoices and the batch row, and --
+      // if this batch owned the trailing end of the invoice number
+      // sequence -- rolls the sequence counter back so the next generated
+      // batch doesn't continue from numbers that no longer exist. The old
+      // two-step client-side delete here never did this, so the next
+      // invoice number stayed stuck at the old high-water mark even after
+      // deleting the most recent batch.
+      const { error } = await supabase.rpc(
+        "delete_invoice_batch_and_reclaim_sequence",
+        { p_batch_id: id },
+      );
 
       if (error) throw error;
 

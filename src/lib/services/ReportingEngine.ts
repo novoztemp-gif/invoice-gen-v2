@@ -86,7 +86,8 @@ export class ReportingEngine {
           )
         `)
         .eq("invoice_batch.batch_type", "PURCHASE")
-        .order("invoice_date", { ascending: false });
+        .order("invoice_date", { ascending: false })
+        .order("id", { ascending: true });
 
       if (filters.financialYear && filters.financialYear !== "ALL") {
         invQuery = invQuery.eq(
@@ -127,13 +128,30 @@ export class ReportingEngine {
       };
     });
 
+    // Hotfix — this header total used to come from metrics.totalPurchaseValue
+    // (summed from invoice_batch.total_amount, a batch-level snapshot),
+    // while registerRows below it is built from the individual invoices'
+    // own total_amount. If a batch's stored total ever drifts from the
+    // sum of its own invoices (e.g. after an edit that doesn't perfectly
+    // re-sync it), the header total silently disagreed with the very
+    // rows displayed underneath it. Summing the displayed rows directly
+    // guarantees the header always matches what's actually shown.
+    const totalPurchaseValue = registerRows.reduce(
+      (sum, r) => sum + r.total_amount,
+      0,
+    );
+
     return {
       metrics,
       registerRows,
       summary: {
         totalPurchasesCount: registerRows.length,
-        totalPurchaseValue: metrics.totalPurchaseValue,
-        avgInvoiceValue: metrics.avgInvoiceValue,
+        totalPurchaseValue,
+        avgInvoiceValue:
+          registerRows.length > 0
+            ? Math.round((totalPurchaseValue / registerRows.length) * 100) /
+              100
+            : 0,
         monthlyPurchases: metrics.monthlyPurchases,
       },
     };
@@ -160,8 +178,8 @@ export class ReportingEngine {
             financial_year
           )
         `)
-        .neq("invoice_batch.batch_type", "PURCHASE")
-        .order("invoice_date", { ascending: false });
+        .order("invoice_date", { ascending: false })
+        .order("id", { ascending: true });
 
       if (filters.financialYear && filters.financialYear !== "ALL") {
         invQuery = invQuery.eq(
@@ -172,13 +190,25 @@ export class ReportingEngine {
 
       return invQuery.range(from, to);
     });
-    const invoices = (rawInvoices || []).filter((inv) =>
-      this.isWithinDateRange(
-        inv.invoice_date,
-        filters.startDate,
-        filters.endDate,
-      ),
-    );
+    // Hotfix — was `.neq("invoice_batch.batch_type", "PURCHASE")` at the
+    // database level. SQL's <> excludes NULL rows (NULL <> 'PURCHASE' is
+    // NULL, not TRUE) — this codebase deliberately treats a blank/unset
+    // batch_type as a Sales batch everywhere else (getExecutiveMetrics,
+    // getSalesMetrics, getCustomerReports all explicitly check
+    // `!batch_type` too), so the database-level filter was silently
+    // dropping exactly those legacy/default-typed batches from the Sales
+    // Register while every other dashboard counted them. Filtering in
+    // memory afterward, like getCustomerReports already correctly does,
+    // fixes the NULL-handling mismatch.
+    const invoices = (rawInvoices || [])
+      .filter((inv) => inv.invoice_batch?.batch_type !== "PURCHASE")
+      .filter((inv) =>
+        this.isWithinDateRange(
+          inv.invoice_date,
+          filters.startDate,
+          filters.endDate,
+        ),
+      );
 
     const registerRows = invoices.map((inv) => ({
       id: inv.id,
@@ -233,23 +263,47 @@ export class ReportingEngine {
   ) {
     const metrics = await AnalyticsEngine.getExpenseMetrics(supabase, filters);
 
-    let expQuery = supabase
+    // Hotfix — expense_daily_ledger has no `financial_year` column at all
+    // (confirmed against the migration that creates this table — the
+    // real year signal lives on the parent expense_batch row instead).
+    // `.eq("financial_year", ...)` therefore made PostgREST reject the
+    // whole query, and since the error was never checked, `rawExpenses`
+    // silently became empty — every time a year was selected, this
+    // report's own transaction table went blank while the summary cards
+    // above it (built from the now-correctly-scoped getExpenseMetrics)
+    // kept showing real, non-zero totals. Scoping via expense_batch_id
+    // against the same filtered batch set getExpenseMetrics itself now
+    // uses fixes it at the root instead of filtering on a column that
+    // was never there.
+    const { data: expBatchesForFilter, error: expBatchesError } =
+      await supabase.from("expense_batch").select("id, financial_year");
+    if (expBatchesError) throw expBatchesError;
+    let eligibleBatchIds: Set<string>;
+    if (filters.financialYear && filters.financialYear !== "ALL") {
+      eligibleBatchIds = new Set(
+        (expBatchesForFilter || [])
+          .filter((b) => b.financial_year === filters.financialYear)
+          .map((b) => b.id),
+      );
+    } else {
+      eligibleBatchIds = new Set((expBatchesForFilter || []).map((b) => b.id));
+    }
+
+    const { data: rawExpenses, error: expensesError } = await supabase
       .from("expense_daily_ledger")
       .select("*")
       .order("expense_date", { ascending: false });
+    if (expensesError) throw expensesError;
 
-    if (filters.financialYear && filters.financialYear !== "ALL") {
-      expQuery = expQuery.eq("financial_year", filters.financialYear);
-    }
-
-    const { data: rawExpenses } = await expQuery;
-    const expenses = (rawExpenses || []).filter((exp) =>
-      this.isWithinDateRange(
-        exp.expense_date,
-        filters.startDate,
-        filters.endDate,
-      ),
-    );
+    const expenses = (rawExpenses || [])
+      .filter((exp) => eligibleBatchIds.has(exp.expense_batch_id))
+      .filter((exp) =>
+        this.isWithinDateRange(
+          exp.expense_date,
+          filters.startDate,
+          filters.endDate,
+        ),
+      );
 
     return {
       metrics,
@@ -299,10 +353,13 @@ export class ReportingEngine {
     supabase: SupabaseClient,
     filters: ReportFilter = {},
   ) {
-    const { data: customers } = await supabase
-      .from("receiving_companies")
-      .select("*")
-      .order("company_name", { ascending: true });
+    const customers = await fetchAllQueryRows((from, to) =>
+      supabase
+        .from("receiving_companies")
+        .select("*")
+        .order("id", { ascending: true })
+        .range(from, to),
+    );
 
     const invoices = await fetchAllQueryRows((from, to) =>
       supabase
@@ -312,6 +369,7 @@ export class ReportingEngine {
           invoice_batch (batch_number, batch_type, financial_year)
         `)
         .order("invoice_date", { ascending: false })
+        .order("id", { ascending: true })
         .range(from, to),
     );
 
@@ -364,10 +422,16 @@ export class ReportingEngine {
       filters,
     );
 
-    const { data: products } = await supabase
+    // Hotfix — the real column is product_name, not name (confirmed
+    // against the schema). Ordering by a nonexistent column made
+    // PostgREST reject the query outright, and with the error unchecked,
+    // `products` silently became an empty array every single time —
+    // this report's product list never actually worked.
+    const { data: products, error: productsError } = await supabase
       .from("products")
       .select("*")
-      .order("name", { ascending: true });
+      .order("product_name", { ascending: true });
+    if (productsError) throw productsError;
 
     return {
       products: products || [],
@@ -400,6 +464,7 @@ export class ReportingEngine {
           )
         `)
         .order("created_at", { ascending: false })
+        .order("id", { ascending: true })
         .range(from, to),
     );
 
@@ -467,10 +532,11 @@ export class ReportingEngine {
     }
 
     // Fetch Expense Batches
-    const { data: expBatches } = await supabase
+    const { data: expBatches, error: expBatchesListError } = await supabase
       .from("expense_batch")
       .select("*")
       .order("created_at", { ascending: false });
+    if (expBatchesListError) throw expBatchesListError;
 
     if (expBatches) {
       for (const eb of expBatches) {

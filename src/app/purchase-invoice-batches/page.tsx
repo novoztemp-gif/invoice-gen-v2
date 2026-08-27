@@ -16,12 +16,18 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
+import {
+  isBatchDeletable,
+  parseSequenceNumber,
+} from "@/lib/utils/batchSequenceDeletionGuard";
 
 type InvoiceBatch = {
   id: string;
   issuing_company_id: string;
   receiving_company_id: string;
   batch_type: string;
+  financial_year: string;
   transport_mode: string;
   vehicle_number: string;
   date_of_supply: string;
@@ -53,6 +59,9 @@ export default function PurchaseInvoiceBatches() {
   const router = useRouter();
   const [batches, setBatches] = useState<InvoiceBatch[]>([]);
   const [loading, setLoading] = useState(true);
+  const [maxSeqByBatchId, setMaxSeqByBatchId] = useState<
+    Map<string, number>
+  >(new Map());
 
   useEffect(() => {
     const fetchBatches = async () => {
@@ -78,7 +87,40 @@ export default function PurchaseInvoiceBatches() {
           return;
         }
 
-        setBatches(data || []);
+        const loadedBatches: InvoiceBatch[] = data || [];
+        setBatches(loadedBatches);
+
+        // Deletion is only allowed newest-first per (company, year, type) —
+        // see handleDeleteBatch's comment for why. Determining "newest"
+        // means knowing each batch's own highest invoice sequence number,
+        // not just created_at (the reclaim RPC itself keys off the real
+        // invoice numbers, so the UI restriction has to match that exactly
+        // to never block a genuinely-safe delete or allow an unsafe one).
+        // Chunked by batch id AND paginated per chunk — a single batch
+        // alone can carry thousands of invoices, well past PostgREST's
+        // default 1000-row cap.
+        const BATCH_ID_CHUNK_SIZE = 150;
+        const batchIds = loadedBatches.map((b) => b.id);
+        const seqMap = new Map<string, number>();
+        for (let i = 0; i < batchIds.length; i += BATCH_ID_CHUNK_SIZE) {
+          const chunk = batchIds.slice(i, i + BATCH_ID_CHUNK_SIZE);
+          const rows = await fetchAllQueryRows<{
+            invoice_batch_id: string;
+            invoice_number: string;
+          }>((from, to) =>
+            supabase
+              .from("invoice")
+              .select("invoice_batch_id, invoice_number")
+              .in("invoice_batch_id", chunk)
+              .range(from, to),
+          );
+          for (const row of rows) {
+            const seq = parseSequenceNumber(row.invoice_number);
+            const current = seqMap.get(row.invoice_batch_id) ?? -1;
+            if (seq > current) seqMap.set(row.invoice_batch_id, seq);
+          }
+        }
+        setMaxSeqByBatchId(seqMap);
       } catch (error) {
         console.error("Error:", error);
         alert("An error occurred while loading purchase batches.");
@@ -91,6 +133,27 @@ export default function PurchaseInvoiceBatches() {
   }, []);
 
   const handleDeleteBatch = async (id: string) => {
+    // The reclaim RPC below only rolls the sequence counter back when the
+    // batch being deleted currently holds the HIGHEST invoice numbers for
+    // its own company+year+type group — deleting it is what makes that
+    // check pass every single time, instead of leaving it up to whatever
+    // order the user happens to click delete in. Deleting out of order
+    // (an older batch while a newer one still exists) is still perfectly
+    // safe from a data-corruption standpoint — the RPC just correctly
+    // declines to roll back — but that decision is permanent: once
+    // declined, that number range is never reclaimed later, even after
+    // the newer batch is also eventually deleted. This button is disabled
+    // in that case specifically so the range never gets stranded in the
+    // first place. The check is re-verified here too, not just via the
+    // disabled button, in case the on-screen list is stale.
+    const batch = batches.find((b) => b.id === id);
+    if (batch && !isBatchDeletable(batch, batches, maxSeqByBatchId)) {
+      alert(
+        "Delete newer purchase batches for this company and financial year first — deleting out of order permanently strands their invoice numbers instead of freeing them for reuse.",
+      );
+      return;
+    }
+
     if (
       !window.confirm(
         "Are you sure you want to delete this purchase invoice batch? This action cannot be undone.",
@@ -101,25 +164,19 @@ export default function PurchaseInvoiceBatches() {
     try {
       const supabase = createClient();
 
-      // Fetch batch metadata before deletion for sequence rollback
-      const { data: targetBatch } = await supabase
-        .from("invoice_batch")
-        .select("issuing_company_id, financial_year, batch_type")
-        .eq("id", id)
-        .maybeSingle();
-
-      // Delete associated invoices first
-      await supabase.from("invoice").delete().eq("invoice_batch_id", id);
-
-      // Delete the batch itself
-      const { error } = await supabase
-        .from("invoice_batch")
-        .delete()
-        .eq("id", id);
+      // Atomic RPC: deletes the batch's invoices and the batch row, and --
+      // if this batch owned the trailing end of the invoice number
+      // sequence -- rolls the sequence counter back so the next generated
+      // batch doesn't continue from numbers that no longer exist. The old
+      // two-step client-side delete here never did this, so the next
+      // invoice number stayed stuck at the old high-water mark even after
+      // deleting the most recent batch.
+      const { error } = await supabase.rpc(
+        "delete_invoice_batch_and_reclaim_sequence",
+        { p_batch_id: id },
+      );
 
       if (error) throw error;
-
-
 
       // Update the UI
       setBatches(batches.filter((b) => b.id !== id));
@@ -260,16 +317,34 @@ export default function PurchaseInvoiceBatches() {
                         {format(new Date(batch.created_at), "dd/MM/yyyy HH:mm")}
                       </TableCell>
                       <TableCell className="text-right flex items-center justify-end gap-2">
-                        <button
-                          className="p-2 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-md transition-colors"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteBatch(batch.id);
-                          }}
-                          title="Delete Batch"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
+                        {(() => {
+                          const deletable = isBatchDeletable(
+                            batch,
+                            batches,
+                            maxSeqByBatchId,
+                          );
+                          return (
+                            <button
+                              className={
+                                deletable
+                                  ? "p-2 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-md transition-colors"
+                                  : "p-2 text-slate-300 cursor-not-allowed rounded-md"
+                              }
+                              disabled={!deletable}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteBatch(batch.id);
+                              }}
+                              title={
+                                deletable
+                                  ? "Delete Batch"
+                                  : "Delete newer batches for this company & financial year first"
+                              }
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          );
+                        })()}
                         <ArrowRight className="h-4 w-4 text-slate-400" />
                       </TableCell>
                     </TableRow>

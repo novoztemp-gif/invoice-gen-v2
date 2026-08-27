@@ -6,6 +6,7 @@ import { CandidateGenerator } from "./CandidateGenerator";
 import {
   BALANCE_LIMITS,
   FinalValidationResult,
+  isNewPurchaseAmountRangeViolation,
   MONEY_TOLERANCE,
   normaliseCategory,
   ProductConstraint,
@@ -28,6 +29,8 @@ export class FinalValidator {
     editedInvoiceId: string,
     majorCustomerIds: Set<string> = new Set(),
     productConservedInvoiceIds: Set<string> = new Set(),
+    thresholdMin: number | null = null,
+    thresholdMax: number | null = null,
   ): FinalValidationResult {
     const errors: string[] = [];
 
@@ -65,6 +68,8 @@ export class FinalValidator {
         editedInvoiceId,
         majorCustomerIds,
         productConservedInvoiceIds,
+        thresholdMin,
+        thresholdMax,
       );
       calculatedBatchTotal = roundMoney(
         calculatedBatchTotal + plannedInv.total_amount,
@@ -101,6 +106,8 @@ export class FinalValidator {
     editedInvoiceId: string,
     majorCustomerIds: Set<string>,
     productConservedInvoiceIds: Set<string>,
+    thresholdMin: number | null = null,
+    thresholdMax: number | null = null,
   ) {
     const invNumber = plannedInvoice.invoice_number || plannedInvoice.id;
     const isEditedInvoice = plannedInvoice.id === editedInvoiceId;
@@ -143,9 +150,16 @@ export class FinalValidator {
       errors.push(`Product count is immutable for invoice ${invNumber}.`);
     }
 
+    // Grandfathered: an invoice that already had more than maxInvoiceLines
+    // before this edit (e.g. from a generation-time merge bug) must stay
+    // editable — this cap exists to bound the balancing solver's
+    // combinatorial search, not to retroactively invalidate pre-existing
+    // data. Only block the count from growing further past whatever it
+    // already was.
     if (
       !isMajorCustomerInvoice &&
-      plannedInvoice.products.length > BALANCE_LIMITS.maxInvoiceLines
+      plannedInvoice.products.length > BALANCE_LIMITS.maxInvoiceLines &&
+      plannedInvoice.products.length > originalInvoice.products.length
     ) {
       errors.push(
         `Invoice ${invNumber} contains ${plannedInvoice.products.length} products, exceeding maximum allowed limit of ${BALANCE_LIMITS.maxInvoiceLines}.`,
@@ -159,6 +173,30 @@ export class FinalValidator {
     ) {
       errors.push(
         `Invoice total must be a positive amount for invoice ${invNumber}.`,
+      );
+    }
+
+    // 3b. Invoice amount range (Sprint 1.5A) — grandfathered the same way
+    // rate bounds/line count/category are elsewhere in this function: an
+    // edit or rebalance can never PUSH an invoice further outside
+    // [minimum_invoice_amount, maximum_invoice_amount] than it already
+    // was, but a pre-existing violation from before this check existed
+    // isn't retroactively blocked (that would permanently lock every
+    // future edit to a batch containing one old bad invoice).
+    const rangeResult = isNewPurchaseAmountRangeViolation(
+      plannedInvoice.total_amount,
+      originalInvoice?.total_amount,
+      thresholdMin,
+      thresholdMax,
+    );
+    if (rangeResult.violates) {
+      const { check } = rangeResult;
+      const rangeDesc =
+        check.reason === "BELOW_MIN"
+          ? `below the minimum invoice amount of ₹${(check.min ?? 0).toFixed(2)}`
+          : `above the maximum invoice amount of ₹${(check.max ?? 0).toFixed(2)}`;
+      errors.push(
+        `Invoice Amount Range Violation: Invoice ${invNumber} total (₹${check.total.toFixed(2)}) is ${rangeDesc}.`,
       );
     }
 

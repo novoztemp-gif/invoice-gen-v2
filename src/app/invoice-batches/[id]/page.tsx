@@ -886,7 +886,17 @@ export default function BatchDetail() {
 
                           {isExpanded && (
                             <div className="p-4 space-y-4">
-                              {summary.invoices.map((invoice) => (
+                              {summary.invoices.map((invoice) => {
+                                const invoicePartyIdForEdit =
+                                  (invoice as any).customer_id ||
+                                  invoice.products?.[0]?.customer_id;
+                                const isMajorCustomerInvoiceForEdit = !!(
+                                  invoicePartyIdForEdit &&
+                                  batch?.major_customers?.some(
+                                    (m) => m.customer_id === invoicePartyIdForEdit,
+                                  )
+                                );
+                                return (
                                 <div
                                   key={invoice.id}
                                   className="border-l-4 border-slate-200 pl-4"
@@ -1026,25 +1036,37 @@ export default function BatchDetail() {
                                       </Button>
 
                                       {/* 2. Edit */}
-                                      {batch.batch_status !== "FINALIZED" && (
-                                        <Button
-                                          variant="outline"
-                                          size="sm"
-                                          className="flex-1 min-w-[90px] text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
-                                          onClick={() => {
-                                            setPreviewIndex(
-                                              invoices.findIndex(
-                                                (inv) => inv.id === invoice.id,
-                                              ),
-                                            );
-                                            setIsEditingMode(true);
-                                            setIsPreviewChallan(false);
-                                          }}
-                                        >
-                                          <Edit3 className="h-3.5 w-3.5 mr-1.5" />
-                                          Edit
-                                        </Button>
-                                      )}
+                                      {batch.batch_status !== "FINALIZED" &&
+                                        (isMajorCustomerInvoiceForEdit ? (
+                                          <Button
+                                            variant="outline"
+                                            size="sm"
+                                            disabled
+                                            title="This invoice belongs to a major customer and cannot be edited."
+                                            className="flex-1 min-w-[90px] text-slate-400 border-slate-200"
+                                          >
+                                            <Edit3 className="h-3.5 w-3.5 mr-1.5" />
+                                            Edit
+                                          </Button>
+                                        ) : (
+                                          <Button
+                                            variant="outline"
+                                            size="sm"
+                                            className="flex-1 min-w-[90px] text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 border-indigo-200"
+                                            onClick={() => {
+                                              setPreviewIndex(
+                                                invoices.findIndex(
+                                                  (inv) => inv.id === invoice.id,
+                                                ),
+                                              );
+                                              setIsEditingMode(true);
+                                              setIsPreviewChallan(false);
+                                            }}
+                                          >
+                                            <Edit3 className="h-3.5 w-3.5 mr-1.5" />
+                                            Edit
+                                          </Button>
+                                        ))}
 
                                       {/* 3. Download Invoice */}
                                       <Button
@@ -1146,7 +1168,8 @@ export default function BatchDetail() {
                                     </TableBody>
                                   </Table>
                                 </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           )}
                         </div>

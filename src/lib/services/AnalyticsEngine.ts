@@ -182,9 +182,9 @@ export class AnalyticsEngine {
    */
   static async getFilterOptions(supabase: SupabaseClient) {
     const [
-      { data: batches },
-      { data: products },
-      { data: receivingCompanies },
+      { data: batches, error: batchesError },
+      { data: products, error: productsError },
+      { data: receivingCompanies, error: companiesError },
     ] = await Promise.all([
       supabase
         .from("invoice_batch")
@@ -199,6 +199,9 @@ export class AnalyticsEngine {
         .select("id, company_name")
         .order("company_name", { ascending: true }),
     ]);
+    if (batchesError) throw batchesError;
+    if (productsError) throw productsError;
+    if (companiesError) throw companiesError;
 
     const financialYears = Array.from(
       new Set((batches || []).map((b) => b.financial_year).filter(Boolean)),
@@ -228,24 +231,38 @@ export class AnalyticsEngine {
     filter: AnalyticsFilter = {},
   ): Promise<ExecutiveMetrics> {
     const [
-      { data: batches },
+      { data: batches, error: batchesError },
       invoices,
       ledgerRows,
-      { data: expenseBatches },
-      { data: expenseLedger },
-      { data: products },
+      { data: expenseBatches, error: expenseBatchesError },
+      { data: expenseLedger, error: expenseLedgerError },
+      { data: products, error: productsError },
     ] = await Promise.all([
       supabase.from("invoice_batch").select("*"),
       fetchAllQueryRows((from, to) =>
-        supabase.from("invoice").select("*").range(from, to),
+        supabase
+          .from("invoice")
+          .select("*")
+          .order("id", { ascending: true })
+          .range(from, to),
       ),
       fetchAllQueryRows((from, to) =>
-        supabase.from("daily_stock_ledger").select("*").range(from, to),
+        supabase
+          .from("daily_stock_ledger")
+          .select("*")
+          .order("purchase_batch_id", { ascending: true })
+          .order("ledger_date", { ascending: true })
+          .order("product_id", { ascending: true })
+          .range(from, to),
       ),
       supabase.from("expense_batch").select("*"),
       supabase.from("expense_daily_ledger").select("*"),
       supabase.from("products").select("*"),
     ]);
+    if (batchesError) throw batchesError;
+    if (expenseBatchesError) throw expenseBatchesError;
+    if (expenseLedgerError) throw expenseLedgerError;
+    if (productsError) throw productsError;
 
     // Apply basic filtering to batches
     let salesBatches = (batches || []).filter(
@@ -306,7 +323,19 @@ export class AnalyticsEngine {
       0,
     );
 
-    let filteredExpLedger = expenseLedger || [];
+    // Hotfix — expBatches above is correctly scoped by financial year, but
+    // the ledger rows that actually feed every expense total here were
+    // never scoped to those same batches, only to date range. A year
+    // filter therefore left every expense-derived number (totalExpenseValue,
+    // netProfit, expenseTrend) computed from ALL-TIME expense data
+    // regardless of which year was selected. Scoping the ledger to
+    // expBatches' own ids first — the same pattern already used for
+    // sales/purchase invoices via salesBatchIds/purchaseBatchIds — fixes
+    // it at the root instead of just the date-range half of the filter.
+    const expBatchIds = new Set(expBatches.map((b) => b.id));
+    let filteredExpLedger = (expenseLedger || []).filter((e) =>
+      expBatchIds.has(e.expense_batch_id),
+    );
     if (filter.startDate) {
       filteredExpLedger = filteredExpLedger.filter(
         (e) => e.expense_date >= filter.startDate!,
@@ -480,7 +509,7 @@ export class AnalyticsEngine {
       expenseTrend,
       recentPurchaseBatches: purchaseBatches.slice(0, 5),
       recentSalesBatches: salesBatches.slice(0, 5),
-      recentExpenses: (expenseBatches || []).slice(0, 5),
+      recentExpenses: expBatches.slice(0, 5),
       lowStockProducts,
       outOfStockProducts,
       purchaseBatchesAwaitingSales: purchaseBatchesAwaitingSales.slice(0, 5),
@@ -498,14 +527,25 @@ export class AnalyticsEngine {
     supabase: SupabaseClient,
     filter: AnalyticsFilter = {},
   ): Promise<InventoryMetrics> {
-    const [{ data: products }, ledgerRows, { data: batches }] =
-      await Promise.all([
-        supabase.from("products").select("*"),
-        fetchAllQueryRows((from, to) =>
-          supabase.from("daily_stock_ledger").select("*").range(from, to),
-        ),
-        supabase.from("invoice_batch").select("*").eq("batch_type", "PURCHASE"),
-      ]);
+    const [
+      { data: products, error: productsError },
+      ledgerRows,
+      { data: batches, error: batchesError },
+    ] = await Promise.all([
+      supabase.from("products").select("*"),
+      fetchAllQueryRows((from, to) =>
+        supabase
+          .from("daily_stock_ledger")
+          .select("*")
+          .order("purchase_batch_id", { ascending: true })
+          .order("ledger_date", { ascending: true })
+          .order("product_id", { ascending: true })
+          .range(from, to),
+      ),
+      supabase.from("invoice_batch").select("*").eq("batch_type", "PURCHASE"),
+    ]);
+    if (productsError) throw productsError;
+    if (batchesError) throw batchesError;
 
     const allProducts = products || [];
     const allLedger = ledgerRows || [];
@@ -701,15 +741,18 @@ export class AnalyticsEngine {
     supabase: SupabaseClient,
     filter: AnalyticsFilter = {},
   ): Promise<PurchaseMetrics> {
-    const [{ data: batches }, invoices, { data: products }] = await Promise.all(
-      [
+    const [{ data: batches, error: batchesError }, invoices] =
+      await Promise.all([
         supabase.from("invoice_batch").select("*").eq("batch_type", "PURCHASE"),
         fetchAllQueryRows((from, to) =>
-          supabase.from("invoice").select("*").range(from, to),
+          supabase
+            .from("invoice")
+            .select("*")
+            .order("id", { ascending: true })
+            .range(from, to),
         ),
-        supabase.from("products").select("*"),
-      ],
-    );
+      ]);
+    if (batchesError) throw batchesError;
 
     let pBatches = batches || [];
     if (filter.financialYear && filter.financialYear !== "All") {
@@ -804,14 +847,28 @@ export class AnalyticsEngine {
     supabase: SupabaseClient,
     filter: AnalyticsFilter = {},
   ): Promise<SalesMetrics> {
-    const [{ data: batches }, invoices, { data: receivingCompanies }] =
+    const [{ data: batches, error: batchesError }, invoices, receivingCompanies] =
       await Promise.all([
         supabase.from("invoice_batch").select("*"),
         fetchAllQueryRows((from, to) =>
-          supabase.from("invoice").select("*").range(from, to),
+          supabase
+            .from("invoice")
+            .select("*")
+            .order("id", { ascending: true })
+            .range(from, to),
         ),
-        supabase.from("receiving_companies").select("id, company_name"),
+        // Paginated — an unbounded single fetch silently drops any
+        // customer past Supabase's default 1000-row page cap once the
+        // customer master list grows past that.
+        fetchAllQueryRows((from, to) =>
+          supabase
+            .from("receiving_companies")
+            .select("id, company_name")
+            .order("id", { ascending: true })
+            .range(from, to),
+        ),
       ]);
+    if (batchesError) throw batchesError;
 
     let sBatches = (batches || []).filter(
       (b) => b.batch_type === "SALES" || !b.batch_type,
@@ -929,19 +986,36 @@ export class AnalyticsEngine {
     supabase: SupabaseClient,
     filter: AnalyticsFilter = {},
   ): Promise<ExpenseMetrics> {
-    const [{ data: expBatches }, { data: expLedger }] = await Promise.all([
+    const [
+      { data: expBatches, error: expBatchesError },
+      { data: expLedger, error: expLedgerError },
+    ] = await Promise.all([
       supabase.from("expense_batch").select("*"),
       supabase.from("expense_daily_ledger").select("*"),
     ]);
+    if (expBatchesError) throw expBatchesError;
+    if (expLedgerError) throw expLedgerError;
 
     let batches = expBatches || [];
-    let ledger = expLedger || [];
 
     if (filter.financialYear && filter.financialYear !== "All") {
       batches = batches.filter(
         (b) => b.financial_year === filter.financialYear,
       );
     }
+
+    // Hotfix — the financial-year filter above only ever scoped `batches`;
+    // every actual total below was computed from the raw, unfiltered
+    // ledger. Selecting a year on the Expense Dashboard therefore had zero
+    // effect on Total Expenses / the monthly trend / category breakdown,
+    // while Average Expense Per Batch divided that unfiltered total by
+    // the (correctly) filtered batch count — an inflated average on top
+    // of an already-wrong numerator. Scoping the ledger to the filtered
+    // batches' own ids first fixes both at once.
+    const batchIds = new Set(batches.map((b) => b.id));
+    const ledger = (expLedger || []).filter((e) =>
+      batchIds.has(e.expense_batch_id),
+    );
 
     const totalExpenses = ledger.reduce(
       (sum, e) => sum + Number(e.amount || 0),
@@ -954,7 +1028,12 @@ export class AnalyticsEngine {
     const monthlyMap = new Map<string, number>();
 
     for (const e of ledger) {
-      const cat = e.category || "General Expense";
+      // Hotfix — expense_daily_ledger's real column is expense_category,
+      // not category (confirmed against the migration that creates this
+      // table). e.category was always undefined, so every expense fell
+      // into "General Expense" regardless of its real category — the
+      // category breakdown never actually worked.
+      const cat = e.expense_category || "General Expense";
       categoryMap.set(cat, (categoryMap.get(cat) || 0) + Number(e.amount || 0));
 
       if (e.expense_date) {
@@ -1000,33 +1079,111 @@ export class AnalyticsEngine {
     supabase: SupabaseClient,
     filter: AnalyticsFilter = {},
   ): Promise<ProfitLossMetrics> {
-    const [{ data: batches }, invoices, { data: expLedger }] =
-      await Promise.all([
-        supabase.from("invoice_batch").select("*"),
-        fetchAllQueryRows((from, to) =>
-          supabase.from("invoice").select("*").range(from, to),
-        ),
-        supabase.from("expense_daily_ledger").select("*"),
-      ]);
+    const [
+      { data: batches, error: batchesError },
+      invoices,
+      { data: expBatchesRaw, error: expBatchesError },
+      { data: expLedger, error: expLedgerError },
+    ] = await Promise.all([
+      supabase.from("invoice_batch").select("*"),
+      fetchAllQueryRows((from, to) =>
+        supabase
+          .from("invoice")
+          .select("*")
+          .order("id", { ascending: true })
+          .range(from, to),
+      ),
+      supabase.from("expense_batch").select("id, financial_year"),
+      supabase.from("expense_daily_ledger").select("*"),
+    ]);
+    if (batchesError) throw batchesError;
+    if (expBatchesError) throw expBatchesError;
+    if (expLedgerError) throw expLedgerError;
 
-    const salesBatches = (batches || []).filter(
+    // Hotfix — this function used to ignore `filter` entirely: every field
+    // (financialYear, startDate, endDate, purchaseBatchId, salesBatchId)
+    // was accepted but never read, so the P&L dashboard's own filter bar
+    // had zero effect on the numbers it displayed. Mirrors the same
+    // filtering already correct in getExecutiveMetrics.
+    let salesBatches = (batches || []).filter(
       (b) => b.batch_type === "SALES" || !b.batch_type,
     );
-    const purchaseBatches = (batches || []).filter(
+    let purchaseBatches = (batches || []).filter(
       (b) => b.batch_type === "PURCHASE",
     );
+    let expBatches = expBatchesRaw || [];
+
+    if (filter.financialYear && filter.financialYear !== "All") {
+      salesBatches = salesBatches.filter(
+        (b) => b.financial_year === filter.financialYear,
+      );
+      purchaseBatches = purchaseBatches.filter(
+        (b) => b.financial_year === filter.financialYear,
+      );
+      expBatches = expBatches.filter(
+        (b) => b.financial_year === filter.financialYear,
+      );
+    }
+    if (filter.purchaseBatchId && filter.purchaseBatchId !== "All") {
+      purchaseBatches = purchaseBatches.filter(
+        (b) => b.id === filter.purchaseBatchId,
+      );
+    }
+    if (filter.salesBatchId && filter.salesBatchId !== "All") {
+      salesBatches = salesBatches.filter((b) => b.id === filter.salesBatchId);
+    }
 
     const sBatchIds = new Set(salesBatches.map((b) => b.id));
+    const expBatchIds = new Set(expBatches.map((b) => b.id));
 
-    const revenue = (invoices || [])
-      .filter((inv) => sBatchIds.has(inv.invoice_batch_id))
-      .reduce((sum, inv) => sum + Number(inv.total_amount || 0), 0);
+    let salesInvoices = (invoices || []).filter((inv) =>
+      sBatchIds.has(inv.invoice_batch_id),
+    );
+    if (filter.startDate) {
+      salesInvoices = salesInvoices.filter(
+        (inv) => inv.invoice_date >= filter.startDate!,
+      );
+    }
+    if (filter.endDate) {
+      salesInvoices = salesInvoices.filter(
+        (inv) => inv.invoice_date <= filter.endDate!,
+      );
+    }
+    const revenue = salesInvoices.reduce(
+      (sum, inv) => sum + Number(inv.total_amount || 0),
+      0,
+    );
 
-    const purchaseCost = purchaseBatches.reduce(
+    let filteredPurchaseBatches = purchaseBatches;
+    if (filter.startDate) {
+      filteredPurchaseBatches = filteredPurchaseBatches.filter(
+        (b) => !b.invoice_date_from || b.invoice_date_from >= filter.startDate!,
+      );
+    }
+    if (filter.endDate) {
+      filteredPurchaseBatches = filteredPurchaseBatches.filter(
+        (b) => !b.invoice_date_from || b.invoice_date_from <= filter.endDate!,
+      );
+    }
+    const purchaseCost = filteredPurchaseBatches.reduce(
       (sum, b) => sum + Number(b.total_amount || 0),
       0,
     );
-    const expenses = (expLedger || []).reduce(
+
+    let filteredExpLedger = (expLedger || []).filter((e) =>
+      expBatchIds.has(e.expense_batch_id),
+    );
+    if (filter.startDate) {
+      filteredExpLedger = filteredExpLedger.filter(
+        (e) => e.expense_date >= filter.startDate!,
+      );
+    }
+    if (filter.endDate) {
+      filteredExpLedger = filteredExpLedger.filter(
+        (e) => e.expense_date <= filter.endDate!,
+      );
+    }
+    const expenses = filteredExpLedger.reduce(
       (sum, e) => sum + Number(e.amount || 0),
       0,
     );
@@ -1041,8 +1198,8 @@ export class AnalyticsEngine {
       { revenue: number; purchase: number; expense: number }
     >();
 
-    for (const inv of invoices || []) {
-      if (!inv.invoice_date || !sBatchIds.has(inv.invoice_batch_id)) continue;
+    for (const inv of salesInvoices) {
+      if (!inv.invoice_date) continue;
       const mKey = inv.invoice_date.slice(0, 7);
       if (!monthMap.has(mKey)) {
         monthMap.set(mKey, { revenue: 0, purchase: 0, expense: 0 });
@@ -1050,7 +1207,7 @@ export class AnalyticsEngine {
       monthMap.get(mKey)!.revenue += Number(inv.total_amount || 0);
     }
 
-    for (const b of purchaseBatches) {
+    for (const b of filteredPurchaseBatches) {
       if (!b.invoice_date_from) continue;
       const mKey = b.invoice_date_from.slice(0, 7);
       if (!monthMap.has(mKey)) {
@@ -1059,7 +1216,7 @@ export class AnalyticsEngine {
       monthMap.get(mKey)!.purchase += Number(b.total_amount || 0);
     }
 
-    for (const e of expLedger || []) {
+    for (const e of filteredExpLedger) {
       if (!e.expense_date) continue;
       const mKey = e.expense_date.slice(0, 7);
       if (!monthMap.has(mKey)) {

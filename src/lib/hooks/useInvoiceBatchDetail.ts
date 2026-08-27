@@ -294,7 +294,19 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
         alert(data.message);
         await fetchBatchDetails();
       } else {
-        alert(data.message || `Failed to ${action.toLowerCase()} batch.`);
+        // Some failures (e.g. finalization blocked by accounting-rule or
+        // invoice-amount-range violations) return the offending invoices
+        // in a separate `details` array alongside the summary `message` —
+        // without appending it, the user sees "the following invoices..."
+        // with no invoices ever listed.
+        const detailLines =
+          Array.isArray(data.details) && data.details.length > 0
+            ? `\n\n${data.details.join("\n")}`
+            : "";
+        alert(
+          (data.message || `Failed to ${action.toLowerCase()} batch.`) +
+            detailLines,
+        );
       }
     } catch (error) {
       console.error(`Error changing batch status:`, error);

@@ -131,6 +131,7 @@ export default function FinanceDashboardPage() {
             .select(
               "id, invoice_batch_id, total_amount, invoice_date, products",
             )
+            .order("id", { ascending: true })
             .range(from, to),
         );
 

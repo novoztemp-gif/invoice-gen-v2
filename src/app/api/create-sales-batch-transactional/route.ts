@@ -2,9 +2,17 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { InvoiceEngine } from "@/lib/services/InvoiceEngine";
 import { InvoiceNumberingService } from "@/lib/services/InvoiceNumberingService";
-import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
+import { validateCategoryOccurrenceConfiguration } from "@/lib/services/ProductOccurrenceService";
+import {
+  computeDailyChronologicalStock,
+  type StockLedgerRow,
+  validateStockConservation,
+} from "@/lib/services/StockCalculationService";
+import { checkPurchaseInvoiceAmountRange } from "@/lib/services/purchase-balance/types";
+import { fetchAllQueryRows, fetchRowsByIds } from "@/lib/supabase/fetchAll";
 import { createClient } from "@/lib/supabase/server";
 import { roundToQuarterIncrement } from "@/lib/utils/quantity-rate-utils";
+import { repairInvoiceAmountRange } from "@/lib/utils/reconcile-invoice-quantities";
 
 export async function POST(request: NextRequest) {
   try {
@@ -29,6 +37,8 @@ export async function POST(request: NextRequest) {
       stockSourceBatchId,
       userId,
       invoicesOverride,
+      occurrenceSemantics,
+      categoryAllocation,
     } = body;
 
     // Validate stockSourceBatchId
@@ -57,10 +67,11 @@ export async function POST(request: NextRequest) {
         ),
       );
       if (productIds.length > 0) {
-        const { data: realProducts } = await supabase
-          .from("products")
-          .select("id, category")
-          .in("id", productIds);
+        const realProducts = await fetchRowsByIds(
+          (chunk) =>
+            supabase.from("products").select("id, category").in("id", chunk),
+          productIds,
+        );
         const categoryById = new Map(
           (realProducts || []).map((p: any) => [String(p.id), p.category]),
         );
@@ -72,6 +83,45 @@ export async function POST(request: NextRequest) {
           }
         }
       }
+    }
+
+    // Sprint 1.7S/1.7T — Product Occurrence config gate. This route is the
+    // sole authoritative persistence point for a Sales batch (unlike
+    // Purchase, whose batch row is inserted directly from the client) — an
+    // invalid occurrence configuration must never reach the invoice_batch
+    // insert below.
+    //
+    // Sprint 1.7S originally scoped this to CATEGORY only, because this
+    // route's `products` payload didn't carry per-product
+    // occurrencePercentage at all — running the full GLOBAL/legacy
+    // validator would have rejected every Sales batch. Sprint 1.7T's own
+    // audit found that gap and fixed it directly in useInvoiceForm.ts's
+    // handleSaveSalesBatch (the only real caller of this route), which now
+    // always sends occurrencePercentage. That fix removes the reason for
+    // the CATEGORY-only scoping: with it in place, a direct/bypassed call
+    // to this route (skipping the UI's own client-side check entirely)
+    // could otherwise persist a GLOBAL/NULL-semantics batch — plus its
+    // actual invoices, since the invoicesOverride path below never calls
+    // InvoiceEngine.generateAndSaveInvoices and therefore never reaches
+    // the Sprint 1.7N post-generation gate either — with an invalid or
+    // missing occurrence configuration, completely unvalidated. Running
+    // this check unconditionally (GLOBAL and null delegate straight to the
+    // existing validateOccurrenceConfiguration, unchanged) closes that
+    // persistence-boundary gap.
+    const resolvedOccurrenceSemantics: "GLOBAL" | "CATEGORY" | null =
+      occurrenceSemantics === "CATEGORY" ? "CATEGORY" : occurrenceSemantics === "GLOBAL" ? "GLOBAL" : null;
+    const occConfigValidation = validateCategoryOccurrenceConfiguration(
+      products || [],
+      categoryAllocation || null,
+      resolvedOccurrenceSemantics,
+    );
+    if (!occConfigValidation.valid) {
+      return NextResponse.json(
+        {
+          message: `Product Occurrence Configuration Invalid: ${occConfigValidation.errors.join(" ")}`,
+        },
+        { status: 400 },
+      );
     }
 
     // Support single or comma-separated batch IDs
@@ -117,35 +167,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const availableStockMap = new Map<string, any>();
-    const productGroups = new Map<string, any[]>();
-    for (const row of ledgerData || []) {
-      if (!productGroups.has(row.product_id)) {
-        productGroups.set(row.product_id, []);
-      }
-      productGroups.get(row.product_id)!.push(row);
-    }
-
-    for (const [productId, rows] of productGroups.entries()) {
-      // Sort rows chronologically
-      rows.sort((a: any, b: any) => a.ledger_date.localeCompare(b.ledger_date));
-
-      let carryForward = Number(rows[0].opening_stock) || 0;
-      for (const row of rows) {
-        const opening = carryForward;
-        const purchased = Number(row.purchased_quantity) || 0;
-        const prevSold = Number(row.sold_quantity) || 0;
-
-        const available = opening + purchased - prevSold;
-        const key = `${row.ledger_date}_${row.product_id}`;
-        availableStockMap.set(key, {
-          opening: opening,
-          purchased: Math.max(0, purchased - prevSold),
-        });
-
-        carryForward = Math.max(0, available);
-      }
-    }
+    // ledgerData is passed directly to validateStockConservation() below,
+    // right before the invoicesOverride insert — that call is the actual
+    // consumer of this ledger fetch; see the Sprint 1.3B comment there.
 
     const { previousEndingSequenceNumber, previousEndingSequence } = body;
     const rawPrevSeq = previousEndingSequenceNumber ?? previousEndingSequence;
@@ -176,6 +200,11 @@ export async function POST(request: NextRequest) {
         status: "pending",
         batch_status: "DRAFT",
         products: products,
+        category_allocation:
+          resolvedOccurrenceSemantics === "CATEGORY"
+            ? categoryAllocation
+            : null,
+        occurrence_semantics: resolvedOccurrenceSemantics,
         created_by: userId,
       })
       .select()
@@ -261,18 +290,116 @@ export async function POST(request: NextRequest) {
         startingCounter = maxSeq + 1;
       }
 
+      // Last-chance safety net before insert: whatever combination of
+      // generation/reconciliation/price-solving produced these lines, no
+      // line may leave here outside its Product Rule [rate_min, rate_max],
+      // and no zero-quantity line may survive (roundToQuarterIncrement can
+      // round a quantity below 0.125 down to exactly 0 — every upstream
+      // "drop empty lines" filter uses a finer 0.001 threshold, so a line
+      // in that gap slips through them all and only becomes exactly zero
+      // right here).
+      const rateRangeById = new Map<string, { min: number; max: number }>();
+      for (const p of products || []) {
+        const min = parseFloat(p.perDayRateMin);
+        const max = parseFloat(p.perDayRateMax);
+        if (Number.isFinite(min) && Number.isFinite(max) && min <= max) {
+          rateRangeById.set(p.product_id || p.id, { min, max });
+        }
+      }
+
+      // Hotfix — chronological invoice numbering. invoicesOverride's array
+      // order was used directly for seqCounter below — but
+      // reconcileInvoicesToTargets (the Daily Stock Review reconciliation
+      // this override comes from) can append brand-new "overflow"
+      // invoices at the END of the array regardless of their own date, to
+      // avoid ever exceeding maximumInvoiceAmount on an existing invoice.
+      // Without a re-sort here, that gave those invoices a number block
+      // completely divorced from their real dates — e.g. #512 and #532
+      // both dated Aug 1 and Aug 2, interleaved, with the number bearing
+      // no relationship to the date. A stable sort by invoice_date
+      // guarantees the assigned sequence number always increases with
+      // date, matching what a real invoicing system needs — same fix
+      // already applied on the generation side (generateInvoiceSplitupsInternal),
+      // needed again here because this override path bypasses that sort
+      // entirely.
+      const sortedInvoicesOverride = [...invoicesOverride].sort((a, b) =>
+        String(a.invoice_date || "").localeCompare(String(b.invoice_date || "")),
+      );
+
+      // Quantity quarter-rounding compensation: rounding each line to the
+      // nearest 0.25 independently does NOT preserve the sum across lines
+      // that split the same (date, product) target across multiple
+      // invoices — e.g. three lines of 6.833/6.833/6.834 (summing to an
+      // exact 20.50) each round DOWN to 6.75, persisting a total of 20.25.
+      // That 0.25 shortfall then reads as unsold stock and survives as
+      // leftover carried into next month's opening stock even when the
+      // user picked "Null" (sell everything) with no manual edits. Fix:
+      // round each line first as before, then redistribute the rounding
+      // drift within each (date, product) group by nudging lines up/down
+      // in 0.25 steps until the rounded sum matches the pre-rounding sum
+      // rounded to the nearest 0.25.
+      const rawLines: {
+        invIndex: number;
+        prod: any;
+        qty: number;
+        originalQty: number;
+        rate: number;
+      }[] = [];
+      sortedInvoicesOverride.forEach((inv: any, invIndex: number) => {
+        for (const p of inv.products || []) {
+          const originalQty = Number(p.quantity || 0);
+          const qty = roundToQuarterIncrement(originalQty);
+          let rate = Math.round(Number(p.rate || 1));
+          const range = rateRangeById.get(p.product_id);
+          if (range) {
+            rate = Math.min(range.max, Math.max(range.min, rate));
+          }
+          rawLines.push({ invIndex, prod: p, qty, originalQty, rate });
+        }
+      });
+
+      const groups = new Map<string, typeof rawLines>();
+      for (const line of rawLines) {
+        const key = `${sortedInvoicesOverride[line.invIndex].invoice_date}_${line.prod.product_id}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(line);
+      }
+      for (const groupLines of groups.values()) {
+        const rawSum = groupLines.reduce((s, l) => s + l.originalQty, 0);
+        const targetSum = roundToQuarterIncrement(rawSum);
+        let roundedSum = groupLines.reduce((s, l) => s + l.qty, 0);
+        let diff = Math.round((targetSum - roundedSum) / 0.25) * 0.25;
+        let guard = 0;
+        while (Math.abs(diff) >= 0.125 && guard < 10000) {
+          guard++;
+          if (diff > 0) {
+            const target = groupLines.reduce((a, b) => (b.qty > a.qty ? b : a));
+            target.qty = Math.round((target.qty + 0.25) * 1000) / 1000;
+            diff -= 0.25;
+          } else {
+            const candidates = groupLines.filter((l) => l.qty >= 0.25);
+            if (candidates.length === 0) break;
+            const target = candidates.reduce((a, b) => (b.qty > a.qty ? b : a));
+            target.qty = Math.round((target.qty - 0.25) * 1000) / 1000;
+            diff += 0.25;
+          }
+        }
+      }
+
       let seqCounter = startingCounter;
-      const invoicesToInsert = invoicesOverride.map((inv: any) => {
-        const normalizedProducts = (inv.products || []).map((p: any) => {
-          const qty = roundToQuarterIncrement(Number(p.quantity || 0));
-          const amt = Math.round(qty * Number(p.rate || 1));
-          return {
-            ...p,
-            quantity: qty,
-            amount: amt,
-            rate: Math.round(Number(p.rate || 1)),
-          };
-        });
+      const invoicesToInsert = sortedInvoicesOverride.map((inv: any, invIndex: number) => {
+        const normalizedProducts = rawLines
+          .filter((l) => l.invIndex === invIndex)
+          .map((l) => {
+            const amt = Math.round(l.qty * l.rate);
+            return {
+              ...l.prod,
+              quantity: l.qty,
+              amount: amt,
+              rate: l.rate,
+            };
+          })
+          .filter((p: any) => p.quantity > 0);
 
         const totalAmt = Math.round(
           normalizedProducts.reduce(
@@ -296,16 +423,17 @@ export async function POST(request: NextRequest) {
           products: normalizedProducts,
           // The leftover/sold split was already decided and confirmed by
           // the user in the Daily Stock Review modal (Null or Auto
-          // Allocate) — that confirmation IS the commitment, not a later
-          // "Generate Splitup" click. Insert directly as "generated" so
-          // the source purchase batch's daily_stock_ledger gets updated
-          // immediately below, and the leftover is correct for the very
-          // next sales batch right away, independent of whatever happens
-          // to this batch afterward (edited, finalized, or left alone).
-          status: "generated",
+          // Allocate), so the ledger gets updated immediately below,
+          // independent of whatever happens to this batch afterward. But
+          // that ledger commitment is separate from the invoice/batch
+          // "generated" status, which is purely a UI reveal state — the
+          // user still explicitly clicks "Generate Splitup" on the batch
+          // details page to reveal line items, so invoices stay "pending"
+          // here.
+          status: "pending",
           batch_type: "SALES",
         };
-      });
+      }).filter((inv: any) => inv.products.length > 0);
 
       // Invoice numbers are assigned strictly from the user-provided
       // Previous Ending Sequence Number + 1, with no auto-detection or
@@ -325,11 +453,232 @@ export async function POST(request: NextRequest) {
       );
       console.log("==========================================");
 
-      const { data: insertedInvoices, error: invoiceInsertError } =
-        await supabase.from("invoice").insert(invoicesToInsert).select();
+      // ── Server-side invoice amount range self-correction ────────────────
+      // Hotfix: reconcileInvoicesToTargets/enforceMinimumInvoiceAmount/
+      // solveRatesToHitTotal (the Daily Stock Review reconciliation this
+      // invoicesOverride comes from) each have documented "last resort"
+      // escape hatches that can leave an invoice below minimumInvoiceAmount
+      // or above maximumInvoiceAmount when no compatible same-date/
+      // category invoice has room to absorb the difference — confirmed on
+      // a real batch (5 regular invoices out of range, e.g. ₹5,181 against
+      // a ₹7,000–49,800 configured range). Rather than reject the whole
+      // batch over this, repairInvoiceAmountRange actually fixes it here:
+      // sheds excess from over-max invoices to same-date/category peers (or
+      // opens a new invoice for the overflow), merges under-min invoices
+      // into peers, and as a last resort grows a still-under-min invoice's
+      // existing lines within REAL remaining stock — computed the same way
+      // (computeDailyChronologicalStock) the stock-conservation check right
+      // below this uses, so growth here can never oversell past what that
+      // check would allow anyway. Major Customer invoices are excluded
+      // (checked against their own max_invoice_amount, not this range).
+      // Only if genuinely nothing could be done (real stock exhausted) does
+      // this still reject, with the same clear per-invoice message as
+      // before — now the true last resort instead of the first response.
+      const majorCustomerIdSet = new Set<string>(
+        (majorCustomers || [])
+          .map((m: any) => m.customer_id)
+          .filter(Boolean),
+      );
+      const dailyStock = computeDailyChronologicalStock(
+        ledgerData as StockLedgerRow[],
+      );
+      const remainingStockByDateProduct = new Map<string, number>();
+      for (const day of dailyStock) {
+        remainingStockByDateProduct.set(
+          `${day.ledger_date}_${day.product_id}`,
+          day.closing,
+        );
+      }
+      for (const inv of invoicesToInsert) {
+        for (const p of inv.products || []) {
+          const key = `${inv.invoice_date}_${p.product_id}`;
+          remainingStockByDateProduct.set(
+            key,
+            Math.max(
+              0,
+              (remainingStockByDateProduct.get(key) || 0) -
+                Number(p.quantity || 0),
+            ),
+          );
+        }
+      }
+
+      const repairResult = repairInvoiceAmountRange(
+        invoicesToInsert,
+        parseFloat(minimumInvoiceAmount) || 0,
+        parseFloat(maximumInvoiceAmount) || 0,
+        products || [],
+        remainingStockByDateProduct,
+        receivingCompanyId,
+        majorCustomerIdSet,
+      );
+      const repairedInvoices = repairResult.invoices;
+
+      if (repairResult.stillViolating.length > 0) {
+        const majorMaxById = new Map<string, number>();
+        for (const m of majorCustomers || []) {
+          const maxAmt =
+            typeof m.max_invoice_amount === "string"
+              ? parseFloat(m.max_invoice_amount)
+              : m.max_invoice_amount;
+          if (m.customer_id && maxAmt && maxAmt > 0) {
+            majorMaxById.set(m.customer_id, maxAmt);
+          }
+        }
+        const rangeViolations = repairResult.stillViolating.map((inv: any) => {
+          const invCustomerId =
+            (inv as any).customer_id || inv.products?.[0]?.customer_id;
+          const majorMax = invCustomerId
+            ? majorMaxById.get(invCustomerId)
+            : undefined;
+          const check = majorMax
+            ? checkPurchaseInvoiceAmountRange(inv.total_amount, null, majorMax)
+            : checkPurchaseInvoiceAmountRange(
+                inv.total_amount,
+                parseFloat(minimumInvoiceAmount),
+                parseFloat(maximumInvoiceAmount),
+              );
+          const rangeDesc = !check.valid
+            ? check.reason === "BELOW_MIN"
+              ? `below minimum ₹${(check.min ?? 0).toFixed(2)}`
+              : `above maximum ₹${(check.max ?? 0).toFixed(2)}${majorMax ? " (major customer limit)" : ""}`
+            : "range violation";
+          return `${inv.invoice_number || "(unnumbered)"}: ₹${check.total.toFixed(2)} (${rangeDesc})`;
+        });
+        await supabase.from("invoice_batch").delete().eq("id", newBatch.id);
+        return NextResponse.json(
+          {
+            message: `Batch creation blocked. Could not automatically fix ${repairResult.stillViolating.length} invoice(s) outside the configured amount range — real remaining stock ran out before they could be brought into range: ${rangeViolations.join(", ")}. Try linking more/bigger Purchase stock, adjusting the Daily Stock Ledger allocation, or widening the invoice amount range.`,
+          },
+          { status: 400 },
+        );
+      }
+
+      // repairInvoiceAmountRange can open brand-new invoices for shed
+      // overflow (no compatible peer had room) — those only carry
+      // invoice_date/customer_id/products/total_amount, not yet the
+      // DB-required fields every other invoice already has. Backfill them
+      // here, continuing the same sequence used above.
+      for (const inv of repairedInvoices) {
+        if (!(inv as any).invoice_number) {
+          (inv as any).invoice_batch_id = newBatch.id;
+          (inv as any).invoice_number = InvoiceNumberingService.formatInvoiceNumber(
+            companyAbbr,
+            canonicalFy,
+            "S",
+            seqCounter++,
+          );
+          (inv as any).status = "pending";
+          (inv as any).batch_type = "SALES";
+        }
+      }
+
+      // ── Server-side stock conservation (Sprint 1.3B) ──────────────────
+      // The Daily Stock Review modal already blocks proposed_sold >
+      // available client-side, but nothing re-checked it here — this is
+      // the final authoritative point before anything is persisted.
+      // Rejects the ENTIRE request (no partial save) since nothing has
+      // been inserted into the invoice table yet at this point — only the
+      // invoice_batch row exists so far, rolled back below on failure.
+      const proposedLines = repairedInvoices.flatMap((inv: any) =>
+        (inv.products || []).map((p: any) => ({
+          product_id: p.product_id,
+          ledger_date: inv.invoice_date,
+          quantity: Number(p.quantity || 0),
+        })),
+      );
+      const conservation = validateStockConservation(
+        ledgerData as StockLedgerRow[],
+        proposedLines,
+      );
+
+      if (!conservation.valid) {
+        await supabase.from("invoice_batch").delete().eq("id", newBatch.id);
+
+        if (conservation.negativeQuantityLines.length > 0) {
+          const detail = conservation.negativeQuantityLines
+            .map((l) => `${l.product_id} on ${l.ledger_date} (${l.quantity})`)
+            .join("; ");
+          return NextResponse.json(
+            {
+              message: `Invalid quantity: negative quantities are not allowed — ${detail}.`,
+            },
+            { status: 400 },
+          );
+        }
+
+        const detail = conservation.violations
+          .map(
+            (v) =>
+              `Product ${v.product_id} on ${v.ledger_date}: requested ${v.requested}, available ${v.available}`,
+          )
+          .join("; ");
+        return NextResponse.json(
+          {
+            message: `Stock conservation violation — requested sold quantity exceeds available stock: ${detail}.`,
+          },
+          { status: 400 },
+        );
+      }
+
+      // Hotfix: a large batch's invoice insert is one bulk request (several
+      // hundred KB+ of JSONB for a few hundred invoices) — PostgREST wraps
+      // it in a single transaction, so it's all-or-nothing (safe to retry
+      // whole), but that also means it's the single slowest, most
+      // network-timeout-prone call in this whole route. Confirmed on a
+      // real batch: "TypeError: fetch failed" / "read ETIMEDOUT" after 64s
+      // on the first attempt — a transient network condition, not a data
+      // or logic problem (the exact same payload had already passed the
+      // stock-conservation check above). Retrying once, same pattern
+      // already used for postSalesBatchStockLedger below, turns a
+      // momentary network blip into a silent success instead of losing
+      // the whole batch and forcing the user to regenerate from scratch.
+      // repairInvoiceAmountRange (and reconcileInvoicesToTargets before it)
+      // build their own brand-new invoice objects with a top-level
+      // `customer_id` — needed internally (isMajorInvoice/getCategory
+      // fallbacks) since a freshly-opened invoice has no products yet at
+      // the moment those checks might run — but `public.invoice` has no
+      // such column; every invoice's real customer lives on each line's
+      // own `products[].customer_id` instead. Previously unreachable in
+      // practice (the shed-overflow path that creates these objects used
+      // to give up before ever getting there), so this is a real,
+      // confirmed regression once that path started succeeding: "Could
+      // not find the 'customer_id' column of 'invoice' in the schema
+      // cache". Strip it here, at the actual insert boundary, rather than
+      // in every construction site upstream.
+      const invoicesForInsert = repairedInvoices.map((inv: any) => {
+        const { customer_id, ...rest } = inv;
+        return rest;
+      });
+
+      let insertedInvoices: any[] | null = null;
+      let invoiceInsertError: { message: string } | null = null;
+      {
+        const attempt1 = await supabase
+          .from("invoice")
+          .insert(invoicesForInsert)
+          .select();
+        if (attempt1.error) {
+          console.error(
+            "Error inserting sales invoices, retrying once:",
+            attempt1.error,
+          );
+          const attempt2 = await supabase
+            .from("invoice")
+            .insert(invoicesForInsert)
+            .select();
+          insertedInvoices = attempt2.data;
+          invoiceInsertError = attempt2.error;
+        } else {
+          insertedInvoices = attempt1.data;
+        }
+      }
 
       if (invoiceInsertError) {
-        console.error("Error inserting sales invoices:", invoiceInsertError);
+        console.error(
+          "Error inserting sales invoices (after retry):",
+          invoiceInsertError,
+        );
         // Rollback batch if invoice insertion fails
         await supabase.from("invoice_batch").delete().eq("id", newBatch.id);
         return NextResponse.json(
@@ -344,22 +693,61 @@ export async function POST(request: NextRequest) {
 
       // Commit the leftover decision to the ledger right now — this is the
       // moment the user actually confirmed how much of the purchased stock
-      // stays as leftover vs. gets sold. Also flip the batch's own status
-      // to "generated" so /api/reveal-sales-batch-splitup (guarded on
-      // status === "pending") correctly treats this as already revealed
-      // and never runs postSalesBatchStockLedger a second time — it's not
-      // idempotent (it ADDS to whatever's already recorded).
+      // stays as leftover vs. gets sold, so the very next sales batch sees
+      // the correct leftover regardless of when (or whether) this batch's
+      // invoices get revealed/finalized. postSalesBatchStockLedger is NOT
+      // idempotent (it ADDS to whatever's already recorded), so it must
+      // only ever run here, exactly once — /api/reveal-sales-batch-splitup
+      // and the Finalize fallback in /api/batch-status only flip status
+      // now, they no longer call it.
+      //
+      // The batch row and every invoice are already durably committed by
+      // this point, so a transient failure in this bookkeeping step (e.g.
+      // a momentary PostgREST timeout re-reading the invoices we just
+      // inserted) must never turn an already-successful save into a scary
+      // generic error popup for the user. Retry once, and if it still
+      // fails, still report success (the batch is genuinely fine) but say
+      // exactly what didn't happen instead of a vague failure.
+      let ledgerWarning: string | null = null;
       if (stockSourceBatchId) {
-        await InvoiceEngine.postSalesBatchStockLedger(
-          supabase,
-          newBatch.id,
-          stockSourceBatchId,
-        );
+        try {
+          await InvoiceEngine.postSalesBatchStockLedger(
+            supabase,
+            newBatch.id,
+            stockSourceBatchId,
+          );
+        } catch (ledgerErr: any) {
+          console.error(
+            "postSalesBatchStockLedger failed, retrying once:",
+            ledgerErr,
+          );
+          try {
+            await InvoiceEngine.postSalesBatchStockLedger(
+              supabase,
+              newBatch.id,
+              stockSourceBatchId,
+            );
+          } catch (retryErr: any) {
+            console.error(
+              "postSalesBatchStockLedger failed again after retry:",
+              retryErr,
+            );
+            ledgerWarning = `Batch and invoices saved successfully, but updating the stock leftover ledger failed: ${retryErr?.message || "unknown error"}. Leftover shown for the next sales batch from this source may be stale until this is retried.`;
+          }
+        }
       }
-      await supabase
-        .from("invoice_batch")
-        .update({ status: "generated" })
-        .eq("id", newBatch.id);
+      // invoice_batch.status stays "pending" (as inserted above) — the
+      // user still explicitly clicks "Generate Splitup" to reveal the
+      // invoices, that click flips status to "generated".
+      if (ledgerWarning) {
+        return NextResponse.json({
+          success: true,
+          batchId: newBatch.id,
+          invoicesCount: savedInvoices.length,
+          proposedInvoices: savedInvoices,
+          message: ledgerWarning,
+        });
+      }
     } else {
       // Otherwise use InvoiceEngine to generate and save invoices for newBatch.id
       await InvoiceEngine.generateAndSaveInvoices(supabase, newBatch.id);

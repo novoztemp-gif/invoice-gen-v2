@@ -18,21 +18,44 @@ export async function GET() {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
-    const { data: batches } = await supabase
-      .from("invoice_batch")
-      .select("id, total_amount, invoice_date_from, invoice_date_to, batch_status")
-      .eq("batch_type", "PURCHASE")
-      .eq("batch_status", "FINALIZED");
-
-    const batchIds = (batches || []).map((b: any) => b.id);
-
-    const ledgerRows = await fetchAllQueryRows((from, to) =>
+    // Hotfix — was a single unpaginated, unchecked `.select()`. Finalized
+    // purchase batches only ever accumulate (never shrink), so once the
+    // count crosses PostgREST's default 1000-row page cap, this silently
+    // returned an incomplete list with no error.
+    const batches = await fetchAllQueryRows((from, to) =>
       supabase
-        .from("daily_stock_ledger")
-        .select("purchase_batch_id, product_id, ledger_date, purchased_quantity, sold_quantity")
-        .in("purchase_batch_id", batchIds.length > 0 ? batchIds : ["__none__"])
+        .from("invoice_batch")
+        .select("id, total_amount, invoice_date_from, invoice_date_to, batch_status")
+        .eq("batch_type", "PURCHASE")
+        .eq("batch_status", "FINALIZED")
+        .order("id", { ascending: true })
         .range(from, to),
     );
+
+    const batchIds = batches.map((b: any) => b.id);
+
+    // Hotfix — batchIds (every finalized purchase batch, all-time) used
+    // to be embedded whole into one `.in()` filter, unbounded — same
+    // growth-risk shape as the 469-supplier bug. Chunked here, each
+    // chunk still paginated.
+    const BATCH_ID_CHUNK_SIZE = 150;
+    const ledgerRows: any[] = [];
+    if (batchIds.length > 0) {
+      for (let i = 0; i < batchIds.length; i += BATCH_ID_CHUNK_SIZE) {
+        const idChunk = batchIds.slice(i, i + BATCH_ID_CHUNK_SIZE);
+        const rows = await fetchAllQueryRows((from, to) =>
+          supabase
+            .from("daily_stock_ledger")
+            .select("purchase_batch_id, product_id, ledger_date, opening_stock, purchased_quantity, sold_quantity")
+            .in("purchase_batch_id", idChunk)
+            .order("purchase_batch_id", { ascending: true })
+            .order("ledger_date", { ascending: true })
+            .order("product_id", { ascending: true })
+            .range(from, to),
+        );
+        ledgerRows.push(...rows);
+      }
+    }
 
     const byBatch = new Map<string, { purchased: number; sold: number; rows: number }>();
     for (const row of ledgerRows) {
@@ -67,6 +90,7 @@ export async function GET() {
         .map((r: any) => ({
           product_id: r.product_id,
           ledger_date: r.ledger_date,
+          opening_stock: Number(r.opening_stock || 0),
           purchased_quantity: Number(r.purchased_quantity || 0),
           sold_quantity: Number(r.sold_quantity || 0),
         }))

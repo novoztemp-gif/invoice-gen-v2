@@ -7,8 +7,37 @@ export default async function fetchJobStats(
   try {
     const { createClient } = await import("@/lib/supabase/server");
     const { revalidatePath } = await import("next/cache");
+    const { fetchAllQueryRows } = await import("@/lib/supabase/fetchAll");
 
     const supabase = await createClient();
+
+    if (invoiceIds.length === 0) {
+      return {
+        pending: 0,
+        processing: 0,
+        completed: 0,
+        failed: 0,
+      };
+    }
+
+    // Hotfix — batchId was accepted as a parameter but never actually
+    // used to scope anything; the jobs lookup filtered only by whatever
+    // invoiceIds the caller supplied. Since jobs' own RLS policy only
+    // requires "authenticated," any logged-in user could ask for job
+    // stats on arbitrary invoice ids not actually belonging to the
+    // batchId they claim. Cross-checking against this batch's own real
+    // invoice ids closes that gap — only ids genuinely on this batch are
+    // ever queried.
+    const realInvoices = await fetchAllQueryRows((from, to) =>
+      supabase
+        .from("invoice")
+        .select("id")
+        .eq("invoice_batch_id", batchId)
+        .order("id", { ascending: true })
+        .range(from, to),
+    );
+    const realIdSet = new Set(realInvoices.map((r: any) => r.id));
+    invoiceIds = invoiceIds.filter((id) => realIdSet.has(id));
 
     if (invoiceIds.length === 0) {
       return {

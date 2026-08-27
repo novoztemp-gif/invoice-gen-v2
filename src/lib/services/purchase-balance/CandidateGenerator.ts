@@ -191,6 +191,18 @@ export class CandidateGenerator {
   public static generateLineCandidates(
     line: PurchaseLine,
     constraint: ProductConstraint,
+    // Hotfix — defense in depth. The balancing solver used to have zero
+    // awareness of the batch's own maximum invoice amount anywhere in its
+    // candidate search, relying entirely on FinalValidator's final check
+    // to reject an over-cap plan after the fact (Sales' equivalent
+    // generator already filters this way — see SalesCandidateGenerator's
+    // maxAmountForThisLine). Passing the invoice's remaining headroom here
+    // lets the search itself steer away from candidates that would exceed
+    // it, instead of committing to one FinalValidator then throws out.
+    // The line's own unchanged (delta=0) candidate is always kept
+    // regardless — this must never make an already-over-cap invoice
+    // impossible to save unchanged.
+    maxLineAmount?: number,
   ): GeneratedLineCandidate[] {
     const quantities = this.generateQuantityCandidates(
       line.quantity,
@@ -208,6 +220,16 @@ export class CandidateGenerator {
       for (const rate of rates) {
         const amount = computeLineAmount(qty, rate);
         const delta = roundMoney(amount - line.amount);
+        const isUnchanged =
+          Math.abs(qty - line.quantity) < MONEY_TOLERANCE &&
+          Math.abs(rate - line.rate) < MONEY_TOLERANCE;
+        if (
+          !isUnchanged &&
+          maxLineAmount !== undefined &&
+          amount > maxLineAmount + 0.5
+        ) {
+          continue;
+        }
         const updatedLine: PurchaseLine = {
           ...line,
           quantity: qty,
@@ -260,6 +282,10 @@ export class CandidateGenerator {
   public static generateInvoiceLineCandidates(
     invoice: PurchaseInvoice,
     constraints: Map<string, ProductConstraint>,
+    // Hotfix — defense in depth, see generateLineCandidates' own comment.
+    // Optional: omitting it (every existing caller/test before this fix)
+    // is byte-identical to before — unbounded candidates, same as always.
+    thresholdMax?: number,
   ): GeneratedInvoiceLineCandidates[] {
     const sortedLines = [...(invoice.products || [])].sort((a, b) => {
       const nameA = a.product_name || a.product_id;
@@ -277,7 +303,19 @@ export class CandidateGenerator {
         );
       }
 
-      const candidates = this.generateLineCandidates(line, constraint);
+      const otherLinesTotal = roundMoney(
+        (invoice.total_amount || 0) - (line.amount || 0),
+      );
+      const maxLineAmount =
+        thresholdMax && thresholdMax > 0
+          ? Math.max(0, thresholdMax - otherLinesTotal)
+          : undefined;
+
+      const candidates = this.generateLineCandidates(
+        line,
+        constraint,
+        maxLineAmount,
+      );
       return {
         productId: line.product_id,
         originalLine: line,

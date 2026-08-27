@@ -7,6 +7,7 @@ import { diffEditedProductIds } from "./SalesLineCapacity";
 import { SalesInvoiceValidator } from "./SalesInvoiceValidator";
 import {
   roundMoney,
+  SALES_BALANCE_LIMITS,
   SalesBalanceContext,
   SalesFinalValidationResult,
   SalesInvoice,
@@ -65,6 +66,34 @@ export class SalesFinalValidator {
         errors.push(invValidation.message);
       }
 
+      // Sprint 1.7R — Maximum Product Line count. SALES_BALANCE_LIMITS.
+      // maxInvoiceLines already exists (used to bound the balancing
+      // solver's own combinatorial search — SalesCandidateSolver.ts) but,
+      // unlike Purchase's mirror-image FinalValidator, was never actually
+      // enforced as a persistence gate here — a persisted Sales invoice
+      // could exceed 8 lines through the normal edit/balancing path.
+      // Mirrors Purchase FinalValidator.validateSingleInvoice exactly:
+      // major-customer invoices are exempt (SalesCandidateSolver excludes
+      // them from its own candidate search — line 143 — so this cap,
+      // which exists purely to bound that search, has no reason to apply
+      // to them), and an invoice that already had more than 8 lines
+      // before this edit (e.g. a pre-existing generation-time artifact)
+      // stays editable — only growing PAST whatever it already was is
+      // rejected, never retroactively invalidating old data.
+      const partyIdForLineCap = inv.products?.[0]?.customer_id;
+      const isMajorCustomerInvoice =
+        !!partyIdForLineCap && context.majorCustomerIds.has(partyIdForLineCap);
+      const origLineCount = origInv ? origInv.products.length : 0;
+      if (
+        !isMajorCustomerInvoice &&
+        inv.products.length > SALES_BALANCE_LIMITS.maxInvoiceLines &&
+        inv.products.length > origLineCount
+      ) {
+        errors.push(
+          `Product Line Limit Exceeded: Invoice ${inv.invoice_number} contains ${inv.products.length} products, exceeding the maximum allowed limit of ${SALES_BALANCE_LIMITS.maxInvoiceLines}.`,
+        );
+      }
+
       // Maximum Invoice Amount: the edit must never PUSH an invoice further
       // over the configured limit than it already was (a brand-new invoice
       // has no "already was", so it's held to the limit outright). An
@@ -81,6 +110,32 @@ export class SalesFinalValidator {
         ) {
           errors.push(
             `Maximum Invoice Amount Exceeded: Invoice ${inv.invoice_number} total (₹${inv.total_amount}) exceeds the batch's maximum invoice amount (₹${thresholdMax}).`,
+          );
+        }
+      }
+
+      // Minimum Invoice Amount (Sprint 1.5B): mirrors the Maximum check
+      // immediately above — the edit must never PUSH an invoice further
+      // UNDER the configured minimum than it already was (a brand-new
+      // invoice has no "already was", so it's held to the minimum
+      // outright, same as the Maximum check treats new invoices). An
+      // invoice that was already below the minimum before this edit is
+      // left alone here rather than blocking every future edit to it
+      // forever; it just can't get worse (i.e. drop even lower).
+      const thresholdMin = context.thresholdMin || 0;
+      if (thresholdMin > 0) {
+        // A brand-new invoice (no origInv) has no prior total to compare
+        // against — use +Infinity so ANY total below the minimum reads as
+        // "worse than before", holding new invoices to the minimum
+        // outright (the mirror of the Maximum check's `origTotal = 0`
+        // default, which makes ANY positive total read as "worse").
+        const origTotal = origInv ? origInv.total_amount : Infinity;
+        if (
+          inv.total_amount < thresholdMin - 0.01 &&
+          inv.total_amount < origTotal - 0.01
+        ) {
+          errors.push(
+            `Minimum Invoice Amount Violation: Invoice ${inv.invoice_number} total (₹${inv.total_amount}) is below the batch's minimum invoice amount (₹${thresholdMin}).`,
           );
         }
       }
