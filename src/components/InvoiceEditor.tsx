@@ -366,7 +366,7 @@ export default function InvoiceEditor({
                                 : `${bp.product_name} currently has no room to be added cleanly without rebalancing an unrelated invoice.`
                               : capacity !== undefined
                                 ? batch?.batch_type === "SALES"
-                                  ? `${capacity}kg available on ${capacityDate || "this invoice's date"}.`
+                                  ? `Up to ~${capacity}kg available on ${capacityDate || "this invoice's date"} (may need to pull from another invoice that day — saving will confirm).`
                                   : `Up to ~${capacity} available to add cleanly right now.`
                                 : undefined
                           }

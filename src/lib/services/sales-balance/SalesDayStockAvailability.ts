@@ -108,3 +108,44 @@ export function computeAvailableForEdit(
   }
   return result;
 }
+
+/**
+ * The editable pool for one day: the day's total physical stock minus
+ * whatever's already permanently reserved by Major Customer invoices
+ * (never touchable, never an edit target — see SalesDayScopedEditEngine).
+ * This is what the UI shows as "available stock" — a bigger, more useful
+ * reference figure than computeAvailableForEdit's "genuinely unclaimed
+ * right now" number, since a day-scoped edit can also redistribute
+ * quantity between regular (non-major) invoices, not just draw on
+ * leftover. Confirmed with the user: display the theoretical ceiling,
+ * let save-time validation decide whether a specific edit is actually
+ * possible ("only if possible").
+ */
+export function computeEditableDayPool(
+  context: SalesBalanceContext,
+  staticAvailable: Map<string, number>,
+  date: string,
+): Map<string, number> {
+  const majorConsumed = new Map<string, number>();
+  for (const inv of context.invoices) {
+    if (inv.invoice_date !== date) continue;
+    const partyId = inv.products?.[0]?.customer_id;
+    if (!partyId || !context.majorCustomerIds.has(partyId)) continue;
+    for (const p of inv.products) {
+      if (!p.product_id) continue;
+      majorConsumed.set(
+        p.product_id,
+        (majorConsumed.get(p.product_id) || 0) + p.quantity,
+      );
+    }
+  }
+
+  const result = new Map<string, number>();
+  const allPids = new Set([...staticAvailable.keys(), ...majorConsumed.keys()]);
+  for (const pid of allPids) {
+    const avail = staticAvailable.get(pid) || 0;
+    const reserved = majorConsumed.get(pid) || 0;
+    result.set(pid, Math.max(0, avail - reserved));
+  }
+  return result;
+}

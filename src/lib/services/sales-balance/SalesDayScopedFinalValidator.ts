@@ -32,10 +32,6 @@ export class SalesDayScopedFinalValidator {
       ...plan.balancingInvoices,
     ];
 
-    const origEditedInv = context.invoices.find(
-      (i) => i.id === plan.editedInvoice.id,
-    );
-
     // 1 & 2: per-invoice business rules + threshold grandfather rule
     // (never push an invoice further past thresholdMin/thresholdMax than it
     // already was), mirroring SalesFinalValidator.ts:97-141 exactly.
@@ -141,22 +137,36 @@ export class SalesDayScopedFinalValidator {
     }
 
     // 5: Overstock ceiling cross-check for the edited product(s) — the only
-    // ones whose batch-wide total genuinely changed this run.
+    // ones whose batch-wide total genuinely changed this run. Must account
+    // for EVERY touched invoice's own delta for this pid, not just the
+    // edited invoice's — an increase can pull quantity from a same-day
+    // peer (that peer's own line for this same pid shrinks), so the two
+    // deltas net against each other; using only the edited invoice's delta
+    // would double-count the peer's contribution and report a phantom
+    // overstock. newQtyByPid/origQtyByPid (Rule 4, above) already sum
+    // across the whole touched subset — reused directly here.
+    //
+    // Grandfathered exactly like SalesFinalValidator's own Rule 9: a
+    // product whose batch-wide total was ALREADY over its purchased
+    // ceiling before this edit (historical data, generated before some
+    // now-fixed bug, same category of issue as the ONIONS line-amount
+    // self-heal) must never be blamed on an edit that didn't make it any
+    // worse — confirmed as a real, reported false rejection: a fully
+    // net-zero same-day swap (this invoice +10kg, a peer -10kg) left the
+    // product's batch-wide total EXACTLY where it already was, yet was
+    // rejected outright because that pre-existing total happened to
+    // already sit above the ceiling. Only a genuine INCREASE past
+    // whatever the total already was is rejected.
     for (const pid of editedProductIds) {
       const ceiling = context.totalPurchasedByProduct.get(pid);
       if (ceiling === undefined) continue;
       const priorQty = context.originalProductTotals.get(pid) || 0;
-      const editedInvOldQty =
-        origEditedInv?.products
-          .filter((p) => p.product_id === pid)
-          .reduce((s, p) => s + p.quantity, 0) || 0;
-      const editedInvNewQty = plan.editedInvoice.products
-        .filter((p) => p.product_id === pid)
-        .reduce((s, p) => s + p.quantity, 0);
+      const touchedOldQty = origQtyByPid.get(pid) || 0;
+      const touchedNewQty = newQtyByPid.get(pid) || 0;
       const newBatchQty = roundToQuarterIncrement(
-        priorQty - editedInvOldQty + editedInvNewQty,
+        priorQty - touchedOldQty + touchedNewQty,
       );
-      if (newBatchQty > ceiling + 0.01) {
+      if (newBatchQty > ceiling + 0.01 && newBatchQty > priorQty + 0.001) {
         errors.push(
           `Overstock Error: Product ID ${pid} total sold (${newBatchQty} KG) would exceed total purchased (${ceiling} KG).`,
         );

@@ -315,4 +315,119 @@ describe("SalesDayScopedFinalValidator.validate", () => {
       (result.errors || []).some((e) => e.includes("Overstock Error")),
     ).toBe(true);
   });
+
+  it("REGRESSION — an increase that pulls quantity from a same-day peer (net batch quantity unchanged) must NOT trigger a phantom overstock error", () => {
+    // The new pull-from-peer behavior: edited invoice grows 10 -> 15kg,
+    // fully offset by a peer invoice shrinking 8 -> 3kg (same product, same
+    // day). The batch-wide total for this product is exactly unchanged
+    // (18kg before, 18kg after) — using only the EDITED invoice's own
+    // delta (the old, buggy formula) would have computed a phantom +5kg
+    // increase (23kg) and wrongly rejected this against a ceiling sitting
+    // exactly at 18.
+    const origEdited = makeInvoice("edited", "2026-08-05", [
+      makeLine(PRODUCT_A, 10, 100),
+    ]);
+    const origPeer = makeInvoice("peer", "2026-08-05", [
+      makeLine(PRODUCT_A, 8, 100),
+    ]);
+    const context = baseContext([origEdited, origPeer], {
+      originalProductTotals: new Map([[PRODUCT_A, 18]]),
+      totalPurchasedByProduct: new Map([[PRODUCT_A, 18]]), // tightest possible ceiling
+    });
+    const newEdited = makeInvoice("edited", "2026-08-05", [
+      makeLine(PRODUCT_A, 15, 100),
+    ]);
+    const newPeer = makeInvoice("peer", "2026-08-05", [
+      makeLine(PRODUCT_A, 3, 100),
+    ]);
+    const plan: SalesSolverPlan = {
+      editedInvoice: newEdited,
+      balancingInvoices: [newPeer],
+      totalCost: 0,
+      batchDelta: 0,
+      productDeltas: new Map(),
+    };
+    const result = SalesDayScopedFinalValidator.validate(
+      context,
+      plan,
+      new Set([PRODUCT_A]),
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it("REGRESSION — grandfathers a product whose batch-wide total was ALREADY over its purchased ceiling before this edit, as long as this edit doesn't make it any worse", () => {
+    // Real reported false rejection: priorQty (900.5) already exceeds the
+    // ceiling (891.5) from historical/pre-existing data — nothing to do
+    // with this edit. A fully net-zero same-day swap (edited invoice
+    // +10kg, peer -10kg) leaves the batch-wide total EXACTLY where it
+    // already was; must not be blamed on the edit.
+    const origEdited = makeInvoice("edited", "2026-08-05", [
+      makeLine(PRODUCT_A, 20, 100),
+    ]);
+    const origPeer = makeInvoice("peer", "2026-08-05", [
+      makeLine(PRODUCT_A, 880.5, 100),
+    ]);
+    const context = baseContext([origEdited, origPeer], {
+      originalProductTotals: new Map([[PRODUCT_A, 900.5]]),
+      totalPurchasedByProduct: new Map([[PRODUCT_A, 891.5]]),
+    });
+    const newEdited = makeInvoice("edited", "2026-08-05", [
+      makeLine(PRODUCT_A, 30, 100),
+    ]);
+    const newPeer = makeInvoice("peer", "2026-08-05", [
+      makeLine(PRODUCT_A, 870.5, 100),
+    ]);
+    const plan: SalesSolverPlan = {
+      editedInvoice: newEdited,
+      balancingInvoices: [newPeer],
+      totalCost: 0,
+      batchDelta: 0,
+      productDeltas: new Map(),
+    };
+    const result = SalesDayScopedFinalValidator.validate(
+      context,
+      plan,
+      new Set([PRODUCT_A]),
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it("still rejects a GENUINE increase past the already-over-ceiling total (grandfathering never lets it get worse)", () => {
+    const origEdited = makeInvoice("edited", "2026-08-05", [
+      makeLine(PRODUCT_A, 20, 100),
+    ]);
+    const origPeer = makeInvoice("peer", "2026-08-05", [
+      makeLine(PRODUCT_A, 880.5, 100),
+    ]);
+    const context = baseContext([origEdited, origPeer], {
+      originalProductTotals: new Map([[PRODUCT_A, 900.5]]),
+      totalPurchasedByProduct: new Map([[PRODUCT_A, 891.5]]),
+    });
+    // Edited invoice grows +10 (20 -> 30) but the peer only gives up 5
+    // (880.5 -> 875.5) — a genuine +5 net increase past the already-over
+    // total of 900.5, up to 905.5.
+    const newEdited = makeInvoice("edited", "2026-08-05", [
+      makeLine(PRODUCT_A, 30, 100),
+    ]);
+    const newPeer = makeInvoice("peer", "2026-08-05", [
+      makeLine(PRODUCT_A, 875.5, 100),
+    ]);
+    const plan: SalesSolverPlan = {
+      editedInvoice: newEdited,
+      balancingInvoices: [newPeer],
+      totalCost: 0,
+      batchDelta: 0,
+      productDeltas: new Map(),
+    };
+    const result = SalesDayScopedFinalValidator.validate(
+      context,
+      plan,
+      new Set([PRODUCT_A]),
+    );
+    expect(result.valid).toBe(false);
+    if (result.valid) throw new Error("unreachable");
+    expect(
+      (result.errors || []).some((e) => e.includes("Overstock Error")),
+    ).toBe(true);
+  });
 });

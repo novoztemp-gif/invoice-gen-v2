@@ -8,7 +8,11 @@ import {
   loadDayAvailability,
 } from "./SalesDayStockAvailability";
 import { SalesDayScopedFinalValidator } from "./SalesDayScopedFinalValidator";
-import { computeAddRoom, diffEditedProductIds } from "./SalesLineCapacity";
+import {
+  computeAddRoom,
+  diffEditedProductIds,
+  resolveReduction,
+} from "./SalesLineCapacity";
 import { SalesInvoiceValidator } from "./SalesInvoiceValidator";
 import {
   SalesAuditRecord,
@@ -28,18 +32,23 @@ import {
  * Replaces SalesAutoBalanceEngine for editing an existing Sales invoice.
  * The old engine freely moved a product's quantity across ANY invoice/day
  * in the batch to keep its total conserved. This one is day-scoped: an
- * edit can only draw on stock physically available on the edited invoice's
- * OWN day (no cross-day borrowing, no new invoices), while the batch's
- * grand total still never moves — closed via same-day reuse of freed
- * stock first (topping up an existing line, or a brand-new line on
- * another same-day/same-category invoice), then a pure price (never
- * quantity/stock) adjustment elsewhere in the batch for whatever rupee
- * residual is left. A decrease's freed stock must be reused IN FULL on
- * that same day — leftover/carry-forward stock is a decision made once,
- * at generation time, and an edit must never quietly re-create it by
- * leaving freed stock unused; if it genuinely has nowhere to go that day,
- * the whole edit is rejected outright instead. See the approved plan for
- * the full rationale:
+ * edit can only move quantity within the edited invoice's OWN day (no
+ * cross-day borrowing, no new invoices), never changing that day's own
+ * total sold — confirmed with the user: quantity redistribution between
+ * same-day invoices runs in BOTH directions —
+ *   - a DECREASE's freed quantity is pushed onto a same-day peer (topping
+ *     up an existing line, or a brand-new line on a same-category peer);
+ *   - an INCREASE first draws on whatever's genuinely unclaimed that day,
+ *     then pulls the rest from whichever same-day peer holds the most of
+ *     that product, shrinking their line correspondingly.
+ * Either direction that can't be fully satisfied within day D rejects the
+ * WHOLE edit outright — never partially applied, never silently changes
+ * how much of a product the day sold in total (leftover/carry-forward
+ * stock is a decision made once, at generation time, and an edit must
+ * never quietly touch it). The batch's grand total still never moves —
+ * whatever rupee residual is left after quantity settles is closed via a
+ * pure price (never quantity/stock) adjustment ANYWHERE in the batch, any
+ * day. See the approved plan for the full rationale:
  * /Users/puvanesh/.claude/plans/steady-noodling-abelson.md
  */
 export class SalesDayScopedEditEngine {
@@ -136,9 +145,6 @@ export class SalesDayScopedEditEngine {
         );
       }
 
-      // Day-D stock cap: reject outright if any product's new quantity on
-      // this invoice exceeds what's actually free on this day, before
-      // touching anything else.
       const D = originalEdited.invoice_date;
       const stockSourceBatchIds = context.stockSourceBatchId
         ? context.stockSourceBatchId
@@ -151,6 +157,8 @@ export class SalesDayScopedEditEngine {
         stockSourceBatchIds,
         D,
       );
+      // Genuinely unclaimed stock only — draw on this FIRST for an
+      // increase, before ever touching another invoice.
       const availableForEdit = computeAvailableForEdit(
         context,
         staticAvailable,
@@ -165,39 +173,14 @@ export class SalesDayScopedEditEngine {
           ?.product_name ||
         pid;
 
-      const violations: string[] = [];
-      for (const pid of allEditedPids) {
-        const delta = netDeltaByPid.get(pid) || 0;
-        if (delta <= 0.001) continue;
-        const newQty = newQtyByPid.get(pid) || 0;
-        const avail = availableForEdit.get(pid) || 0;
-        if (newQty > avail + 0.001) {
-          const excess = roundToQuarterIncrement(newQty - avail);
-          violations.push(
-            `Only ${avail}kg of ${findProductName(pid)} is available on ${D} — you're adding ${excess}kg more than that.`,
-          );
-        }
-      }
-      if (violations.length > 0) {
-        throw new Error(violations.join("; "));
-      }
-
-      // Candidate pool for both same-day reuse AND the price-nudge fallback:
-      // every OTHER invoice in the batch, minor customers only.
+      // Candidate pool for same-day redistribution AND the price-nudge
+      // fallback: every OTHER invoice in the batch, minor customers only.
       const candidatePool: SalesInvoice[] = context.invoices
         .filter((inv) => inv.id !== editedInvoiceId && !isMajorInvoice(inv))
         .map((inv) => JSON.parse(JSON.stringify(inv)) as SalesInvoice);
 
-      // Same-day reuse: freed quantity from a decrease can only top up a
-      // line that ALREADY carries that product on an invoice dated the
-      // exact same day; if that's not enough, a brand-new line on any
-      // OTHER same-day, same-category invoice that doesn't yet carry it.
-      // Freed stock going unused was the original design — overruled by
-      // the user after real-batch testing: leftover/carry-forward stock
-      // is a decision made once, at generation time. An edit must never
-      // quietly re-create "leftover" by leaving freed stock unreused; if
-      // it genuinely has nowhere to go on this exact day, the WHOLE edit
-      // is rejected instead (see the throw at the end of this block).
+      // Same-day pool, deterministically ordered — used for BOTH
+      // directions below.
       const sameDayPool = candidatePool
         .filter((inv) => inv.invoice_date === D)
         .sort((a, b) =>
@@ -207,61 +190,90 @@ export class SalesDayScopedEditEngine {
           }),
         );
 
+      // Quantity is redistributed within day D only, in BOTH directions —
+      // confirmed with the user: an increase beyond genuinely-free stock
+      // pulls the rest from another same-day invoice's existing holding
+      // of the same product (their quantity shrinks, this invoice's
+      // grows — the day's own total sold stays exactly the same, so the
+      // leftover/carry-forward decision from generation time is never
+      // touched). A decrease's freed quantity is pushed onto a same-day
+      // peer the same way it always was. If either direction genuinely
+      // can't be satisfied within day D, the WHOLE edit is rejected
+      // outright — never left partially applied, never silently
+      // re-creates leftover stock.
       for (const pid of allEditedPids) {
-        let freed = -(netDeltaByPid.get(pid) || 0);
-        if (freed <= 0.001) continue;
+        const delta = netDeltaByPid.get(pid) || 0;
+        if (Math.abs(delta) <= 0.001) continue;
         const constraint = context.constraints.get(pid);
-        const removedLine =
-          originalEdited.products.find((p) => p.product_id === pid) ||
-          normalisedEdited.products.find((p) => p.product_id === pid);
 
-        // Pass 1: top up an existing line that already carries this
-        // product on a same-day invoice.
-        for (const inv of sameDayPool) {
-          if (freed <= 0.001) break;
-          const line = inv.products.find((p) => p.product_id === pid);
-          if (!line) continue;
-          const { room } = computeAddRoom({
-            currentQuantity: line.quantity,
-            currentAmount: line.amount,
-            invoiceTotalAmount: inv.total_amount,
-            rate: line.rate,
-            constraint,
-            thresholdMax: context.thresholdMax,
-            stockCeiling: Number.POSITIVE_INFINITY,
-            stockAlreadyUsed: 0,
-          });
-          const add = roundToQuarterIncrement(Math.min(freed, room));
-          if (add <= 0.001) continue;
-          line.quantity = roundToQuarterIncrement(line.quantity + add);
-          line.amount = computeLineAmount(line.quantity, line.rate);
-          inv.total_amount = Math.round(
-            inv.products.reduce((s, p) => s + Math.round(p.amount || 0), 0),
+        if (delta > 0) {
+          // INCREASE: genuinely-free stock first, then pull the rest from
+          // whichever same-day peer holds the most of this product
+          // (fewest invoices disturbed), down to its own configured
+          // quantityMin.
+          const newQty = newQtyByPid.get(pid) || 0;
+          const freeAvail = availableForEdit.get(pid) || 0;
+          let stillNeeded = roundToQuarterIncrement(
+            Math.max(0, newQty - freeAvail),
           );
-          freed = roundToQuarterIncrement(freed - add);
-        }
+          if (stillNeeded <= 0.001) continue;
 
-        // Pass 2: whatever's still freed — place it as a brand-new line
-        // on any other same-day, same-category invoice that doesn't
-        // already carry this product, at the removed line's own real
-        // rate (known-good pricing for this exact product on this exact
-        // day — never a guessed midpoint).
-        if (freed > 0.001 && removedLine) {
-          const pidCategory = String(
-            removedLine.category || constraint?.category || "Meat",
-          ).toUpperCase();
+          const holders = sameDayPool
+            .filter((inv) =>
+              inv.products.some((p) => p.product_id === pid),
+            )
+            .sort((a, b) => {
+              const qa =
+                a.products.find((p) => p.product_id === pid)?.quantity || 0;
+              const qb =
+                b.products.find((p) => p.product_id === pid)?.quantity || 0;
+              return qb - qa;
+            });
+
+          for (const inv of holders) {
+            if (stillNeeded <= 0.001) break;
+            const line = inv.products.find((p) => p.product_id === pid)!;
+            const take = resolveReduction(
+              line.quantity,
+              stillNeeded,
+              constraint,
+            );
+            if (take <= 0.001) continue;
+            line.quantity = roundToQuarterIncrement(line.quantity - take);
+            line.amount = computeLineAmount(line.quantity, line.rate);
+            if (line.quantity <= 0.001) {
+              inv.products = inv.products.filter((p) => p !== line);
+            }
+            inv.total_amount = Math.round(
+              inv.products.reduce((s, p) => s + Math.round(p.amount || 0), 0),
+            );
+            stillNeeded = roundToQuarterIncrement(stillNeeded - take);
+          }
+
+          if (stillNeeded > 0.001) {
+            throw new Error(
+              `Can't save this edit — only ${freeAvail}kg of ${findProductName(pid)} was free on ${D}, and no other invoice that day had enough spare ${findProductName(pid)} to cover the rest. Try a smaller increase, or edit a different product instead.`,
+            );
+          }
+        } else {
+          // DECREASE: push the freed quantity onto a same-day peer —
+          // topping up an existing line first, then (if needed) a
+          // brand-new line on a same-category peer that doesn't carry it
+          // yet, at the removed line's own real rate.
+          let freed = -delta;
+          const removedLine =
+            originalEdited.products.find((p) => p.product_id === pid) ||
+            normalisedEdited.products.find((p) => p.product_id === pid);
+
           for (const inv of sameDayPool) {
             if (freed <= 0.001) break;
-            if (inv.products.some((p) => p.product_id === pid)) continue;
-            const invCategory = String(
-              inv.products[0]?.category || "Meat",
-            ).toUpperCase();
-            if (invCategory !== pidCategory) continue;
+            const line = inv.products.find((p) => p.product_id === pid);
+            if (!line) continue;
             const { room } = computeAddRoom({
-              currentQuantity: 0,
-              currentAmount: 0,
+              currentQuantity: line.quantity,
+              currentAmount: line.amount,
               invoiceTotalAmount: inv.total_amount,
-              rate: removedLine.rate,
+              rate: line.rate,
               constraint,
               thresholdMax: context.thresholdMax,
               stockCeiling: Number.POSITIVE_INFINITY,
@@ -269,29 +281,64 @@ export class SalesDayScopedEditEngine {
             });
             const add = roundToQuarterIncrement(Math.min(freed, room));
             if (add <= 0.001) continue;
-            inv.products.push({
-              product_id: pid,
-              product_name: removedLine.product_name,
-              hsn_code: removedLine.hsn_code,
-              unit_of_measure: removedLine.unit_of_measure,
-              category: removedLine.category,
-              quantity: add,
-              rate: removedLine.rate,
-              amount: computeLineAmount(add, removedLine.rate),
-              customer_id: inv.products[0]?.customer_id,
-            });
+            line.quantity = roundToQuarterIncrement(line.quantity + add);
+            line.amount = computeLineAmount(line.quantity, line.rate);
             inv.total_amount = Math.round(
               inv.products.reduce((s, p) => s + Math.round(p.amount || 0), 0),
             );
             freed = roundToQuarterIncrement(freed - add);
           }
-        }
 
-        if (freed > 0.001) {
-          const productName = removedLine?.product_name || pid;
-          throw new Error(
-            `Can't save this edit — ${freed}kg of ${productName} freed up by this change has nowhere to go on ${D}. No other invoice on that day can take it. Try a smaller decrease, or edit a different product instead.`,
-          );
+          if (freed > 0.001 && removedLine) {
+            const pidCategory = String(
+              removedLine.category || constraint?.category || "Meat",
+            ).toUpperCase();
+            for (const inv of sameDayPool) {
+              if (freed <= 0.001) break;
+              if (inv.products.some((p) => p.product_id === pid)) continue;
+              const invCategory = String(
+                inv.products[0]?.category || "Meat",
+              ).toUpperCase();
+              if (invCategory !== pidCategory) continue;
+              const { room } = computeAddRoom({
+                currentQuantity: 0,
+                currentAmount: 0,
+                invoiceTotalAmount: inv.total_amount,
+                rate: removedLine.rate,
+                constraint,
+                thresholdMax: context.thresholdMax,
+                stockCeiling: Number.POSITIVE_INFINITY,
+                stockAlreadyUsed: 0,
+              });
+              const add = roundToQuarterIncrement(Math.min(freed, room));
+              if (add <= 0.001) continue;
+              inv.products.push({
+                product_id: pid,
+                product_name: removedLine.product_name,
+                hsn_code: removedLine.hsn_code,
+                unit_of_measure: removedLine.unit_of_measure,
+                category: removedLine.category,
+                quantity: add,
+                rate: removedLine.rate,
+                amount: computeLineAmount(add, removedLine.rate),
+                customer_id: inv.products[0]?.customer_id,
+              });
+              inv.total_amount = Math.round(
+                inv.products.reduce(
+                  (s, p) => s + Math.round(p.amount || 0),
+                  0,
+                ),
+              );
+              freed = roundToQuarterIncrement(freed - add);
+            }
+          }
+
+          if (freed > 0.001) {
+            const productName = removedLine?.product_name || pid;
+            throw new Error(
+              `Can't save this edit — ${freed}kg of ${productName} freed up by this change has nowhere to go on ${D}. No other invoice on that day can take it. Try a smaller decrease, or edit a different product instead.`,
+            );
+          }
         }
       }
 
@@ -360,13 +407,57 @@ export class SalesDayScopedEditEngine {
         throw new Error((finalValidation.errors || []).join("; "));
       }
 
+      // Must account for EVERY touched invoice's own delta per product,
+      // not just the edited invoice's — an increase can pull quantity
+      // from a same-day peer (whose own line for that product shrinks by
+      // the same amount), so the two deltas net against each other. Using
+      // only the edited invoice's own requested delta overstated the
+      // expected total by exactly whatever was pulled from a peer,
+      // tripping the RPC's own "Product Quantity Mismatch" verification
+      // on an otherwise perfectly correct, fully-conserving edit — the
+      // exact same class of bug already fixed in
+      // SalesDayScopedFinalValidator's Rule 5 (Overstock), just missed
+      // here too.
+      const touchedInvoicesForTotals = [
+        finalPlan.editedInvoice,
+        ...finalPlan.balancingInvoices,
+      ];
+      const touchedNewQtyByPid = new Map<string, number>();
+      const touchedOldQtyByPid = new Map<string, number>();
+      for (const inv of touchedInvoicesForTotals) {
+        for (const p of inv.products) {
+          if (!p.product_id) continue;
+          touchedNewQtyByPid.set(
+            p.product_id,
+            roundToQuarterIncrement(
+              (touchedNewQtyByPid.get(p.product_id) || 0) + p.quantity,
+            ),
+          );
+        }
+        const orig = context.invoices.find((i) => i.id === inv.id);
+        for (const p of orig?.products || []) {
+          if (!p.product_id) continue;
+          touchedOldQtyByPid.set(
+            p.product_id,
+            roundToQuarterIncrement(
+              (touchedOldQtyByPid.get(p.product_id) || 0) + p.quantity,
+            ),
+          );
+        }
+      }
+
       const expectedProductTotals = new Map(context.originalProductTotals);
-      for (const pid of allEditedPids) {
+      const touchedPids = new Set([
+        ...touchedNewQtyByPid.keys(),
+        ...touchedOldQtyByPid.keys(),
+      ]);
+      for (const pid of touchedPids) {
         const priorQty = context.originalProductTotals.get(pid) || 0;
-        const delta = netDeltaByPid.get(pid) || 0;
+        const touchedOldQty = touchedOldQtyByPid.get(pid) || 0;
+        const touchedNewQty = touchedNewQtyByPid.get(pid) || 0;
         expectedProductTotals.set(
           pid,
-          roundToQuarterIncrement(priorQty + delta),
+          roundToQuarterIncrement(priorQty - touchedOldQty + touchedNewQty),
         );
       }
 

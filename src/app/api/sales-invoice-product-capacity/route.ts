@@ -1,22 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SalesInvoiceValidator } from "@/lib/services/sales-balance/SalesInvoiceValidator";
 import {
-  computeAvailableForEdit,
+  computeEditableDayPool,
   loadDayAvailability,
 } from "@/lib/services/sales-balance/SalesDayStockAvailability";
 import { createClient } from "@/lib/supabase/server";
 
 /**
- * Read-only "how much of this product can be added to THIS invoice right
- * now" figure — powers the Quick Add stock hints in InvoiceEditor for
- * Sales batches.
- *
- * Sales invoice editing is day-scoped (see SalesDayScopedEditEngine): an
- * edit can only draw on stock physically available on the edited
- * invoice's own day, no cross-day borrowing. This mirrors exactly what
- * the engine enforces at save time via the same
- * loadDayAvailability/computeAvailableForEdit helpers, so the badge shown
- * here can never drift from what saving will actually allow.
+ * Read-only "available stock" figure shown in InvoiceEditor for Sales
+ * batches — the day's total physical stock minus whatever's permanently
+ * reserved by Major Customer invoices (never touchable, never an edit
+ * target). This is a reference ceiling, not a hard per-line cap: a
+ * day-scoped edit can redistribute quantity between regular invoices on
+ * the same day (see SalesDayScopedEditEngine), so the real answer to
+ * "can I actually make this specific change" depends on live allocations
+ * across every invoice that day, not just this one — checked for real at
+ * save time, which is why an edit within this figure can still be
+ * rejected as "not possible" if the redistribution itself doesn't work
+ * out (e.g. a peer's own quantity floor).
  */
 export async function POST(request: NextRequest) {
   try {
@@ -74,17 +75,16 @@ export async function POST(request: NextRequest) {
       stockSourceBatchIds,
       invoiceDate,
     );
-    const availableForEdit = computeAvailableForEdit(
+    const editableDayPool = computeEditableDayPool(
       context,
       staticAvailable,
       invoiceDate,
-      invoiceId,
     );
 
     const capacities: Record<string, number> = {};
     for (const productId of batchProductIds) {
       capacities[productId] =
-        Math.round((availableForEdit.get(productId) || 0) * 100) / 100;
+        Math.round((editableDayPool.get(productId) || 0) * 100) / 100;
     }
 
     return NextResponse.json({ capacities, date: invoiceDate });

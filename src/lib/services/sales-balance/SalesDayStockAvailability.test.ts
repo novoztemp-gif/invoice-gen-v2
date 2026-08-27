@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   computeAvailableForEdit,
+  computeEditableDayPool,
   loadDayAvailability,
 } from "./SalesDayStockAvailability";
 import type { SalesBalanceContext, SalesInvoice } from "./types";
@@ -234,5 +235,85 @@ describe("computeAvailableForEdit", () => {
       "edited-inv",
     );
     expect(result.get(PRODUCT_A)).toBe(0);
+  });
+});
+
+describe("computeEditableDayPool", () => {
+  function invoiceWithParty(
+    id: string,
+    date: string,
+    customerId: string,
+    lines: Array<{ product_id: string; quantity: number }>,
+  ): SalesInvoice {
+    return {
+      id,
+      invoice_batch_id: "batch-1",
+      invoice_number: id,
+      invoice_date: date,
+      products: lines.map((l) => ({
+        product_id: l.product_id,
+        product_name: l.product_id,
+        hsn_code: "1234",
+        unit_of_measure: "kg",
+        quantity: l.quantity,
+        rate: 100,
+        amount: l.quantity * 100,
+        customer_id: customerId,
+      })),
+      total_amount: lines.reduce((s, l) => s + l.quantity * 100, 0),
+    };
+  }
+
+  it("subtracts ONLY Major Customer consumption, leaving regular invoices' holdings fully in the pool", () => {
+    const majorInv = invoiceWithParty("major-1", "2026-08-05", "cust-major", [
+      { product_id: PRODUCT_A, quantity: 3 },
+    ]);
+    const regularInv = invoiceWithParty("reg-1", "2026-08-05", "cust-reg", [
+      { product_id: PRODUCT_A, quantity: 5 },
+    ]);
+    const context: SalesBalanceContext = {
+      batchId: "batch-1",
+      batchTotal: 0,
+      stockSourceBatchId: null,
+      originalProductTotals: new Map(),
+      availableStockMap: new Map(),
+      totalPurchasedByProduct: new Map(),
+      invoices: [majorInv, regularInv],
+      constraints: new Map(),
+      majorCustomerIds: new Set(["cust-major"]),
+    };
+    const staticAvailable = new Map([[PRODUCT_A, 20]]);
+
+    const result = computeEditableDayPool(context, staticAvailable, "2026-08-05");
+
+    // 20 total - 3 reserved by the major customer = 17. The regular
+    // invoice's own 5kg stays IN the pool (unlike computeAvailableForEdit,
+    // which would also subtract it) since it's a valid redistribution
+    // target, not a permanent reservation.
+    expect(result.get(PRODUCT_A)).toBe(17);
+  });
+
+  it("ignores Major Customer invoices on a different day", () => {
+    const majorOtherDay = invoiceWithParty(
+      "major-1",
+      "2026-08-06",
+      "cust-major",
+      [{ product_id: PRODUCT_A, quantity: 3 }],
+    );
+    const context: SalesBalanceContext = {
+      batchId: "batch-1",
+      batchTotal: 0,
+      stockSourceBatchId: null,
+      originalProductTotals: new Map(),
+      availableStockMap: new Map(),
+      totalPurchasedByProduct: new Map(),
+      invoices: [majorOtherDay],
+      constraints: new Map(),
+      majorCustomerIds: new Set(["cust-major"]),
+    };
+    const staticAvailable = new Map([[PRODUCT_A, 20]]);
+
+    const result = computeEditableDayPool(context, staticAvailable, "2026-08-05");
+    expect(result.get(PRODUCT_A)).toBe(20);
   });
 });

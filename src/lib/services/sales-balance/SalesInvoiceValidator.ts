@@ -84,6 +84,37 @@ export class SalesInvoiceValidator {
       date_of_supply: inv.date_of_supply ?? null,
     }));
 
+    // Self-heal — confirmed as a real, reported bug: a small number of
+    // pre-existing lines have a stored `amount` that doesn't match their
+    // own quantity x rate (e.g. a stray non-whole-rupee value like
+    // 2344.5), left over from before this exact invariant was enforced
+    // everywhere it's set today. Every code path that actually WRITES a
+    // Sales line amount already goes through computeLineAmount — amount
+    // is always a DERIVED value here, never independently entered — so
+    // unlike a genuinely ambiguous mismatch (is quantity, rate, or amount
+    // the wrong one?), recomputing it from the line's own quantity/rate is
+    // the unambiguous fix, not a guess. Previously this went undetected
+    // for invoices no edit had ever touched; SalesDayScopedEditEngine's
+    // same-day redistribution now validates a wider set of invoices per
+    // edit (including untouched peers), which is what actually surfaced
+    // it — blocking a completely unrelated edit with a batch-total
+    // mismatch that had nothing to do with what the user changed.
+    for (const inv of invoices) {
+      let anyLineCorrected = false;
+      for (const line of inv.products) {
+        const expected = computeLineAmount(line.quantity, line.rate);
+        if (Math.abs(line.amount - expected) > 0.01) {
+          line.amount = expected;
+          anyLineCorrected = true;
+        }
+      }
+      if (anyLineCorrected) {
+        inv.total_amount = roundMoney(
+          inv.products.reduce((s, p) => s + p.amount, 0),
+        );
+      }
+    }
+
     // Compute original total sold quantity per product across the batch
     const originalProductTotals = new Map<string, number>();
     const productIds = new Set<string>();
