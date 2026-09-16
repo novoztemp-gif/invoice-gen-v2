@@ -5,9 +5,13 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export async function triggerDownload(url: string, fallbackFilename: string) {
+export async function triggerDownload(
+  url: string,
+  fallbackFilename: string,
+  init?: RequestInit,
+) {
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, init);
     if (!response.ok) throw new Error("Download failed");
 
     const contentDisposition = response.headers.get("content-disposition");

@@ -23,6 +23,8 @@ import {
   FolderArchive,
   Truck,
   Tag,
+  CalendarRange,
+  ArrowLeftRight,
 } from "lucide-react";
 
 interface SidebarItem {
@@ -102,6 +104,16 @@ const sidebarSections: SidebarSection[] = [
         icon: TrendingUp,
       },
       { name: "Customer Reports", href: "/reports/customer", icon: Users },
+      {
+        name: "Monthly Split-up",
+        href: "/reports/monthly-split-up",
+        icon: CalendarRange,
+      },
+      {
+        name: "Debtors & Creditors",
+        href: "/reports/debtors-creditors",
+        icon: ArrowLeftRight,
+      },
     ],
   },
   {

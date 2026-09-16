@@ -92,7 +92,7 @@ export interface FilingWorkbookInput {
   issuingCompany: FilingIssuingCompany | null;
 }
 
-const THIN_BORDER = {
+export const THIN_BORDER = {
   top: { style: "thin", color: { argb: "FF000000" } },
   left: { style: "thin", color: { argb: "FF000000" } },
   bottom: { style: "thin", color: { argb: "FF000000" } },
@@ -121,14 +121,14 @@ const PRODUCT_BLOCK_DIVIDER_BORDER = {
 // the previous dark-fill/white-text convention. Reserved for genuine
 // header-level elements; plain field labels stay unfilled (see
 // HEADER_NAVY/HEADER_BAND_FILL usage below vs. addLabelValueRow).
-const HEADER_NAVY = "FF000080";
-const HEADER_BAND_FILL = {
+export const HEADER_NAVY = "FF000080";
+export const HEADER_BAND_FILL = {
   type: "pattern",
   pattern: "solid",
   fgColor: { argb: "FFEAEAEA" },
 } as const;
 
-const ALT_ROW_FILL = {
+export const ALT_ROW_FILL = {
   type: "pattern",
   pattern: "solid",
   fgColor: { argb: "FFF2F2F2" },
@@ -147,7 +147,7 @@ const EDITABLE_FILL = {
   fgColor: { argb: "FFFFF2CC" },
 } as const;
 
-const CURRENCY_FORMAT = "₹#,##0.00";
+export const CURRENCY_FORMAT = "₹#,##0.00";
 const QUANTITY_FORMAT = "#,##0.00";
 
 /** Prompt 9/12: per-column widths within one product block on the
@@ -296,14 +296,14 @@ function configurePage(
   }
 }
 
-function styleHeaderCell(cell: ExcelJS.Cell) {
+export function styleHeaderCell(cell: ExcelJS.Cell) {
   cell.fill = HEADER_BAND_FILL as any;
   cell.font = { name: "Calibri", size: 11, bold: true, color: { argb: HEADER_NAVY } };
   cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
   cell.border = THIN_BORDER as any;
 }
 
-function styleDataCell(
+export function styleDataCell(
   cell: ExcelJS.Cell,
   isOdd: boolean,
   align: "left" | "right" | "center" = "left",
@@ -316,7 +316,7 @@ function styleDataCell(
   if (numFmt) cell.numFmt = numFmt;
 }
 
-function styleTotalCell(cell: ExcelJS.Cell, align: "left" | "right" | "center" = "left", numFmt?: string) {
+export function styleTotalCell(cell: ExcelJS.Cell, align: "left" | "right" | "center" = "left", numFmt?: string) {
   cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF595959" } } as any;
   cell.font = { name: "Calibri", size: 11, bold: true, color: { argb: "FFFFFFFF" } };
   cell.alignment = { horizontal: align, vertical: "middle" };

@@ -51,21 +51,28 @@ const PRECISION = 100;
  * Redistributes `newTotal` across `weights.length` lines, proportional to
  * each line's current weight (quantity or amount), using a deterministic
  * largest-remainder allocation so the result always sums EXACTLY to
- * `newTotal` at 2-decimal precision, never goes negative, and never uses
- * randomness — ties are broken by ascending original index.
+ * `newTotal` at the given precision (2-decimal by default, matching the
+ * workbook's own "#,##0.00" cell format), never goes negative, and never
+ * uses randomness — ties are broken by ascending original index.
  *
  * Matches Prompt 4's own worked example exactly: weights [20,30,50],
  * newTotal 120 -> [24,36,60].
+ *
+ * `precision` is the number of allocation "units" per whole 1 — pass 4 to
+ * allocate in exact quarter-increments (.00/.25/.50/.75) instead of cents,
+ * e.g. for stock quantities that must land on real-world fractional-kg
+ * steps rather than arbitrary 2-decimal values.
  */
 export function redistributeProportionally(
   weights: number[],
   newTotal: number,
+  precision: number = PRECISION,
 ): number[] {
   const n = weights.length;
   if (n === 0) return [];
 
   const safeTotal = Math.max(0, newTotal);
-  const targetUnits = Math.round(safeTotal * PRECISION);
+  const targetUnits = Math.round(safeTotal * precision);
 
   const weightSum = weights.reduce((s, w) => s + Math.max(0, w), 0);
 
@@ -107,7 +114,7 @@ export function redistributeProportionally(
     idx++;
   }
 
-  return shares.map((v) => v / PRECISION);
+  return shares.map((v) => v / precision);
 }
 
 // ---------------------------------------------------------------------------
