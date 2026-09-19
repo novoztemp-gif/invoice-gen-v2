@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import fetchJobStats from "@/app/invoice-batches/[id]/actions";
 import { createClient } from "@/lib/supabase/client";
-import { fetchAllInvoicesForBatch } from "@/lib/supabase/fetchAll";
+import { fetchAllInvoicesForBatch, fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 import { triggerDownload } from "@/lib/utils";
 
 export type InvoiceBatch = {
@@ -107,10 +107,23 @@ export function useInvoiceBatchDetail({ batchId }: UseInvoiceBatchDetailProps) {
   const fetchReceivingCustomers = async () => {
     try {
       const supabase = createClient();
-      const { data: recData } = await supabase
-        .from("receiving_companies")
-        .select("*");
-      const { data: supData } = await supabase.from("suppliers").select("*");
+      // A plain `.select("*")` here silently truncates at PostgREST's
+      // default 1000-row cap. Confirmed as the real cause of a live bug:
+      // an invoice's own customer_id was correct, but this lookup map was
+      // missing that specific customer (their row fell past row 1000), so
+      // the display code's fallback chain silently substituted the
+      // batch's single default receiving-company name for every invoice
+      // whose real customer couldn't be found here — making unrelated
+      // invoices (including Major Customers) all display the same wrong
+      // name. fetchAllQueryRows paginates through every row instead.
+      const [recData, supData] = await Promise.all([
+        fetchAllQueryRows<any>((from, to) =>
+          supabase.from("receiving_companies").select("*").range(from, to),
+        ),
+        fetchAllQueryRows<any>((from, to) =>
+          supabase.from("suppliers").select("*").range(from, to),
+        ),
+      ]);
       const map: Record<string, any> = {};
       if (recData) {
         recData.forEach((c) => {

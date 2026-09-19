@@ -166,23 +166,30 @@ export default function BatchDetail() {
     const invNumber = (invoice.invoice_number || "").toLowerCase();
     if (invNumber.includes(cleanQuery)) return true;
 
-    // 2. Main Partner Name (Supplier / Customer)
-    const partnerId =
+    // 2. Main Partner Name (Supplier / Customer) — same fix as the invoice
+    // card's own name resolution below: an invoice with its own specific
+    // customer that fails to resolve must never fall back to the batch's
+    // single default company name (that would make searching the default
+    // company's name wrongly match every unresolved invoice, and searching
+    // an unresolved customer's real name match nothing).
+    const specificPartnerId =
       (invoice as any).customer_id ||
       (invoice as any).supplier_id ||
-      invoice.products?.[0]?.customer_id ||
-      (batch as any)?.supplier_id ||
-      batch?.receiving_company_id;
+      invoice.products?.[0]?.customer_id;
 
-    const partnerObj = partnerId ? receivingCustomers[partnerId] : null;
+    const partnerObj = specificPartnerId
+      ? receivingCustomers[specificPartnerId]
+      : null;
     const partnerName = (
-      partnerObj?.company_name ||
-      partnerObj?.supplier_name ||
-      partnerObj?.name ||
-      (batch as any)?.suppliers?.company_name ||
-      (batch as any)?.suppliers?.supplier_name ||
-      batch?.receiving_companies?.company_name ||
-      ""
+      specificPartnerId
+        ? partnerObj?.company_name ||
+          partnerObj?.supplier_name ||
+          partnerObj?.name ||
+          ""
+        : (batch as any)?.suppliers?.company_name ||
+          (batch as any)?.suppliers?.supplier_name ||
+          batch?.receiving_companies?.company_name ||
+          ""
     ).toLowerCase();
 
     if (partnerName.includes(cleanQuery)) return true;
@@ -924,20 +931,38 @@ export default function BatchDetail() {
                                         )}
                                       </div>
                                       {(() => {
-                                        const partnerId =
+                                        // Hotfix — real bug: when this
+                                        // invoice HAS its own specific
+                                        // customer, a failed lookup (e.g.
+                                        // the customer missing from
+                                        // receivingCustomers) used to fall
+                                        // all the way through to the
+                                        // BATCH's single default
+                                        // supplier/receiving-company name
+                                        // — silently mislabeling this
+                                        // invoice as belonging to whoever
+                                        // that default company is, no
+                                        // matter who the invoice's real
+                                        // customer actually was. The batch-
+                                        // level fallback is now only used
+                                        // when the invoice has no specific
+                                        // customer of its own at all — a
+                                        // specific customer that can't be
+                                        // resolved shows as unresolved,
+                                        // never as a different real name.
+                                        const specificPartnerId =
                                           (invoice as any).customer_id ||
-                                          invoice.products?.[0]?.customer_id ||
-                                          (batch as any).supplier_id ||
-                                          batch.receiving_company_id;
-                                        const partnerObj = partnerId
-                                          ? receivingCustomers[partnerId]
+                                          invoice.products?.[0]?.customer_id;
+                                        const partnerObj = specificPartnerId
+                                          ? receivingCustomers[specificPartnerId]
                                           : null;
-                                        const partnerName =
-                                          partnerObj?.company_name ||
-                                          partnerObj?.supplier_name ||
-                                          batch.suppliers?.company_name ||
-                                          batch.receiving_companies
-                                            ?.company_name;
+                                        const partnerName = specificPartnerId
+                                          ? partnerObj?.company_name ||
+                                            partnerObj?.supplier_name ||
+                                            "Unknown Customer"
+                                          : batch.suppliers?.company_name ||
+                                            batch.receiving_companies
+                                              ?.company_name;
                                         return partnerName ? (
                                           <p className="text-xs text-slate-500 font-medium mt-0.5">
                                             {batch.batch_type === "PURCHASE"
