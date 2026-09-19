@@ -257,34 +257,52 @@ export function BulkUploadSuppliersDialog() {
         let failed = preValidationFailed;
         let chunksDone = 0;
 
+        // A single bad row anywhere in a bulk insert/upsert fails the
+        // WHOLE batch — real, reported bug: one problem row was silently
+        // taking ~199 good ones down with it. On a chunk failure, fall
+        // back to writing that chunk's rows one at a time so only the
+        // genuinely bad rows are ever reported as failed.
         for (const chunk of insertChunks) {
           const { data: insertedRows, error: insertError } = await supabase
             .from("suppliers")
             .insert(chunk)
             .select("id");
 
-          if (insertError) {
-            failed += chunk.length;
-          } else {
+          if (!insertError) {
             inserted += insertedRows?.length ?? chunk.length;
+          } else {
+            for (const row of chunk) {
+              const { error: rowError } = await supabase
+                .from("suppliers")
+                .insert(row);
+              if (rowError) failed++;
+              else inserted++;
+            }
           }
           chunksDone++;
           setProgress({ current: chunksDone, total: totalChunks });
         }
 
         for (const chunk of updateChunks) {
+          const stamped = chunk.map((r) => ({
+            ...r,
+            updated_at: new Date().toISOString(),
+          }));
           const { data: updatedRows, error: updateError } = await supabase
             .from("suppliers")
-            .upsert(
-              chunk.map((r) => ({ ...r, updated_at: new Date().toISOString() })),
-              { onConflict: "id" },
-            )
+            .upsert(stamped, { onConflict: "id" })
             .select("id");
 
-          if (updateError) {
-            failed += chunk.length;
-          } else {
+          if (!updateError) {
             updated += updatedRows?.length ?? chunk.length;
+          } else {
+            for (const row of stamped) {
+              const { error: rowError } = await supabase
+                .from("suppliers")
+                .upsert(row, { onConflict: "id" });
+              if (rowError) failed++;
+              else updated++;
+            }
           }
           chunksDone++;
           setProgress({ current: chunksDone, total: totalChunks });

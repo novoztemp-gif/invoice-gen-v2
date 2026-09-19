@@ -220,36 +220,62 @@ export function BulkUploadCustomersDialog() {
         let failed = preValidationFailed;
         let chunksDone = 0;
 
+        // A single bad row anywhere in a bulk insert/upsert fails the
+        // WHOLE batch — real, reported bug: one problem row was silently
+        // taking the rest of that chunk down with it. On a chunk failure,
+        // fall back to writing that chunk's rows one at a time so only the
+        // genuinely bad rows are ever reported as failed.
         for (const chunk of insertChunks) {
           const { data: insertedRows, error: insertError } = await supabase
             .from("receiving_companies")
             .insert(chunk)
             .select("id");
 
-          if (insertError) {
-            console.error("Bulk insert error:", insertError);
-            failed += chunk.length;
-          } else {
+          if (!insertError) {
             inserted += insertedRows?.length ?? chunk.length;
+          } else {
+            console.error("Bulk insert error, falling back to row-by-row:", insertError);
+            for (const row of chunk) {
+              const { error: rowError } = await supabase
+                .from("receiving_companies")
+                .insert(row);
+              if (rowError) {
+                console.error("Row insert error for:", row.company_name, rowError);
+                failed++;
+              } else {
+                inserted++;
+              }
+            }
           }
           chunksDone++;
           setProgress({ current: chunksDone, total: totalChunks });
         }
 
         for (const chunk of updateChunks) {
+          const stamped = chunk.map((r) => ({
+            ...r,
+            updated_at: new Date().toISOString(),
+          }));
           const { data: updatedRows, error: updateError } = await supabase
             .from("receiving_companies")
-            .upsert(
-              chunk.map((r) => ({ ...r, updated_at: new Date().toISOString() })),
-              { onConflict: "id" },
-            )
+            .upsert(stamped, { onConflict: "id" })
             .select("id");
 
-          if (updateError) {
-            console.error("Bulk update error:", updateError);
-            failed += chunk.length;
-          } else {
+          if (!updateError) {
             updated += updatedRows?.length ?? chunk.length;
+          } else {
+            console.error("Bulk update error, falling back to row-by-row:", updateError);
+            for (const row of stamped) {
+              const { error: rowError } = await supabase
+                .from("receiving_companies")
+                .upsert(row, { onConflict: "id" });
+              if (rowError) {
+                console.error("Row update error for:", row.company_name, rowError);
+                failed++;
+              } else {
+                updated++;
+              }
+            }
           }
           chunksDone++;
           setProgress({ current: chunksDone, total: totalChunks });
