@@ -6265,6 +6265,29 @@ export class InvoiceEngine {
       }
     }
 
+    // Hotfix — every invoice-supplier assignment below (STEP 2's main
+    // loop, the anticipated-reservation loop, and the drift top-up loop)
+    // walks these arrays with a plain incrementing counter modulo array
+    // length. That's a real round-robin (every supplier eventually gets a
+    // turn), but it always starts at index 0 and always visits suppliers
+    // in the exact order they arrived from selected_customers (typically
+    // alphabetical/fetch order) — so on a large supplier list (e.g. 1500)
+    // with far fewer invoices than suppliers in a category, the SAME
+    // leading slice of suppliers (in the SAME order) gets used on every
+    // single generation, and the rest are never touched. Shuffling once
+    // here keeps every later index arithmetic byte-identical (still a
+    // real round-robin, still guarantees no repeats before a full lap) —
+    // it just randomizes WHICH suppliers occupy which slot, so a
+    // different, genuinely random subset/order gets used each time.
+    for (let i = fruitSuppliers.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [fruitSuppliers[i], fruitSuppliers[j]] = [fruitSuppliers[j], fruitSuppliers[i]];
+    }
+    for (let i = meatSuppliers.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [meatSuppliers[i], meatSuppliers[j]] = [meatSuppliers[j], meatSuppliers[i]];
+    }
+
     // 1. Group products strictly by category using resolveProductCategory(p) (excluding 0% occurrence products)
     const productsByCategory = new Map<string, ProductConfig[]>();
     for (const p of batch.products) {
