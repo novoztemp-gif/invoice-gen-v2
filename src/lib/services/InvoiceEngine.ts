@@ -7989,6 +7989,37 @@ export class InvoiceEngine {
       );
     }
 
+    // Hotfix — final invoice-amount-range guard. The drift redistribution
+    // above (STEP 3) only closes the gap between the batch's configured
+    // total and what's actually invoiced — it doesn't itself guarantee
+    // every individual invoice still respects [thresholdMin, thresholdMax]
+    // afterward (e.g. an invoice can be left below thresholdMin if no
+    // compatible same-category invoice had headroom to absorb it). Without
+    // this, such an invoice silently persisted and only surfaced later at
+    // batch-finalization time — far too late to auto-correct. Major
+    // Customer invoices are excluded (their own max is already enforced
+    // above, and there is deliberately no separate minimum for them — see
+    // the identical carve-out in the finalization-time check). This
+    // function runs inside generateWithAutoRetry (see its call site), so
+    // throwing here triggers a fresh random draw instead of persisting an
+    // out-of-range invoice.
+    const rangeViolations = invoices.filter((inv) => {
+      if (majorCustomerIdSet.has(inv.customer_id)) return false;
+      const amt = Math.round(inv.total_amount || 0);
+      return amt < thresholdMin || amt > thresholdMax;
+    });
+    if (rangeViolations.length > 0) {
+      const v = rangeViolations[0];
+      const amt = Math.round(v.total_amount || 0);
+      const reason =
+        amt < thresholdMin
+          ? `below minimum ₹${thresholdMin}`
+          : `above maximum ₹${thresholdMax}`;
+      throw new Error(
+        `Invoice Amount Range Violation: ${rangeViolations.length} generated invoice(s) (e.g. ${v.invoice_number || "unnumbered"} at ₹${amt}, ${reason}) fell outside the batch's configured invoice amount range [₹${thresholdMin}, ₹${thresholdMax}]. Invoice Amount Range Violation.`,
+      );
+    }
+
     // Hotfix: close any remaining small occurrence deviations via a
     // targeted, amount-preserving line-identity swap before the final
     // guards below re-validate everything. See repairOccurrenceDeviations
