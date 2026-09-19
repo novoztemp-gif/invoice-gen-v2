@@ -4337,8 +4337,31 @@ export class InvoiceEngine {
         } else if (activeSelectedCustomers.length > 0) {
           const catEst = categoryTotals.get(invCategory) || 0;
           const catRatio = catEst / grandTotalEst;
+          // Hotfix — real-world concentration bug. This quota caps how many
+          // DISTINCT customers ever get locked to a category (a customer
+          // then keeps buying only that category for the rest of the
+          // batch — deliberate, for realism). The floor used to be a flat
+          // `1`, which a skewed catRatio (one category being a small
+          // fraction of the batch's total ₹ value, even with hundreds of
+          // invoices in it — ₹-share and invoice-COUNT are not the same
+          // thing) could round down to on a large customer pool — e.g.
+          // 1000 selected customers x a 0.3% catRatio rounds to ~3, and
+          // `Math.max(1, ...)` never rejects that. The "no customer gets
+          // two invoices on the same DAY" rule never catches this, since
+          // the same handful of customers cycling across many DIFFERENT
+          // days is perfectly legal by that rule alone — confirmed as the
+          // real cause of a reported batch where one customer ("select
+          // all customers" + several configured Major Customers besides)
+          // ended up on nearly every non-major invoice. Flooring the quota
+          // at 15% of the active pool (never more than the pool itself)
+          // guarantees real diversity regardless of how lopsided catRatio
+          // is, while still letting a genuinely ₹-heavy category grow
+          // past that floor exactly as before.
           const catQuota = Math.max(
-            1,
+            Math.min(
+              activeSelectedCustomers.length,
+              Math.ceil(activeSelectedCustomers.length * 0.15),
+            ),
             Math.round(activeSelectedCustomers.length * catRatio),
           );
           const assignedCountForCat = Array.from(
