@@ -41,7 +41,10 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useInvoiceForm } from "@/lib/hooks/useInvoiceForm";
 import { createClient } from "@/lib/supabase/client";
 import { ValidationGuidanceModal } from "@/components/ValidationGuidanceModal";
-import { CategorySplitSection } from "@/components/CategorySplitSection";
+import {
+  CategorySplitSection,
+  CategorySplitItem,
+} from "@/components/CategorySplitSection";
 import {
   OccurrenceExcelUploadModal,
   downloadOccurrenceTemplate,
@@ -107,6 +110,49 @@ export default function GeneratePurchaseInvoice() {
   } = useInvoiceForm({ batchType: "PURCHASE" });
 
   const errorBorderClass = "border-red-500 ring-1 ring-red-500";
+
+  // Category Split card is the single, real Meat/Fruits % control (the
+  // small inputs that used to live inline in the Occurrence Quota card are
+  // gone — this derives its display from categoryAllocation, the state
+  // that's actually sent to generation, and writes back to it on edit.
+  const categorySplitValue: CategorySplitItem[] = [
+    {
+      category_name: "Meat",
+      percentage: parseFloat(categoryAllocation.Meat) || 0,
+      amount:
+        Math.round(
+          ((parseFloat(formData.totalAmount) || 0) *
+            (parseFloat(categoryAllocation.Meat) || 0)) /
+            100 *
+            100,
+        ) / 100,
+    },
+    {
+      category_name: "Fruits",
+      percentage: parseFloat(categoryAllocation.Fruits) || 0,
+      amount:
+        Math.round(
+          ((parseFloat(formData.totalAmount) || 0) *
+            (parseFloat(categoryAllocation.Fruits) || 0)) /
+            100 *
+            100,
+        ) / 100,
+    },
+  ];
+  const handleCategorySplitChange = (splits: CategorySplitItem[]) => {
+    const meat = splits.find((s) => s.category_name === "Meat");
+    const fruits = splits.find((s) => s.category_name === "Fruits");
+    setCategoryAllocation({
+      Meat: String(meat?.percentage ?? 0),
+      Fruits: String(fruits?.percentage ?? 0),
+    });
+  };
+  const categorySplitEditable =
+    occurrenceSemantics === "CATEGORY" && selectedProducts.length > 0;
+  const categorySplitHint =
+    occurrenceSemantics !== "CATEGORY"
+      ? 'Select "By Category" above to set this manually.'
+      : "Select at least one product below to enable this.";
 
   const [occurrenceProductOpen, setOccurrenceProductOpen] = useState(false);
   const [selectedOccurProduct, setSelectedOccurProduct] = useState("");
@@ -1046,44 +1092,10 @@ export default function GeneratePurchaseInvoice() {
               </label>
             </div>
             {occurrenceSemantics === "CATEGORY" && (
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <Label className="text-[11px] text-slate-500">Meat %</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    max="100"
-                    step="0.01"
-                    value={categoryAllocation.Meat}
-                    onChange={(e) =>
-                      setCategoryAllocation({
-                        ...categoryAllocation,
-                        Meat: e.target.value,
-                      })
-                    }
-                    className="h-8 text-xs rounded-md"
-                  />
-                </div>
-                <div className="flex-1">
-                  <Label className="text-[11px] text-slate-500">
-                    Fruits %
-                  </Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    max="100"
-                    step="0.01"
-                    value={categoryAllocation.Fruits}
-                    onChange={(e) =>
-                      setCategoryAllocation({
-                        ...categoryAllocation,
-                        Fruits: e.target.value,
-                      })
-                    }
-                    className="h-8 text-xs rounded-md"
-                  />
-                </div>
-              </div>
+              <p className="text-xs text-slate-500">
+                Set the Meat/Fruits % split in the "Category Split" card
+                below, once you've selected products.
+              </p>
             )}
           </CardContent>
         </Card>
@@ -1670,11 +1682,16 @@ export default function GeneratePurchaseInvoice() {
           </CardContent>
         </Card>
 
-        {/* Category Split Section */}
+        {/* Category Split Section — in Global mode this is a read-only
+            display of what the per-product occurrence settings work out to
+            (computed by the effect above); in By Category mode (with
+            products selected) it becomes the real editable control. */}
         <CategorySplitSection
           totalAmount={formData.totalAmount}
-          value={categorySplits}
-          onChange={setCategorySplits}
+          value={categorySplitEditable ? categorySplitValue : categorySplits}
+          onChange={handleCategorySplitChange}
+          readOnly={!categorySplitEditable}
+          disabledHint={categorySplitHint}
         />
 
         {/* Anticipated Major Customer Demand — optional. Pre-declares a

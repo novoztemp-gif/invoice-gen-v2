@@ -12,6 +12,7 @@ import {
 } from "@/lib/services/InvoiceNumberingService";
 import { validateCategoryOccurrenceConfiguration } from "@/lib/services/ProductOccurrenceService";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 import {
   enforceMinimumInvoiceAmount,
   reconcileInvoicesToTargets,
@@ -210,38 +211,65 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
       const partyTable =
         batchType === "PURCHASE" ? "suppliers" : "receiving_companies";
 
-      const [issuingRes, receivingRes, productsRes, rulesRes, anticipatedRes] =
-        await Promise.all([
+      // Real, reported bug: plain `.select("*")` caps at PostgREST's
+      // default 1000-row limit. A supplier/customer sorted alphabetically
+      // past row 1000 (easily hit after a large bulk upload) would just
+      // silently be missing from every picker on this page, while still
+      // showing up fine on the master list pages (which sort by
+      // created_at, not name, so a *recently added* row still lands in the
+      // first 1000 there even when it's absent here). Paginated with
+      // fetchAllQueryRows — same fix already applied to daily_stock_ledger
+      // reads elsewhere in this app for the identical reason.
+      const [
+        issuingRows,
+        receivingRows,
+        productsRows,
+        rulesRows,
+        anticipatedRows,
+      ] = await Promise.all([
+        fetchAllQueryRows<any>((from, to) =>
           supabase
             .from("issuing_companies")
             .select("*")
-            .order("company_name", { ascending: true }),
+            .order("company_name", { ascending: true })
+            .range(from, to),
+        ),
+        fetchAllQueryRows<any>((from, to) =>
           supabase
             .from(partyTable)
             .select("*")
-            .order("company_name", { ascending: true }),
+            .order("company_name", { ascending: true })
+            .range(from, to),
+        ),
+        fetchAllQueryRows<any>((from, to) =>
           supabase
             .from("products")
             .select("*")
-            .order("product_name", { ascending: true }),
-          supabase.from("product_rules").select("*"),
-          // Anticipated Major Customer Demand (PURCHASE only) picks from
-          // the real Sales customer master, not `partyTable` (suppliers,
-          // for Purchase) — a separate fetch since the two lists differ.
-          batchType === "PURCHASE"
-            ? supabase
+            .order("product_name", { ascending: true })
+            .range(from, to),
+        ),
+        fetchAllQueryRows<any>((from, to) =>
+          supabase.from("product_rules").select("*").range(from, to),
+        ),
+        // Anticipated Major Customer Demand (PURCHASE only) picks from
+        // the real Sales customer master, not `partyTable` (suppliers,
+        // for Purchase) — a separate fetch since the two lists differ.
+        batchType === "PURCHASE"
+          ? fetchAllQueryRows<any>((from, to) =>
+              supabase
                 .from("receiving_companies")
                 .select("*")
                 .order("company_name", { ascending: true })
-            : Promise.resolve({ data: null }),
-        ]);
+                .range(from, to),
+            )
+          : Promise.resolve([]),
+      ]);
 
-      if (issuingRes.data) setIssuingCompanies(issuingRes.data);
-      if (receivingRes.data) setReceivingCompanies(receivingRes.data);
-      if (productsRes.data) setProducts(productsRes.data);
-      if (rulesRes.data) setProductRules(rulesRes.data);
-      if (anticipatedRes.data)
-        setAnticipatedCustomers(anticipatedRes.data as any);
+      setIssuingCompanies(issuingRows);
+      setReceivingCompanies(receivingRows);
+      setProducts(productsRows);
+      setProductRules(rulesRows);
+      setAnticipatedCustomers(anticipatedRows as any);
     };
 
     fetchData();

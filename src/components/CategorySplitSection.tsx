@@ -16,12 +16,23 @@ interface CategorySplitSectionProps {
   totalAmount: string | number;
   value: CategorySplitItem[];
   onChange: (splits: CategorySplitItem[]) => void;
+  /** When false, the Meat/Fruits % inputs become genuinely editable and
+   * drive `onChange` (used by the Purchase page once "By Category" mode is
+   * picked and at least one product is selected). Defaults to true, which
+   * preserves the original always-read-only, decorative-only behavior —
+   * the Sales page's own usage doesn't pass this and is unaffected. */
+  readOnly?: boolean;
+  /** Shown under the "must select products first" case, above the inputs,
+   * instead of the normal helper text. */
+  disabledHint?: string;
 }
 
 export function CategorySplitSection({
   totalAmount,
   value,
   onChange,
+  readOnly = true,
+  disabledHint,
 }: CategorySplitSectionProps) {
   const numericTotal =
     typeof totalAmount === "number"
@@ -114,10 +125,22 @@ export function CategorySplitSection({
       </CardHeader>
       <CardContent className="p-3.5">
         <p className="text-xs text-slate-500 mb-3">
-          <span className="font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200 mr-1.5">
-            READ-ONLY
-          </span>
-          Automatically calculated from Product Occurrence Distribution.
+          {readOnly ? (
+            <>
+              <span className="font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200 mr-1.5">
+                READ-ONLY
+              </span>
+              {disabledHint ?? "Automatically calculated from Product Occurrence Distribution."}
+            </>
+          ) : (
+            <>
+              <span className="font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 mr-1.5">
+                EDITABLE
+              </span>
+              Set the overall Meat/Fruits split directly — this replaces
+              configuring occurrence product-by-product.
+            </>
+          )}
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -139,9 +162,21 @@ export function CategorySplitSection({
               <Input
                 id="meat-pct"
                 type="number"
-                readOnly
+                min={0}
+                max={100}
+                step="0.01"
+                readOnly={readOnly}
                 value={meatSplit.percentage}
-                className="h-8 text-xs bg-slate-100 cursor-not-allowed text-right font-bold text-rose-900 border-rose-300"
+                onChange={
+                  readOnly
+                    ? undefined
+                    : (e) => handleMeatChange(parseFloat(e.target.value))
+                }
+                className={
+                  readOnly
+                    ? "h-8 text-xs bg-slate-100 cursor-not-allowed text-right font-bold text-rose-900 border-rose-300"
+                    : "h-8 text-xs bg-white text-right font-bold text-rose-900 border-rose-300"
+                }
               />
               <span className="font-bold text-rose-900">%</span>
             </div>
@@ -165,9 +200,21 @@ export function CategorySplitSection({
               <Input
                 id="fruit-pct"
                 type="number"
-                readOnly
+                min={0}
+                max={100}
+                step="0.01"
+                readOnly={readOnly}
                 value={fruitSplit.percentage}
-                className="h-8 text-xs bg-slate-100 cursor-not-allowed text-right font-bold text-amber-900 border-amber-300"
+                onChange={
+                  readOnly
+                    ? undefined
+                    : (e) => handleFruitChange(parseFloat(e.target.value))
+                }
+                className={
+                  readOnly
+                    ? "h-8 text-xs bg-slate-100 cursor-not-allowed text-right font-bold text-amber-900 border-amber-300"
+                    : "h-8 text-xs bg-white text-right font-bold text-amber-900 border-amber-300"
+                }
               />
               <span className="font-bold text-amber-900">%</span>
             </div>
