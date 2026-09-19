@@ -8012,20 +8012,79 @@ export class InvoiceEngine {
       );
     }
 
-    // Hotfix — final invoice-amount-range guard. The drift redistribution
-    // above (STEP 3) only closes the gap between the batch's configured
-    // total and what's actually invoiced — it doesn't itself guarantee
-    // every individual invoice still respects [thresholdMin, thresholdMax]
-    // afterward (e.g. an invoice can be left below thresholdMin if no
-    // compatible same-category invoice had headroom to absorb it). Without
-    // this, such an invoice silently persisted and only surfaced later at
-    // batch-finalization time — far too late to auto-correct. Major
-    // Customer invoices are excluded (their own max is already enforced
-    // above, and there is deliberately no separate minimum for them — see
-    // the identical carve-out in the finalization-time check). This
-    // function runs inside generateWithAutoRetry (see its call site), so
-    // throwing here triggers a fresh random draw instead of persisting an
-    // out-of-range invoice.
+    // Hotfix — global minimum-amount repair pass. STEP 3's drift
+    // redistribution above only closes the gap between the batch's
+    // configured total and what's actually invoiced — it doesn't itself
+    // guarantee every individual invoice still respects thresholdMin
+    // afterward (an invoice's own line quantity/rate granularity can leave
+    // it short with no headroom left to grow into). Confirmed as a real,
+    // reliably-reproducing (not just statistically unlucky) failure mode
+    // on a real large batch — generateWithAutoRetry's 100 attempts all hit
+    // it identically, proving it needed an actual repair, not another
+    // random draw. Mirrors Sales generation's proven "Final Minimum-Amount
+    // Safety Net": merge each below-minimum NORMAL invoice's product lines
+    // into another same-category NORMAL invoice with headroom under
+    // thresholdMax (never a Major Supplier invoice — its count/amount/max
+    // were already validated above and must not be disturbed), repeating
+    // until nothing more can be merged. Only what's still below
+    // thresholdMin afterward reaches the hard guard below as a genuine,
+    // unfixable violation.
+    if (thresholdMin > 0) {
+      let mergedGlobally = true;
+      while (mergedGlobally) {
+        mergedGlobally = false;
+        const belowIdx = invoices.findIndex(
+          (inv) =>
+            !majorCustomerIdSet.has(inv.customer_id) &&
+            Math.round(inv.total_amount || 0) < thresholdMin,
+        );
+        if (belowIdx === -1) break;
+
+        const belowInv: any = invoices[belowIdx];
+        const belowCategory = belowInv.category_key;
+        const belowProductIds = new Set(
+          belowInv.products.map((p: any) => p.product_id),
+        );
+        const targetIdx = invoices.findIndex(
+          (inv: any, idx: number) =>
+            idx !== belowIdx &&
+            !majorCustomerIdSet.has(inv.customer_id) &&
+            inv.category_key === belowCategory &&
+            Math.round(inv.total_amount || 0) +
+              Math.round(belowInv.total_amount || 0) <=
+              thresholdMax &&
+            // Never merge in a product the target invoice already carries
+            // — that would create a duplicate line for the same product
+            // at two different rates.
+            !inv.products.some((p: any) => belowProductIds.has(p.product_id)) &&
+            // Never let a merge push an invoice past the edit-time
+            // validator's 8-product-line cap.
+            inv.products.length + belowInv.products.length <= 8,
+        );
+
+        if (targetIdx === -1) break;
+
+        const targetInv: any = invoices[targetIdx];
+        targetInv.products.push(...belowInv.products);
+        targetInv.total_amount = Math.round(
+          (Number(targetInv.total_amount) || 0) +
+            (Number(belowInv.total_amount) || 0),
+        );
+        invoices.splice(belowIdx, 1);
+        mergedGlobally = true;
+      }
+    }
+
+    // Hotfix — final invoice-amount-range guard, after the repair pass
+    // above. Without this, an invoice the repair pass couldn't fix
+    // silently persisted and only surfaced later at batch-finalization
+    // time — far too late to auto-correct. Major Supplier invoices are
+    // excluded (their own max is already enforced above, and there is
+    // deliberately no separate minimum for them — see the identical
+    // carve-out in the finalization-time check). This function runs
+    // inside generateWithAutoRetry (see its call site), so throwing here
+    // triggers a fresh random draw instead of persisting an out-of-range
+    // invoice.
     const rangeViolations = invoices.filter((inv) => {
       if (majorCustomerIdSet.has(inv.customer_id)) return false;
       const amt = Math.round(inv.total_amount || 0);
