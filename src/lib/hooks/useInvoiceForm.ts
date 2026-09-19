@@ -23,6 +23,43 @@ function formatDateForStorage(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+/**
+ * By Category mode intentionally has no per-product occurrence UI — the
+ * user only picks products and sets an overall Meat/Fruits %. The
+ * generation engine still needs each product's occurrence percentage
+ * (interpreted within its own category's invoice pool) to sum to exactly
+ * 100% per category, so this splits each category's 100% evenly across
+ * its own selected products, in hundredths-of-a-percent units so the sum
+ * is always exact (never off by floating-point rounding).
+ */
+function computeEqualCategoryOccurrence(
+  products: Array<{ product: { id: string; category_name?: string; category?: string } }>,
+): Map<string, number> {
+  const byCategory = new Map<string, string[]>();
+  for (const item of products) {
+    const cat =
+      (item.product as any).category_name ||
+      (item.product as any).category ||
+      "Meat";
+    if (!byCategory.has(cat)) byCategory.set(cat, []);
+    byCategory.get(cat)!.push(item.product.id);
+  }
+
+  const result = new Map<string, number>();
+  for (const ids of byCategory.values()) {
+    const n = ids.length;
+    if (n === 0) continue;
+    const totalHundredths = 10000; // 100.00%
+    const base = Math.floor(totalHundredths / n);
+    const remainder = totalHundredths - base * n;
+    ids.forEach((id, idx) => {
+      const hundredths = idx < remainder ? base + 1 : base;
+      result.set(id, hundredths / 100);
+    });
+  }
+  return result;
+}
+
 export type IssuingCompany = {
   id: string;
   company_name: string;
@@ -923,6 +960,14 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           : null,
       });
 
+      // By Category mode: each product's occurrence within its own
+      // category is an automatic equal split, never user-entered — see
+      // computeEqualCategoryOccurrence's doc comment.
+      const equalCategorySplitForSubmit =
+        occurrenceSemantics === "CATEGORY"
+          ? computeEqualCategoryOccurrence(selectedProducts)
+          : null;
+
       const payloadToInsert = {
         issuing_company_id: selectedIssuingCompany?.id,
         stock_source_batch_id: null,
@@ -981,9 +1026,11 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
           perDayQtyMax: item.perDayQtyMax,
           perDayRateMin: item.perDayRateMin,
           perDayRateMax: item.perDayRateMax,
-          occurrencePercentage: item.occurrencePercentage
-            ? parseFloat(item.occurrencePercentage)
-            : null,
+          occurrencePercentage: equalCategorySplitForSubmit
+            ? equalCategorySplitForSubmit.get(item.product.id) ?? 0
+            : item.occurrencePercentage
+              ? parseFloat(item.occurrencePercentage)
+              : null,
         })),
         recurring_products: [],
         // Sprint 1.7S — NULL (the default, unless the user explicitly
@@ -1113,32 +1160,47 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         );
         return;
       }
-      if (
-        product.occurrencePercentage === undefined ||
-        product.occurrencePercentage === null ||
-        product.occurrencePercentage === ""
-      ) {
-        if (batchType === "SALES") {
-          const inherited =
-            (product as any).occurrencePercentage ??
-            (product.product as any).occurrencePercentage ??
-            "0";
-          product.occurrencePercentage = String(inherited);
-        } else {
+      // By Category mode doesn't use per-product occurrence at all — the
+      // Meat/Fruits % split is validated separately below, and each
+      // product's own share within its category is computed automatically
+      // (computeEqualCategoryOccurrence, used in formattedProductsForVal
+      // and the submit payload below). Only Global mode (and Sales, which
+      // inherits from its source batch) needs a per-product value here.
+      if (occurrenceSemantics !== "CATEGORY") {
+        if (
+          product.occurrencePercentage === undefined ||
+          product.occurrencePercentage === null ||
+          product.occurrencePercentage === ""
+        ) {
+          if (batchType === "SALES") {
+            const inherited =
+              (product as any).occurrencePercentage ??
+              (product.product as any).occurrencePercentage ??
+              "0";
+            product.occurrencePercentage = String(inherited);
+          } else {
+            setErrorPopup(
+              `Product "${product.product.product_name}": Please enter a valid Occurrence Percentage between 0% and 100%.`,
+            );
+            return;
+          }
+        }
+        const occPct = parseFloat(product.occurrencePercentage);
+        if (isNaN(occPct) || occPct < 0 || occPct > 100) {
           setErrorPopup(
-            `Product "${product.product.product_name}": Please enter a valid Occurrence Percentage between 0% and 100%.`,
+            `Product "${product.product.product_name}": Occurrence percentage must be a number between 0 and 100!`,
           );
           return;
         }
       }
-      const occPct = parseFloat(product.occurrencePercentage);
-      if (isNaN(occPct) || occPct < 0 || occPct > 100) {
-        setErrorPopup(
-          `Product "${product.product.product_name}": Occurrence percentage must be a number between 0 and 100!`,
-        );
-        return;
-      }
     }
+
+    // By Category mode: each product's occurrence within its own category
+    // is an automatic equal split, never user-entered.
+    const equalCategorySplitForVal =
+      occurrenceSemantics === "CATEGORY"
+        ? computeEqualCategoryOccurrence(selectedProducts)
+        : null;
 
     // Enforce 100% Total Product Occurrence Distribution
     const formattedProductsForVal = selectedProducts.map((p) => ({
@@ -1154,7 +1216,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
         (p.product as any).category_name ||
         (p.product as any).category ||
         "Meat",
-      occurrencePercentage: parseFloat(p.occurrencePercentage || "0") || 0,
+      occurrencePercentage: equalCategorySplitForVal
+        ? equalCategorySplitForVal.get(p.product.id) ?? 0
+        : parseFloat(p.occurrencePercentage || "0") || 0,
     }));
 
     // Sprint 1.7S: semantics-aware — under CATEGORY, per-category
