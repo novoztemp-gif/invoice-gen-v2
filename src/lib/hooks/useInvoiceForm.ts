@@ -552,9 +552,17 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     // LEAST ONE category can actually support the configured amount, not a
     // single user-picked one.
     const capacityByCategory = (["Meat", "Fruits"] as const).map((cat) => {
+      // In By Category mode, per-product occurrencePercentage is unused —
+      // the batch's Meat/Fruits % split decides what gets bought instead,
+      // so every selected product in a category with a non-zero split is
+      // eligible. In Global mode, only products with a configured
+      // non-zero occurrence % can actually be bought.
       const productsWithOccurrence = selectedProducts.filter((item) => {
         const productCat = (item.product as any).category_name || "Meat";
         if (productCat !== cat) return false;
+        if (occurrenceSemantics === "CATEGORY") {
+          return (parseFloat(categoryAllocation[cat]) || 0) > 0;
+        }
         const occ = parseFloat(item.occurrencePercentage || "0");
         return !isNaN(occ) && occ > 0;
       });
@@ -575,7 +583,9 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     if (!viableCategory) {
       if (!capacityByCategory.some((c) => c.hasProducts)) {
         setErrorPopup(
-          "No Meat or Fruits products have a non-zero Occurrence Percentage in this batch — Purchase generation will never buy anything, so no stock can ever be reserved for this demand. Set an Occurrence Percentage above 0% for at least one product first.",
+          occurrenceSemantics === "CATEGORY"
+            ? "No Meat or Fruits products are eligible in this batch — Purchase generation will never buy anything, so no stock can ever be reserved for this demand. Set the Meat/Fruits % split above 0% for at least one category in the Category Split card first."
+            : "No Meat or Fruits products have a non-zero Occurrence Percentage in this batch — Purchase generation will never buy anything, so no stock can ever be reserved for this demand. Set an Occurrence Percentage above 0% for at least one product first.",
         );
       } else {
         const bestCapacity = Math.max(

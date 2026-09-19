@@ -281,7 +281,15 @@ export default function GeneratePurchaseInvoice() {
     const val = parseFloat(item.occurrencePercentage || "0");
     return sum + (isNaN(val) ? 0 : val);
   }, 0);
-  const isOccurrence100Percent = Math.abs(occurrenceTotal - 100) < 0.01;
+  const categoryAllocationTotal =
+    (parseFloat(categoryAllocation.Meat) || 0) +
+    (parseFloat(categoryAllocation.Fruits) || 0);
+  // In By Category mode, the per-product occurrence total is irrelevant —
+  // the Category Split card's Meat/Fruits % is the real gate instead.
+  const isOccurrence100Percent =
+    occurrenceSemantics === "CATEGORY"
+      ? Math.abs(categoryAllocationTotal - 100) < 0.01
+      : Math.abs(occurrenceTotal - 100) < 0.01;
 
   useEffect(() => {
     let meatSum = 0;
@@ -1254,8 +1262,9 @@ export default function GeneratePurchaseInvoice() {
           </CardContent>
         </Card>
 
-        {/* Product Occurrence Configuration Card */}
-        {selectedProducts.length > 0 && (
+        {/* Product Occurrence Configuration Card — Global mode only; in By
+            Category mode the Category Split card below is the whole story. */}
+        {occurrenceSemantics !== "CATEGORY" && selectedProducts.length > 0 && (
           <Card>
             <CardHeader className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3">
               <CardTitle className="text-base font-semibold">
@@ -2079,7 +2088,9 @@ export default function GeneratePurchaseInvoice() {
           disabled={isValidating || isInvalid || !isOccurrence100Percent}
           title={
             !isOccurrence100Percent
-              ? `Total Product Occurrence must equal 100%. Current total: ${occurrenceTotal.toFixed(1)}%`
+              ? occurrenceSemantics === "CATEGORY"
+                ? `Meat + Fruits split must equal 100%. Current total: ${categoryAllocationTotal.toFixed(1)}%`
+                : `Total Product Occurrence must equal 100%. Current total: ${occurrenceTotal.toFixed(1)}%`
               : isInvalid
               ? "Purchase amount is outside the mathematically achievable range."
               : undefined
@@ -2096,7 +2107,9 @@ export default function GeneratePurchaseInvoice() {
         </Button>
         {!isOccurrence100Percent && (
           <p className="text-xs text-rose-600 font-medium">
-            Total Product Occurrence Percentage must equal exactly 100%. Current Total: {occurrenceTotal.toFixed(1)}%.
+            {occurrenceSemantics === "CATEGORY"
+              ? `Meat + Fruits split must equal exactly 100%. Current Total: ${categoryAllocationTotal.toFixed(1)}%.`
+              : `Total Product Occurrence Percentage must equal exactly 100%. Current Total: ${occurrenceTotal.toFixed(1)}%.`}
           </p>
         )}
         {isInvalid && (
