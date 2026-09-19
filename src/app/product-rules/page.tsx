@@ -1,20 +1,35 @@
 import { ProductRulesTable } from "@/components/ProductRulesTable";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { createClient } from "@/lib/supabase/server";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 
 export default async function ProductRulesPage() {
   const supabase = await createClient();
 
-  const { data: products, error: productsError } = await supabase
-    .from("products")
-    .select("*")
-    .order("product_name", { ascending: true });
+  // Plain `.select("*")` here silently truncates at PostgREST's default
+  // 1000-row cap — the same bug already fixed on the Suppliers and
+  // Receiving Customers list pages.
+  let products: any[] = [];
+  let rules: any[] = [];
+  let loadError: any = null;
+  try {
+    [products, rules] = await Promise.all([
+      fetchAllQueryRows<any>((from, to) =>
+        supabase
+          .from("products")
+          .select("*")
+          .order("product_name", { ascending: true })
+          .range(from, to),
+      ),
+      fetchAllQueryRows<any>((from, to) =>
+        supabase.from("product_rules").select("*").range(from, to),
+      ),
+    ]);
+  } catch (err: any) {
+    loadError = err;
+  }
 
-  const { data: rules, error: rulesError } = await supabase
-    .from("product_rules")
-    .select("*");
-
-  if (productsError || rulesError) {
+  if (loadError) {
     return (
       <div>
         <h1 className="text-3xl font-bold text-slate-900 mb-2">
@@ -27,8 +42,7 @@ export default async function ProductRulesPage() {
         <Card>
           <CardContent className="pt-6">
             <p className="text-red-600">
-              Error loading data:{" "}
-              {productsError?.message || rulesError?.message}
+              Error loading data: {loadError?.message}
             </p>
             <p className="text-sm text-slate-500 mt-2">
               Note: If product_rules does not exist, please ensure you have

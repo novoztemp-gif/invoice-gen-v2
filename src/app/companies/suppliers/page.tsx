@@ -3,14 +3,29 @@ import { BulkUploadSuppliersDialog } from "@/components/BulkUploadSuppliersDialo
 import { SuppliersTable } from "@/components/SuppliersTable";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { createClient } from "@/lib/supabase/server";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 
 export default async function SuppliersPage() {
   const supabase = await createClient();
 
-  const { data: suppliers, error } = await supabase
-    .from("suppliers")
-    .select("*")
-    .order("created_at", { ascending: false });
+  // A plain `.select("*")` here silently truncates at PostgREST's default
+  // 1000-row cap — the same bug already fixed on the invoice generation
+  // form's supplier fetch (a supplier past row 1000 was invisible in the
+  // Major Supplier picker despite existing). This list page had the
+  // identical unpaginated fetch.
+  let suppliers: any[] = [];
+  let error: any = null;
+  try {
+    suppliers = await fetchAllQueryRows<any>((from, to) =>
+      supabase
+        .from("suppliers")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .range(from, to),
+    );
+  } catch (err: any) {
+    error = err;
+  }
 
   if (error) {
     return (

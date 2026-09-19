@@ -3,14 +3,27 @@ import { BulkUploadProductsDialog } from "@/components/BulkUploadProductsDialog"
 import { ProductsTable } from "@/components/ProductsTable";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { createClient } from "@/lib/supabase/server";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 
 export default async function ProductsPage() {
   const supabase = await createClient();
 
-  const { data: products, error } = await supabase
-    .from("products")
-    .select("*")
-    .order("product_name", { ascending: true });
+  // A plain `.select("*")` here silently truncates at PostgREST's default
+  // 1000-row cap — the same bug already fixed on the Suppliers and
+  // Receiving Customers list pages.
+  let products: any[] = [];
+  let error: any = null;
+  try {
+    products = await fetchAllQueryRows<any>((from, to) =>
+      supabase
+        .from("products")
+        .select("*")
+        .order("product_name", { ascending: true })
+        .range(from, to),
+    );
+  } catch (err: any) {
+    error = err;
+  }
 
   if (error) {
     return (

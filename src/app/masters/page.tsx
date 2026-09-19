@@ -11,6 +11,7 @@ import { ReceivingCompaniesTable } from "@/components/ReceivingCompaniesTable";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { createClient } from "@/lib/supabase/server";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 import { Building2, Package, Users, Sliders } from "lucide-react";
 
 interface MastersPageProps {
@@ -22,28 +23,48 @@ export default async function MastersPage({ searchParams }: MastersPageProps) {
   const activeTab = params.tab || "issuing";
   const supabase = await createClient();
 
-  const [
-    { data: issuingCompanies, error: issuingError },
-    { data: receivingCompanies, error: receivingError },
-    { data: products, error: productsError },
-    { data: rules, error: rulesError },
-  ] = await Promise.all([
-    supabase
-      .from("issuing_companies")
-      .select("*")
-      .order("created_at", { ascending: false }),
-    supabase
-      .from("receiving_companies")
-      .select("*")
-      .order("created_at", { ascending: false }),
-    supabase
-      .from("products")
-      .select("*")
-      .order("product_name", { ascending: true }),
-    supabase.from("product_rules").select("*"),
-  ]);
+  // Plain `.select("*")` here silently truncates at PostgREST's default
+  // 1000-row cap — the same bug already fixed on the Receiving Customers
+  // and Suppliers list pages. fetchAllQueryRows paginates through
+  // everything instead.
+  let issuingCompanies: any[] = [];
+  let receivingCompanies: any[] = [];
+  let products: any[] = [];
+  let rules: any[] = [];
+  let loadError: any = null;
+  try {
+    [issuingCompanies, receivingCompanies, products, rules] =
+      await Promise.all([
+        fetchAllQueryRows<any>((from, to) =>
+          supabase
+            .from("issuing_companies")
+            .select("*")
+            .order("created_at", { ascending: false })
+            .range(from, to),
+        ),
+        fetchAllQueryRows<any>((from, to) =>
+          supabase
+            .from("receiving_companies")
+            .select("*")
+            .order("created_at", { ascending: false })
+            .range(from, to),
+        ),
+        fetchAllQueryRows<any>((from, to) =>
+          supabase
+            .from("products")
+            .select("*")
+            .order("product_name", { ascending: true })
+            .range(from, to),
+        ),
+        fetchAllQueryRows<any>((from, to) =>
+          supabase.from("product_rules").select("*").range(from, to),
+        ),
+      ]);
+  } catch (err: any) {
+    loadError = err;
+  }
 
-  if (issuingError || receivingError || productsError || rulesError) {
+  if (loadError) {
     return (
       <div className="space-y-4">
         <h1 className="text-xl font-bold text-slate-900">
@@ -52,11 +73,7 @@ export default async function MastersPage({ searchParams }: MastersPageProps) {
         <Card className="border-red-200 bg-red-50/70 rounded-md">
           <CardContent className="p-4">
             <p className="text-xs text-red-700 font-medium">
-              Error loading master data:{" "}
-              {issuingError?.message ||
-                receivingError?.message ||
-                productsError?.message ||
-                rulesError?.message}
+              Error loading master data: {loadError?.message}
             </p>
           </CardContent>
         </Card>
