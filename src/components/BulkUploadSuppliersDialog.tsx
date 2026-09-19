@@ -21,10 +21,43 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createClient } from "@/lib/supabase/client";
+import { chunkArray } from "@/lib/utils/chunkArray";
+import { BulkUploadProgressBar } from "@/components/BulkUploadProgressBar";
+
+const CHUNK_SIZE = 200;
+
+type SupplierCategory = "Meat" | "Fruits";
+
+interface SupplierRow {
+  company_name: string;
+  address: string;
+  gstin: string | null;
+  pan: string | null;
+  state: string;
+  state_code: string | null;
+  category: SupplierCategory;
+}
+
+/** Normalizes any real-world spelling ("meat", " MEAT ", "Meat ") to the
+ * exact DB-required casing. Real, reported bug: the previous version did
+ * an exact-string comparison against "Meat"/"Fruits" and silently fell
+ * back to "Meat" for anything that didn't match byte-for-byte — so a
+ * perfectly valid "meat" or "Fruits " in the source file got mislabeled
+ * without any warning. */
+function normalizeCategory(raw: unknown): SupplierCategory | null {
+  const cleaned = String(raw ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (cleaned === "meat") return "Meat";
+  if (cleaned === "fruit" || cleaned === "fruits") return "Fruits";
+  return null;
+}
 
 export function BulkUploadSuppliersDialog() {
   const [open, setOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{
@@ -91,6 +124,7 @@ export function BulkUploadSuppliersDialog() {
     setUploading(true);
     setError(null);
     setResult(null);
+    setProgress({ current: 0, total: 0 });
 
     const reader = new FileReader();
     reader.onload = async (e) => {
@@ -122,7 +156,6 @@ export function BulkUploadSuppliersDialog() {
           "Category",
         ];
 
-        // Check if required headers are present
         const hasAllHeaders = requiredHeaders.every((req) =>
           headers.includes(req),
         );
@@ -143,54 +176,17 @@ export function BulkUploadSuppliersDialog() {
         const stateCodeIdx = headers.indexOf("State Code");
         const categoryIdx = headers.indexOf("Category");
 
-        // ── Strict Category Pre-Validation Loop ──
-        for (let i = 1; i < rows.length; i++) {
-          const row = rows[i];
-          if (!row || row.length === 0) continue;
-
-          const isRowBlank = row.every(
-            (val) =>
-              val === undefined || val === null || String(val).trim() === "",
-          );
-          if (isRowBlank) continue;
-
-          const rawCategory = row[categoryIdx]?.toString()?.trim();
-          if (
-            !rawCategory ||
-            (rawCategory !== "Meat" && rawCategory !== "Fruits")
-          ) {
-            setError(
-              `Row ${i + 1}: Invalid Category. Allowed values are Meat or Fruits.`,
-            );
-            setUploading(false);
-            return;
-          }
-        }
-
-        // Fetch existing suppliers to perform lookups in-memory
-        const { data: existingSuppliers, error: fetchError } = await supabase
-          .from("suppliers")
-          .select("id, company_name, state");
-
-        if (fetchError) {
-          throw new Error("Database lookup failed: " + fetchError.message);
-        }
-
+        // Build a deduplicated map of every valid row first (a later
+        // duplicate row for the same name+state overwrites an earlier one),
+        // so chunked bulk writes below don't need to grow the lookup map
+        // between requests. A per-row invalid category now just fails that
+        // ONE row (matching how a missing name/address already behaves)
+        // instead of aborting the entire upload.
         const makeKey = (name: string, state: string) =>
           `${name.trim().toLowerCase()}::${state.trim().toLowerCase()}`;
 
-        const supplierMap = new Map<string, string>();
-        if (existingSuppliers) {
-          for (const s of existingSuppliers) {
-            if (s.company_name && s.state) {
-              supplierMap.set(makeKey(s.company_name, s.state), s.id);
-            }
-          }
-        }
-
-        let inserted = 0;
-        let updated = 0;
-        let failed = 0;
+        const rowsByKey = new Map<string, SupplierRow>();
+        let preValidationFailed = 0;
 
         for (let i = 1; i < rows.length; i++) {
           const row = rows[i];
@@ -204,66 +200,94 @@ export function BulkUploadSuppliersDialog() {
 
           const company_name = row[nameIdx]?.toString()?.trim() || "";
           const address = row[addressIdx]?.toString()?.trim() || "";
-          const gstin = row[gstinIdx]?.toString()?.trim() || null;
-          const pan = row[panIdx]?.toString()?.trim() || null;
           const state = row[stateIdx]?.toString()?.trim() || "";
-          const state_code = row[stateCodeIdx]?.toString()?.trim() || null;
-          const category = row[categoryIdx]?.toString()?.trim() || "Meat";
+          const category = normalizeCategory(row[categoryIdx]);
 
-          if (!company_name || !address || !state) {
-            failed++;
+          if (!company_name || !address || !state || !category) {
+            preValidationFailed++;
             continue;
           }
 
-          const lookupKey = makeKey(company_name, state);
+          const key = makeKey(company_name, state);
+          rowsByKey.set(key, {
+            company_name,
+            address,
+            gstin: row[gstinIdx]?.toString()?.trim() || null,
+            pan: row[panIdx]?.toString()?.trim() || null,
+            state,
+            state_code: row[stateCodeIdx]?.toString()?.trim() || null,
+            category,
+          });
+        }
 
-          try {
-            if (supplierMap.has(lookupKey)) {
-              const matchedId = supplierMap.get(lookupKey);
-              const { error: updateError } = await supabase
-                .from("suppliers")
-                .update({
-                  address,
-                  category,
-                  gstin: gstin || null,
-                  pan: pan || null,
-                  state_code: state_code || null,
-                  updated_at: new Date().toISOString(),
-                })
-                .eq("id", matchedId);
+        // One query to resolve which keys already exist.
+        const { data: existingSuppliers, error: fetchError } = await supabase
+          .from("suppliers")
+          .select("id, company_name, state");
 
-              if (updateError) {
-                failed++;
-              } else {
-                updated++;
-              }
-            } else {
-              const { data: newSupplier, error: insertError } = await supabase
-                .from("suppliers")
-                .insert({
-                  company_name,
-                  category,
-                  address,
-                  gstin: gstin || null,
-                  pan: pan || null,
-                  state,
-                  state_code: state_code || null,
-                })
-                .select("id")
-                .single();
+        if (fetchError) {
+          throw new Error("Database lookup failed: " + fetchError.message);
+        }
 
-              if (insertError) {
-                failed++;
-              } else {
-                inserted++;
-                if (newSupplier?.id) {
-                  supplierMap.set(lookupKey, newSupplier.id);
-                }
-              }
-            }
-          } catch (e) {
-            failed++;
+        const existingIdByKey = new Map<string, string>();
+        for (const s of existingSuppliers ?? []) {
+          if (s.company_name && s.state) {
+            existingIdByKey.set(makeKey(s.company_name, s.state), s.id);
           }
+        }
+
+        const toInsert: SupplierRow[] = [];
+        const toUpdate: (SupplierRow & { id: string })[] = [];
+        for (const [key, row] of rowsByKey) {
+          const existingId = existingIdByKey.get(key);
+          if (existingId) {
+            toUpdate.push({ ...row, id: existingId });
+          } else {
+            toInsert.push(row);
+          }
+        }
+
+        const insertChunks = chunkArray(toInsert, CHUNK_SIZE);
+        const updateChunks = chunkArray(toUpdate, CHUNK_SIZE);
+        const totalChunks = insertChunks.length + updateChunks.length;
+        setProgress({ current: 0, total: totalChunks });
+
+        let inserted = 0;
+        let updated = 0;
+        let failed = preValidationFailed;
+        let chunksDone = 0;
+
+        for (const chunk of insertChunks) {
+          const { data: insertedRows, error: insertError } = await supabase
+            .from("suppliers")
+            .insert(chunk)
+            .select("id");
+
+          if (insertError) {
+            failed += chunk.length;
+          } else {
+            inserted += insertedRows?.length ?? chunk.length;
+          }
+          chunksDone++;
+          setProgress({ current: chunksDone, total: totalChunks });
+        }
+
+        for (const chunk of updateChunks) {
+          const { data: updatedRows, error: updateError } = await supabase
+            .from("suppliers")
+            .upsert(
+              chunk.map((r) => ({ ...r, updated_at: new Date().toISOString() })),
+              { onConflict: "id" },
+            )
+            .select("id");
+
+          if (updateError) {
+            failed += chunk.length;
+          } else {
+            updated += updatedRows?.length ?? chunk.length;
+          }
+          chunksDone++;
+          setProgress({ current: chunksDone, total: totalChunks });
         }
 
         setResult({ inserted, updated, failed });
@@ -287,6 +311,7 @@ export function BulkUploadSuppliersDialog() {
     setFile(null);
     setError(null);
     setResult(null);
+    setProgress({ current: 0, total: 0 });
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -347,6 +372,14 @@ export function BulkUploadSuppliersDialog() {
               className="cursor-pointer"
             />
           </div>
+
+          {uploading && progress.total > 0 && (
+            <BulkUploadProgressBar
+              current={progress.current}
+              total={progress.total}
+              label="Uploading suppliers..."
+            />
+          )}
 
           {error && (
             <div className="flex items-start gap-2.5 p-3.5 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">

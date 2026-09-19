@@ -21,10 +21,24 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createClient } from "@/lib/supabase/client";
+import { chunkArray } from "@/lib/utils/chunkArray";
+import { BulkUploadProgressBar } from "@/components/BulkUploadProgressBar";
+
+const CHUNK_SIZE = 200;
+
+interface CustomerRow {
+  company_name: string;
+  address: string;
+  gstin: string | null;
+  pan: string | null;
+  state: string;
+  state_code: string | null;
+}
 
 export function BulkUploadCustomersDialog() {
   const [open, setOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{
@@ -81,6 +95,7 @@ export function BulkUploadCustomersDialog() {
     setUploading(true);
     setError(null);
     setResult(null);
+    setProgress({ current: 0, total: 0 });
 
     const reader = new FileReader();
     reader.onload = async (e) => {
@@ -111,7 +126,6 @@ export function BulkUploadCustomersDialog() {
           "State Code",
         ];
 
-        // Check if required columns are present
         const hasAllHeaders = requiredHeaders.every((req) =>
           headers.includes(req),
         );
@@ -129,37 +143,20 @@ export function BulkUploadCustomersDialog() {
         const stateIdx = headers.indexOf("State");
         const stateCodeIdx = headers.indexOf("State Code");
 
-        // Fetch existing companies to perform lookups in-memory
-        const { data: existingCompanies, error: fetchError } = await supabase
-          .from("receiving_companies")
-          .select("id, company_name, state");
-
-        if (fetchError) {
-          throw new Error("Database lookup failed: " + fetchError.message);
-        }
-
+        // Build a deduplicated map of every valid row first (a later
+        // duplicate row for the same name+state overwrites an earlier one),
+        // so chunked bulk writes below don't need to grow the lookup map
+        // between requests.
         const makeKey = (name: string, state: string) =>
           `${name.trim().toLowerCase()}::${state.trim().toLowerCase()}`;
 
-        const companyMap = new Map<string, string>();
-        if (existingCompanies) {
-          for (const c of existingCompanies) {
-            if (c.company_name && c.state) {
-              companyMap.set(makeKey(c.company_name, c.state), c.id);
-            }
-          }
-        }
+        const rowsByKey = new Map<string, CustomerRow>();
+        let preValidationFailed = 0;
 
-        let inserted = 0;
-        let updated = 0;
-        let failed = 0;
-
-        // Process data rows
         for (let i = 1; i < rows.length; i++) {
           const row = rows[i];
           if (!row || row.length === 0) continue;
 
-          // Skip if the row is entirely blank
           const isRowBlank = row.every(
             (val) =>
               val === undefined || val === null || String(val).trim() === "",
@@ -168,66 +165,94 @@ export function BulkUploadCustomersDialog() {
 
           const company_name = row[nameIdx]?.toString()?.trim() || "";
           const address = row[addressIdx]?.toString()?.trim() || "";
-          const gstin = row[gstinIdx]?.toString()?.trim() || null;
-          const pan = row[panIdx]?.toString()?.trim() || null;
           const state = row[stateIdx]?.toString()?.trim() || "";
-          const state_code = row[stateCodeIdx]?.toString()?.trim() || null;
 
           if (!company_name || !address || !state) {
-            failed++;
+            preValidationFailed++;
             continue;
           }
 
-          const lookupKey = makeKey(company_name, state);
+          const key = makeKey(company_name, state);
+          rowsByKey.set(key, {
+            company_name,
+            address,
+            gstin: row[gstinIdx]?.toString()?.trim() || null,
+            pan: row[panIdx]?.toString()?.trim() || null,
+            state,
+            state_code: row[stateCodeIdx]?.toString()?.trim() || null,
+          });
+        }
 
-          try {
-            if (companyMap.has(lookupKey)) {
-              const matchedId = companyMap.get(lookupKey);
-              const { error: updateError } = await supabase
-                .from("receiving_companies")
-                .update({
-                  address,
-                  gstin: gstin || null,
-                  pan: pan || null,
-                  state_code: state_code || null,
-                  updated_at: new Date().toISOString(),
-                })
-                .eq("id", matchedId);
+        // One query to resolve which keys already exist.
+        const { data: existingCompanies, error: fetchError } = await supabase
+          .from("receiving_companies")
+          .select("id, company_name, state");
 
-              if (updateError) {
-                console.error("Update error for:", company_name, updateError);
-                failed++;
-              } else {
-                updated++;
-              }
-            } else {
-              const { data: newCompany, error: insertError } = await supabase
-                .from("receiving_companies")
-                .insert({
-                  company_name,
-                  address,
-                  gstin: gstin || null,
-                  pan: pan || null,
-                  state,
-                  state_code: state_code || null,
-                })
-                .select("id")
-                .single();
+        if (fetchError) {
+          throw new Error("Database lookup failed: " + fetchError.message);
+        }
 
-              if (insertError) {
-                console.error("Insert error for:", company_name, insertError);
-                failed++;
-              } else {
-                inserted++;
-                if (newCompany?.id) {
-                  companyMap.set(lookupKey, newCompany.id);
-                }
-              }
-            }
-          } catch (e) {
-            console.error("Row error:", e);
-            failed++;
+        const existingIdByKey = new Map<string, string>();
+        for (const c of existingCompanies ?? []) {
+          if (c.company_name && c.state) {
+            existingIdByKey.set(makeKey(c.company_name, c.state), c.id);
           }
+        }
+
+        const toInsert: CustomerRow[] = [];
+        const toUpdate: (CustomerRow & { id: string })[] = [];
+        for (const [key, row] of rowsByKey) {
+          const existingId = existingIdByKey.get(key);
+          if (existingId) {
+            toUpdate.push({ ...row, id: existingId });
+          } else {
+            toInsert.push(row);
+          }
+        }
+
+        const insertChunks = chunkArray(toInsert, CHUNK_SIZE);
+        const updateChunks = chunkArray(toUpdate, CHUNK_SIZE);
+        const totalChunks = insertChunks.length + updateChunks.length;
+        setProgress({ current: 0, total: totalChunks });
+
+        let inserted = 0;
+        let updated = 0;
+        let failed = preValidationFailed;
+        let chunksDone = 0;
+
+        for (const chunk of insertChunks) {
+          const { data: insertedRows, error: insertError } = await supabase
+            .from("receiving_companies")
+            .insert(chunk)
+            .select("id");
+
+          if (insertError) {
+            console.error("Bulk insert error:", insertError);
+            failed += chunk.length;
+          } else {
+            inserted += insertedRows?.length ?? chunk.length;
+          }
+          chunksDone++;
+          setProgress({ current: chunksDone, total: totalChunks });
+        }
+
+        for (const chunk of updateChunks) {
+          const { data: updatedRows, error: updateError } = await supabase
+            .from("receiving_companies")
+            .upsert(
+              chunk.map((r) => ({ ...r, updated_at: new Date().toISOString() })),
+              { onConflict: "id" },
+            )
+            .select("id");
+
+          if (updateError) {
+            console.error("Bulk update error:", updateError);
+            failed += chunk.length;
+          } else {
+            updated += updatedRows?.length ?? chunk.length;
+          }
+          chunksDone++;
+          setProgress({ current: chunksDone, total: totalChunks });
         }
 
         setResult({ inserted, updated, failed });
@@ -252,6 +277,7 @@ export function BulkUploadCustomersDialog() {
     setFile(null);
     setError(null);
     setResult(null);
+    setProgress({ current: 0, total: 0 });
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -312,6 +338,14 @@ export function BulkUploadCustomersDialog() {
               className="cursor-pointer"
             />
           </div>
+
+          {uploading && progress.total > 0 && (
+            <BulkUploadProgressBar
+              current={progress.current}
+              total={progress.total}
+              label="Uploading customers..."
+            />
+          )}
 
           {/* Error Message Block */}
           {error && (
