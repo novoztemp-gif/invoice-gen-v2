@@ -4677,14 +4677,23 @@ export class InvoiceEngine {
           ) / 100;
       }
 
-      // No balanceable invoice had room to absorb the rest of the diff
-      // within [thresholdMin, thresholdMax]. Exceeding an invoice's
-      // configured maximum to force an exact batch total is exactly the
-      // bug this was meant to guard against — leave the residual unclosed
-      // (a small, logged drift) rather than violate the invoice cap.
+      // Hotfix — real gap: the batch total must match the user's
+      // configured Total Amount to the exact rupee, no tolerance, ever
+      // (explicit client requirement). No balanceable invoice having room
+      // to absorb the rest of the diff within [thresholdMin, thresholdMax]
+      // used to just leave the residual unclosed with a server-only
+      // console.warn — meaning a batch could actually SAVE with a total
+      // that didn't match what was configured, silently. Purchase
+      // generation already hard-rejects this exact situation
+      // ("Purchase Batch Total mismatch"), which — because generation runs
+      // inside a 100-attempt auto-retry wrapper (generateWithAutoRetry for
+      // the direct path, the dry-run route's own retry loop for the Daily
+      // Stock Review path) — turns an unlucky draw into an automatic retry
+      // instead of a silently wrong save. Sales gets the identical
+      // treatment here now: throwing, never a silent accepted residual.
       if (Math.abs(remainingBatchDiff) > 0) {
-        console.warn(
-          `[generateInvoiceSplitupsInternal] ₹${remainingBatchDiff} of batch total drift could not be closed without exceeding a balanceable invoice's configured min/max — left as a residual rather than violating thresholdMax.`,
+        throw new Error(
+          `Sales Batch Total mismatch: expected ₹${targetTotal}, got ₹${targetTotal - remainingBatchDiff}. ₹${remainingBatchDiff} of batch total drift could not be closed without exceeding a balanceable invoice's configured minimum/maximum invoice amount.`,
         );
       }
     }

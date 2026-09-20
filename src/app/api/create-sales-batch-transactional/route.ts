@@ -646,6 +646,35 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // ── Server-side exact-total guard ────────────────────────────────
+      // Explicit client requirement: the saved batch total must match the
+      // configured Total Amount to the exact rupee, never even ₹1 off.
+      // generateInvoiceSplitupsInternal (the dry-run generator) already
+      // hard-rejects this upstream, but invoicesOverride here reflects
+      // whatever the client's own reconciliation (solveRatesToHitTotal,
+      // repairInvoiceAmountRange, quarter-rounding compensation) produced
+      // — each of those can, in principle, leave a residual under real
+      // constraints, and nothing re-verified the FINAL sum at the actual
+      // persistence boundary. This is that final check: reject the entire
+      // batch (nothing inserted yet) rather than ever save a total that
+      // doesn't match what was configured.
+      const savedTotal = Math.round(
+        repairedInvoices.reduce(
+          (sum: number, inv: any) => sum + Math.round(inv.total_amount || 0),
+          0,
+        ),
+      );
+      const configuredTotal = Math.round(parseFloat(totalAmount));
+      if (savedTotal !== configuredTotal) {
+        await supabase.from("invoice_batch").delete().eq("id", newBatch.id);
+        return NextResponse.json(
+          {
+            message: `Sales Batch Total mismatch: configured Total Amount is ₹${configuredTotal}, but the reconciled invoices sum to ₹${savedTotal} (₹${configuredTotal - savedTotal} short of exact). Nothing was saved. Try adjusting the Daily Stock Ledger allocation or widening the invoice amount range, then regenerate.`,
+          },
+          { status: 400 },
+        );
+      }
+
       // Hotfix: a large batch's invoice insert is one bulk request (several
       // hundred KB+ of JSONB for a few hundred invoices) — PostgREST wraps
       // it in a single transaction, so it's all-or-nothing (safe to retry
