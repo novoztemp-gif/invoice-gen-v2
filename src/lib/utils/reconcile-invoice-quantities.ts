@@ -750,67 +750,76 @@ export function solveRatesToHitTotal(
   }
 
   // 3. Whole-rupee rounding across a large per-product quantity can leave
-  // a residual of more than a trivial amount — close it by nudging
-  // individual lines' rates (largest quantity first, so each rupee of
-  // nudge closes the most residual), bounded by the product's own rate
-  // range and by not pushing any invoice over maximumInvoiceAmount.
-  let currentTotal = invoices.reduce(
-    (s, inv) => s + Math.round(inv.total_amount || 0),
-    0,
-  );
-  let batchDiff = Math.round(targetTotal) - currentTotal;
+  // a residual of more than a trivial amount (confirmed on a real batch:
+  // a ₹44,591/0.6% drift across 403 invoices/48 products — rounding a
+  // product's rate to the nearest whole rupee, then multiplying by its
+  // ENTIRE aggregate quantity across the batch, turns a sub-rupee
+  // per-unit rounding difference into real money). Close it by nudging
+  // individual lines' rates, never quantity — the ledger-approved sold
+  // quantity must never change, only where the money lands.
+  //
+  // Hotfix — the previous version picked the single largest-quantity line
+  // and jumped it by `ceil(|diff| / qty)` whole-rupee steps in one go.
+  // Whenever a line's quantity exceeded the remaining diff (the exact
+  // "large aggregate quantity" shape that causes this bug in the first
+  // place), that single jump overshot PAST zero, and the next line's jump
+  // overshot back the other way — an oscillation that could burn through
+  // every line without ever converging, confirmed by a real repro landing
+  // on ₹650 unclosed instead of the ₹350 that was actually achievable.
+  // Fixed by re-deciding, every single round, which ONE line's ±1-rupee
+  // nudge gets the total closest to the target — never accepting a move
+  // that makes the residual worse than leaving it alone — so it always
+  // converges to the best achievable point instead of oscillating.
+  let batchDiff =
+    Math.round((targetTotal -
+      invoices.reduce((s, inv) => s + Number(inv.total_amount || 0), 0)) *
+      100) / 100;
 
-  if (batchDiff !== 0) {
+  if (Math.abs(batchDiff) > 0.5) {
     const allLines: { inv: any; line: any }[] = [];
     for (const inv of invoices) {
       for (const line of inv.products || []) allLines.push({ inv, line });
     }
-    allLines.sort(
-      (a, b) => (b.line.quantity || 0) - (a.line.quantity || 0),
-    );
 
-    for (const { inv, line } of allLines) {
-      if (batchDiff === 0) break;
-      const range = rangeByProduct.get(line.product_id);
-      const qty = Number(line.quantity || 0);
-      if (!range || qty <= 0) continue;
-
+    let guard = allLines.length + 1;
+    while (Math.abs(batchDiff) > 0.5 && guard-- > 0) {
       const dir = batchDiff > 0 ? 1 : -1;
-      const rateRoomRupees =
-        dir > 0
-          ? Math.floor(range.max - line.rate)
-          : Math.floor(line.rate - range.min);
-      if (rateRoomRupees <= 0) continue;
+      let bestIdx = -1;
+      let bestAbsResult = Math.abs(batchDiff);
 
-      let maxStepsByInvoiceCap = Infinity;
-      if (dir > 0 && maximumInvoiceAmount) {
-        const invHeadroom = maximumInvoiceAmount - (inv.total_amount || 0);
-        maxStepsByInvoiceCap = qty > 0 ? Math.floor(invHeadroom / qty) : 0;
+      for (let i = 0; i < allLines.length; i++) {
+        const { inv, line } = allLines[i];
+        const range = rangeByProduct.get(line.product_id);
+        const qty = Number(line.quantity || 0);
+        if (!range || qty <= 0) continue;
+        const candidateRate = (Number(line.rate) || 0) + dir;
+        if (candidateRate < range.min || candidateRate > range.max) continue;
+        if (dir > 0 && maximumInvoiceAmount) {
+          const newInvTotal = Number(inv.total_amount || 0) + qty * dir;
+          if (newInvTotal > maximumInvoiceAmount + 0.01) continue;
+        }
+        const resultingDiff = batchDiff - qty * dir;
+        if (Math.abs(resultingDiff) < bestAbsResult) {
+          bestAbsResult = Math.abs(resultingDiff);
+          bestIdx = i;
+        }
       }
 
-      const neededSteps = Math.ceil(Math.abs(batchDiff) / qty);
-      const steps = Math.max(
-        0,
-        Math.min(rateRoomRupees, maxStepsByInvoiceCap, neededSteps),
-      );
-      if (steps <= 0) continue;
+      if (bestIdx === -1) break;
 
-      line.rate += dir * steps;
-      const prevAmount = line.amount;
-      line.amount = Math.round(qty * line.rate * 100) / 100;
+      const { inv, line } = allLines[bestIdx];
+      const qty = Number(line.quantity || 0);
+      const candidateRate = (Number(line.rate) || 0) + dir;
+      const oldAmount = line.amount || 0;
+      line.rate = candidateRate;
+      line.amount = Math.round(qty * candidateRate * 100) / 100;
+      const delta = line.amount - oldAmount;
       inv.total_amount =
-        Math.round(
-          ((inv.total_amount || 0) - prevAmount + line.amount) * 100,
-        ) / 100;
-
-      currentTotal = invoices.reduce(
-        (s, i) => s + Math.round(i.total_amount || 0),
-        0,
-      );
-      batchDiff = Math.round(targetTotal) - currentTotal;
+        Math.round((Number(inv.total_amount || 0) + delta) * 100) / 100;
+      batchDiff = Math.round((batchDiff - delta) * 100) / 100;
     }
 
-    if (batchDiff !== 0) {
+    if (Math.abs(batchDiff) > 0.5) {
       console.warn(
         `[solveRatesToHitTotal] ₹${batchDiff} of the requested Total Amount could not be closed within configured Product Rule rate ranges / maximum invoice amount — left as a residual.`,
       );

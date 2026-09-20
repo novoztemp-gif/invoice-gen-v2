@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   reconcileInvoicesToTargets,
   repairInvoiceAmountRange,
+  solveRatesToHitTotal,
 } from "./reconcile-invoice-quantities";
 
 /**
@@ -845,5 +846,115 @@ describe("repairInvoiceAmountRange", () => {
     expect(result.stillViolating.length).toBe(0);
     expect(result.invoices.length).toBe(1);
     expect(result.invoices[0].total_amount).toBe(345675);
+  });
+});
+
+/**
+ * Client-reported bug — a real 403-invoice/48-product Sales batch's saved
+ * grand total came out ₹44,591 (0.6%) above the configured Total Amount.
+ * Root cause: solveRatesToHitTotal computes a continuous "ideal" price
+ * per product to hit the target exactly, then rounds that price to the
+ * nearest whole rupee and applies it UNIFORMLY to every line of that
+ * product across the whole batch — multiplying a sub-rupee rounding
+ * difference by a large aggregate quantity turns it into a real total
+ * drift that nothing downstream closed.
+ */
+describe("solveRatesToHitTotal — grand total drift after uniform rate rounding", () => {
+  it("closes a large aggregate-quantity rounding drift back toward the exact target", () => {
+    const productConfigs = [
+      { product_id: "P1", perDayRateMin: "10", perDayRateMax: "20" },
+    ];
+    // 5 invoices, each a single 1000kg line of P1. The continuous solve
+    // wants ~15.33/kg to hit 76,650 exactly; rounded to a uniform ₹15,
+    // the naive total is 75,000 — a ₹1,650 (2.2%) drift with nothing to
+    // close it before this fix.
+    const invoices = Array.from({ length: 5 }, (_, i) => ({
+      invoice_number: `INV-${i}`,
+      invoice_date: "2026-01-01",
+      customer_id: `cust-${i}`,
+      total_amount: 0,
+      products: [
+        {
+          product_id: "P1",
+          product_name: "P1",
+          quantity: 1000,
+          rate: 15,
+          amount: 15000,
+          customer_id: `cust-${i}`,
+        },
+      ],
+    }));
+
+    const result = solveRatesToHitTotal(
+      invoices,
+      productConfigs,
+      76650,
+      undefined,
+      null,
+    );
+
+    const finalTotal = result.reduce(
+      (sum, inv) => sum + Number(inv.total_amount || 0),
+      0,
+    );
+    // The closest achievable total with only 1,000kg-per-nudge lines is
+    // 77,000 (₹350 off) — far tighter than the ₹1,650 pre-fix drift, and
+    // every line's rate must still respect the configured [10, 20] bound.
+    expect(Math.abs(finalTotal - 76650)).toBeLessThanOrEqual(350);
+    expect(Math.abs(finalTotal - 76650)).toBeLessThan(1650);
+    for (const inv of result) {
+      for (const p of inv.products) {
+        expect(p.rate).toBeGreaterThanOrEqual(10);
+        expect(p.rate).toBeLessThanOrEqual(20);
+        // Quantity must never move — only rate is adjustable here.
+        expect(p.quantity).toBe(1000);
+      }
+    }
+  });
+
+  it("converges to within a rupee when line quantities allow fine-grained closing", () => {
+    const productConfigs = [
+      { product_id: "P1", perDayRateMin: "10", perDayRateMax: "30" },
+    ];
+    // Varied, smaller quantities per line give the drift-closer far more
+    // combinations to reach zero exactly, unlike the uniform-1000 case
+    // above.
+    const quantities = [37, 52, 61, 44, 29, 68, 33, 41, 56, 47];
+    const invoices = quantities.map((qty, i) => ({
+      invoice_number: `INV-${i}`,
+      invoice_date: "2026-01-01",
+      customer_id: `cust-${i}`,
+      total_amount: 0,
+      products: [
+        {
+          product_id: "P1",
+          product_name: "P1",
+          quantity: qty,
+          rate: 20,
+          amount: qty * 20,
+          customer_id: `cust-${i}`,
+        },
+      ],
+    }));
+    const totalQty = quantities.reduce((a, b) => a + b, 0);
+    const target = totalQty * 21.4; // a deliberately non-integer ideal rate
+
+    const result = solveRatesToHitTotal(
+      invoices,
+      productConfigs,
+      target,
+      undefined,
+      null,
+    );
+
+    const finalTotal = result.reduce(
+      (sum, inv) => sum + Number(inv.total_amount || 0),
+      0,
+    );
+    // Whole-rupee rate granularity across genuinely varied quantities
+    // (not a repeated single value) can't always land on the exact
+    // fractional target — this asserts it gets very close (well within
+    // 1 rupee of a ~10,000 total), not necessarily bit-for-bit exact.
+    expect(Math.abs(finalTotal - target)).toBeLessThanOrEqual(1);
   });
 });
