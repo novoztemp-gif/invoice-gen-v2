@@ -4020,6 +4020,42 @@ export class InvoiceEngine {
 
         if (qtyToSell <= 0) continue;
 
+        // Hotfix — real, confirmed overselling bug. This loop decides
+        // qtyToSell against `available` and tracks day-to-day carryover
+        // via its own private `runningRemaining` map, but never reported
+        // that consumption back into the SHARED availableStockMap that
+        // every other stock-aware pass in this function reads (Major
+        // Customer processing, the Exact Batch Total Balancing Routine,
+        // solveLineForTargetWithinStock's own growth cap). Those passes
+        // saw this (date, product) as if nothing had been sold yet and
+        // could top up a line into stock this loop had already fully
+        // committed — confirmed on a real batch via a full day-by-day
+        // reconciliation of the actual saved invoices: a product with
+        // 333.75kg purchased on 2025-04-22 had 604.75kg sold that exact
+        // day, a 271kg oversell with no leftover source to explain it.
+        // Decrementing here (mirroring solveLineForTargetWithinStock's own
+        // .purchased-first convention) makes every downstream check see
+        // the true remaining stock instead of a stale, too-high figure.
+        if (availableStockMap && val !== undefined && val !== null) {
+          if (typeof val === "object") {
+            const fromPurchased = Math.min(qtyToSell, val.purchased || 0);
+            val.purchased =
+              Math.max(0, Math.round(((val.purchased || 0) - fromPurchased) * 100) / 100);
+            const remainder = qtyToSell - fromPurchased;
+            if (remainder > 0 && typeof val.opening === "number") {
+              val.opening = Math.max(
+                0,
+                Math.round((val.opening - remainder) * 100) / 100,
+              );
+            }
+          } else if (typeof val === "number") {
+            availableStockMap.set(
+              ledgerKey,
+              Math.max(0, Math.round((val - qtyToSell) * 100) / 100),
+            );
+          }
+        }
+
         const rate = roundToWholeInteger(
           minRate + Math.random() * (maxRate - minRate),
         );
