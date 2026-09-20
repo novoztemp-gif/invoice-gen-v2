@@ -8201,21 +8201,32 @@ export class InvoiceEngine {
       }
     }
 
-    // ── Chronological & Ascending Invoice Number Sort ──
-    invoices.sort((a, b) => {
-      const dateCmp = (a.invoice_date || "").localeCompare(
-        b.invoice_date || "",
+    // ── Chronological Sort + Final Renumbering Pass ──
+    // Hotfix — real numbering-gap bug (same class already fixed on the
+    // Sales side): invoice_number was assigned per-invoice AS it was
+    // created, throughout generation — but the global minimum-amount
+    // repair pass above (STEP 6) can MERGE a below-minimum invoice into a
+    // peer and remove it via splice, permanently orphaning that invoice's
+    // already-assigned number as a gap nothing ever fills. This block used
+    // to only SORT by (date, already-assigned number) — sorting alone
+    // does nothing to close a gap left by a removed invoice. Fixed by
+    // renumbering every survivor here, in one final pass, after every
+    // invoice-count-altering step (including the merge repair) has
+    // finished — always gap-free, always strictly increasing with date.
+    invoices.sort((a, b) =>
+      (a.invoice_date || "").localeCompare(b.invoice_date || ""),
+    );
+    const finalAbbr = (batch as any).issuing_company_abbreviation || "IC";
+    const finalFy = (batch.financial_year || "2026-27").replace(/^FY/i, "");
+    let finalCounter = startingCounter;
+    for (const inv of invoices) {
+      inv.invoice_number = InvoiceNumberingService.formatInvoiceNumber(
+        finalAbbr,
+        finalFy,
+        batch.batch_type === "PURCHASE" ? "P" : "S",
+        finalCounter++,
       );
-      if (dateCmp !== 0) return dateCmp;
-      return (a.invoice_number || "").localeCompare(
-        b.invoice_number || "",
-        undefined,
-        {
-          numeric: true,
-          sensitivity: "base",
-        },
-      );
-    });
+    }
 
     return invoices;
   }
