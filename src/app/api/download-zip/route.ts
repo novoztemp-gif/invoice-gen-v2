@@ -56,7 +56,15 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Fetch receiving companies
+  // Fetch the party each invoice actually pays / bills — for a PURCHASE
+  // batch, inv.products[0].customer_id is really a SUPPLIER id (the same
+  // field is reused for both roles across this codebase), which only ever
+  // exists in the `suppliers` table. This used to unconditionally query
+  // `receiving_companies` regardless of batch type, so EVERY Purchase
+  // Cash Voucher's lookup came back empty (no supplier id is ever a row
+  // in that table) — the "PAY TO" field silently printed blank on every
+  // single voucher in the ZIP. Query whichever table actually holds this
+  // batch's party type.
   const customerIds = [
     ...new Set(
       invoices
@@ -67,13 +75,23 @@ export async function GET(request: NextRequest) {
     ),
   ];
 
+  const isPurchaseBatch = batch.batch_type === "PURCHASE";
   const customers = await fetchRowsByIds(
-    (chunk) => supabase.from("receiving_companies").select("*").in("id", chunk),
+    (chunk) =>
+      supabase
+        .from(isPurchaseBatch ? "suppliers" : "receiving_companies")
+        .select("*")
+        .in("id", chunk),
     customerIds,
   );
 
   const customerMap = (customers || []).reduce((acc: any, c: any) => {
-    acc[c.id] = c;
+    acc[c.id] = {
+      ...c,
+      // Normalize whichever name column this table actually uses onto
+      // company_name, the field every PDF/Excel builder below reads.
+      company_name: c.company_name || c.supplier_name || c.name,
+    };
     return acc;
   }, {});
 
@@ -624,15 +642,13 @@ export async function GET(request: NextRequest) {
     return buffer as any;
   };
 
-  const isPurchase = batch.batch_type === "PURCHASE";
-
   for (const inv of invoices) {
     const customer =
       customerMap[
         inv.products?.[0]?.customer_id || batch.receiving_company_id || ""
       ] || {};
 
-    if (isPurchase) {
+    if (isPurchaseBatch) {
       const pdfBuffer = await generatePurchasePDFBuffer(
         inv,
         batch.issuing_companies,
