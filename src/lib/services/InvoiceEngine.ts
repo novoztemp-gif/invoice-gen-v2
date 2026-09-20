@@ -4677,23 +4677,70 @@ export class InvoiceEngine {
           ) / 100;
       }
 
-      // Hotfix — real gap: the batch total must match the user's
-      // configured Total Amount to the exact rupee, no tolerance, ever
-      // (explicit client requirement). No balanceable invoice having room
-      // to absorb the rest of the diff within [thresholdMin, thresholdMax]
-      // used to just leave the residual unclosed with a server-only
-      // console.warn — meaning a batch could actually SAVE with a total
-      // that didn't match what was configured, silently. Purchase
-      // generation already hard-rejects this exact situation
-      // ("Purchase Batch Total mismatch"), which — because generation runs
-      // inside a 100-attempt auto-retry wrapper (generateWithAutoRetry for
-      // the direct path, the dry-run route's own retry loop for the Daily
-      // Stock Review path) — turns an unlucky draw into an automatic retry
-      // instead of a silently wrong save. Sales gets the identical
-      // treatment here now: throwing, never a silent accepted residual.
+      // Hotfix — deterministic last-resort force-close, per explicit
+      // client direction: retrying blind (fresh randomness, up to 100
+      // times) is slow and can still fail outright on a structurally
+      // tight batch, when the real total mismatch is only ever a handful
+      // of rupees. Quantity/real-stock accuracy is the invariant that
+      // actually matters — an invoice's total straying slightly outside
+      // [thresholdMin, thresholdMax] on the last invoice or two is a far
+      // smaller, purely cosmetic tradeoff than a wrong grand total or an
+      // uncertain retry. So before ever giving up: walk the balanceable
+      // invoices from the LAST (most recent date) backward, ignoring
+      // thresholdMin/thresholdMax here specifically, and force-close the
+      // remaining diff via solveLineForTargetWithinStock — which still
+      // respects the product's own configured [rate_min, rate_max] and,
+      // critically, never grows a line past what's really left in
+      // availableStockMap (the same guarantee used everywhere else in
+      // this function), so real sold-quantity accuracy is completely
+      // unaffected no matter how this reshapes an invoice's total.
+      if (Math.abs(remainingBatchDiff) > 0.5 && balanceableInvoices.length > 0) {
+        for (let i = balanceableInvoices.length - 1; i >= 0; i--) {
+          if (Math.abs(remainingBatchDiff) <= 0.5) break;
+          const inv = balanceableInvoices[i];
+          if (!inv.products || inv.products.length === 0) continue;
+          const lastItem = inv.products[inv.products.length - 1];
+          const previousAmount = lastItem.amount || 0;
+          const targetLineAmt = Math.round(previousAmount + remainingBatchDiff);
+          if (targetLineAmt <= 0) continue;
+          const prevInvTotal = Math.round(inv.total_amount || 0);
+          const solved = this.solveLineForTargetWithinStock(
+            lastItem.product_id,
+            inv.invoice_date,
+            lastItem.quantity,
+            targetLineAmt,
+            productConfigById,
+            availableStockMap,
+          );
+          lastItem.quantity = solved.quantity;
+          lastItem.rate = solved.rate;
+          lastItem.amount = computeLineAmount(lastItem.quantity, lastItem.rate);
+          inv.total_amount = Math.round(
+            inv.products.reduce(
+              (s: number, p: any) => s + Math.round(p.amount || 0),
+              0,
+            ),
+          );
+          remainingBatchDiff =
+            Math.round(
+              (remainingBatchDiff - (inv.total_amount - prevInvTotal)) * 100,
+            ) / 100;
+        }
+      }
+
+      // Real gap: the batch total must match the user's configured Total
+      // Amount to the exact rupee, no tolerance, ever (explicit client
+      // requirement) — this is the true last resort, only reached when
+      // even the uncapped force-close above found no line anywhere with
+      // real stock/rate-range room left to absorb the rest. Because
+      // generation runs inside a 100-attempt auto-retry wrapper
+      // (generateWithAutoRetry for the direct path, the dry-run route's
+      // own retry loop for the Daily Stock Review path), throwing here
+      // still gets one more fresh random draw rather than ever silently
+      // saving a wrong total.
       if (Math.abs(remainingBatchDiff) > 0) {
         throw new Error(
-          `Sales Batch Total mismatch: expected ₹${targetTotal}, got ₹${targetTotal - remainingBatchDiff}. ₹${remainingBatchDiff} of batch total drift could not be closed without exceeding a balanceable invoice's configured minimum/maximum invoice amount.`,
+          `Sales Batch Total mismatch: expected ₹${targetTotal}, got ₹${targetTotal - remainingBatchDiff}. ₹${remainingBatchDiff} of batch total drift could not be closed even after force-closing within real stock and product rate-range limits.`,
         );
       }
     }
@@ -8071,15 +8118,6 @@ export class InvoiceEngine {
       }
     }
 
-    const totalGenerated = Math.round(
-      invoices.reduce((sum, inv) => sum + Math.round(inv.total_amount || 0), 0),
-    );
-    if (totalGenerated !== Math.round(totalAmount)) {
-      throw new Error(
-        `Purchase Batch Total mismatch: expected ₹${Math.round(totalAmount)}, got ₹${totalGenerated}. Unable to satisfy configured invoice limits.`,
-      );
-    }
-
     // Hotfix — global minimum-amount repair pass. STEP 3's drift
     // redistribution above only closes the gap between the batch's
     // configured total and what's actually invoiced — it doesn't itself
@@ -8208,6 +8246,79 @@ export class InvoiceEngine {
           );
         }
       }
+    }
+
+    // Hotfix — deterministic last-resort force-close, per explicit client
+    // direction: retrying blind (fresh randomness, up to 100 times via
+    // generateWithAutoRetry) is slow and can still fail outright on a
+    // structurally tight batch, when the real mismatch is only ever a
+    // handful of rupees. Placed as the true LAST word on the total —
+    // after the min-amount repair and the range-violation guard above
+    // have already done everything possible to keep every invoice within
+    // [thresholdMin, thresholdMax] normally. Purchase invents its own
+    // quantities from scratch (no upstream real stock to protect the way
+    // Sales must), so before ever giving up: walk the non-major invoices
+    // from the LAST (most recent date) backward and force-close the
+    // remaining diff via solveLineForTarget on each one's last line —
+    // still respects that product's own configured [rate_min, rate_max]
+    // and [qty_min, qty_max], never an arbitrary/unbounded value. This
+    // may push the closing invoice(s) slightly outside
+    // [thresholdMin, thresholdMax] — deliberately: an exact total is a
+    // harder requirement than per-invoice range neatness, and nothing
+    // re-validates range after this point.
+    {
+      const totalGeneratedBefore = Math.round(
+        invoices.reduce((sum, inv) => sum + Math.round(inv.total_amount || 0), 0),
+      );
+      let remainingTotalDiff = Math.round(totalAmount) - totalGeneratedBefore;
+      if (remainingTotalDiff !== 0) {
+        const nonMajorInvoices = invoices.filter(
+          (inv) => !majorCustomerIdSet.has(inv.customer_id),
+        );
+        for (let i = nonMajorInvoices.length - 1; i >= 0; i--) {
+          if (remainingTotalDiff === 0) break;
+          const inv = nonMajorInvoices[i];
+          if (!inv.products || inv.products.length === 0) continue;
+          const lastItem = inv.products[inv.products.length - 1];
+          const previousAmount = lastItem.amount || 0;
+          const targetLineAmt = Math.round(previousAmount + remainingTotalDiff);
+          if (targetLineAmt <= 0) continue;
+          const prevInvTotal = Math.round(inv.total_amount || 0);
+          const solved = this.solveLineForTarget(
+            lastItem.product_id,
+            lastItem.quantity,
+            targetLineAmt,
+            productConfigById,
+          );
+          lastItem.quantity = solved.quantity;
+          lastItem.rate = solved.rate;
+          lastItem.amount = computeLineAmount(lastItem.quantity, lastItem.rate);
+          inv.total_amount = Math.round(
+            inv.products.reduce(
+              (s: number, p: any) => s + Math.round(p.amount || 0),
+              0,
+            ),
+          );
+          remainingTotalDiff -= inv.total_amount - prevInvTotal;
+        }
+      }
+    }
+
+    // Real gap: the batch total must match the user's configured Total
+    // Amount to the exact rupee, no tolerance, ever (explicit client
+    // requirement) — the true last resort, only reached when even the
+    // force-close above found no line anywhere with real rate/quantity
+    // range room left to absorb the rest. Because this function runs
+    // inside a 100-attempt auto-retry wrapper (generateWithAutoRetry),
+    // throwing here still gets one more fresh random draw rather than
+    // ever silently saving a wrong total.
+    const totalGeneratedFinal = Math.round(
+      invoices.reduce((sum, inv) => sum + Math.round(inv.total_amount || 0), 0),
+    );
+    if (totalGeneratedFinal !== Math.round(totalAmount)) {
+      throw new Error(
+        `Purchase Batch Total mismatch: expected ₹${Math.round(totalAmount)}, got ₹${totalGeneratedFinal}. Unable to satisfy configured invoice limits even after force-closing within product rate/quantity limits.`,
+      );
     }
 
     // ── Chronological Sort + Final Renumbering Pass ──
