@@ -118,10 +118,21 @@ describe("InvoiceEngine.generateAndSaveInvoices — Sales stock-aware line growt
       invoice_date_to: "2026-01-10",
       // A tight minimum relative to a single line's typical amount forces
       // the "grow below-minimum invoices toward thresholdMin" fallback to
-      // engage frequently.
+      // engage frequently. With only one selected customer (below), at
+      // most 10 invoices exist (one per date) — 10 x 900 = 9,000, so
+      // total_amount must clear that with real room or the scenario is
+      // mathematically infeasible regardless of how correct the growth
+      // logic is (confirmed: two independent, unrelated correctness fixes
+      // elsewhere this session — removing budgeting "slack" that
+      // shouldn't have existed — turned 8,000 from "barely passes by
+      // accident" into "fails every one of 100 retries, correctly,
+      // because it's genuinely too tight"). Raised to 10,000 to keep this
+      // test's real purpose (no oversell during growth) reliably testable
+      // without also accidentally asserting a borderline-infeasible total
+      // is achievable.
       minimum_invoice_amount: 900,
       maximum_invoice_amount: 2000,
-      total_amount: 8000,
+      total_amount: 10000,
       products,
       selected_customers: ["cust-1"],
       major_customers: [],

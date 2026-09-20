@@ -2507,14 +2507,38 @@ export class InvoiceEngine {
       }
 
       invoices = this.generateWithAutoRetry(() => {
-        // See the identical comment on the Purchase call site above: each
-        // retry attempt needs its own fresh, unconsumed copy of the ledger.
+        // Hotfix — real, confirmed bug: this comment already claimed each
+        // retry gets "its own fresh, unconsumed copy" of the stock map —
+        // true for occurrenceLedger/categoryLedger (both explicitly
+        // re-cloned via `new Map(...)` below) but NOT for
+        // availableStockMap, which was the exact same shared reference
+        // handed to every attempt. A failed attempt could still have
+        // written real consumption into it (the regular day-by-day loop's
+        // own write-back, Major Customer processing, the balancing/
+        // force-close passes) before throwing — leaving the NEXT attempt
+        // to start from an already-partially-depleted, inconsistent view
+        // of real stock instead of the true, untouched ledger. Confirmed
+        // via a real repro: a product oversold its total real purchased
+        // quantity by generating on a later, "poisoned" retry attempt.
+        // Cloning fresh here (one level deep — every value is a flat
+        // {opening, purchased} object or a plain number, never nested
+        // further) guarantees every attempt starts from the same true
+        // baseline, succeed or fail, exactly like occurrenceLedger/
+        // categoryLedger already do.
+        const attemptStockMap = availableStockMap
+          ? new Map(
+              Array.from(availableStockMap.entries()).map(([k, v]) => [
+                k,
+                v && typeof v === "object" ? { ...v } : v,
+              ]),
+            )
+          : null;
         const attemptInvoices = this.generateInvoiceSplitupsInternal(
           typedBatch,
           numberOfDays,
           fromDate,
           startingCounter,
-          availableStockMap,
+          attemptStockMap,
           occurrenceLedger ? new Map(occurrenceLedger) : undefined,
           categoryLedger ? new Map(categoryLedger) : undefined,
         );
@@ -4036,34 +4060,48 @@ export class InvoiceEngine {
 
         if (qtyToSell <= 0) continue;
 
-        // Hotfix — real, confirmed overselling bug. This loop decides
-        // qtyToSell against `available` and tracks day-to-day carryover
-        // via its own private `runningRemaining` map, but never reported
-        // that consumption back into the SHARED availableStockMap that
-        // every other stock-aware pass in this function reads (Major
-        // Customer processing, the Exact Batch Total Balancing Routine,
-        // solveLineForTargetWithinStock's own growth cap). Those passes
-        // saw this (date, product) as if nothing had been sold yet and
-        // could top up a line into stock this loop had already fully
-        // committed — confirmed on a real batch via a full day-by-day
-        // reconciliation of the actual saved invoices: a product with
-        // 333.75kg purchased on 2025-04-22 had 604.75kg sold that exact
-        // day, a 271kg oversell with no leftover source to explain it.
-        // Decrementing here (mirroring solveLineForTargetWithinStock's own
-        // .purchased-first convention) makes every downstream check see
-        // the true remaining stock instead of a stale, too-high figure.
+        // Hotfix — real, confirmed overselling bug, in two parts.
+        //
+        // Part 1 (write-back): this loop decides qtyToSell against
+        // `available` and tracks day-to-day carryover via its own private
+        // `runningRemaining` map, but never reported that consumption back
+        // into the SHARED availableStockMap that every other stock-aware
+        // pass in this function reads (Major Customer processing, the
+        // Exact Batch Total Balancing Routine, solveLineForTargetWithinStock's
+        // own growth cap). Those passes saw this (date, product) as if
+        // nothing had been sold yet and could top up a line into stock
+        // this loop had already fully committed.
+        //
+        // Part 2 (the deeper bug an earlier attempt at Part 1 missed):
+        // availableStockMap's `.opening` field for this exact key is a
+        // STATIC snapshot, computed once up front by
+        // computeDailyChronologicalStock against the batch's RAW ledger —
+        // which, since nothing has actually been sold yet at generation
+        // time, has sold_quantity=0 for every row, so that snapshot
+        // reflects "if nothing were ever sold" and grows day over day
+        // (day 7's opening can equal the sum of days 1-6's entire fresh
+        // purchases). This loop's OWN dayOpening for day 2+ correctly
+        // comes from runningRemaining instead of val.opening for exactly
+        // this reason — but nothing ever told OTHER readers of this same
+        // map key that val.opening had become stale/wrong the moment this
+        // day sold anything. A later pass reading `val.opening + val.purchased`
+        // for a late date could see a triple-digit "still available"
+        // figure that was actually already fully sold days ago —
+        // confirmed via targeted reproduction: a growth pass saw
+        // {opening: 240, purchased: 0} for a date whose true remaining
+        // stock was 0kg. Merely decrementing `.opening` (Part 1's original
+        // approach) can't fix this — the stale baseline itself is wrong,
+        // not just under-decremented. Fixed by directly SETTING this
+        // key's entry to the true remaining amount (opening: 0, purchased:
+        // actualRemaining) rather than trying to subtract from a baseline
+        // that was never trustworthy for any day but the first.
         if (availableStockMap && val !== undefined && val !== null) {
           if (typeof val === "object") {
-            const fromPurchased = Math.min(qtyToSell, val.purchased || 0);
-            val.purchased =
-              Math.max(0, Math.round(((val.purchased || 0) - fromPurchased) * 100) / 100);
-            const remainder = qtyToSell - fromPurchased;
-            if (remainder > 0 && typeof val.opening === "number") {
-              val.opening = Math.max(
-                0,
-                Math.round((val.opening - remainder) * 100) / 100,
-              );
-            }
+            val.opening = 0;
+            val.purchased = Math.max(
+              0,
+              Math.round(actualRemaining * 100) / 100,
+            );
           } else if (typeof val === "number") {
             availableStockMap.set(
               ledgerKey,
@@ -4129,49 +4167,47 @@ export class InvoiceEngine {
           let currentInvoiceAmount = 0;
 
           for (const p of chosenProducts) {
-            const minRate = parseFloat(p.perDayRateMin) || 10;
-            const maxRate = parseFloat(p.perDayRateMax) || 500;
-            let rate = roundToWholeInteger(
-              minRate + Math.random() * (maxRate - minRate),
-            );
+            // Hotfix — real, confirmed structural overselling bug (the
+            // second half of the ₹18.6L/24% overshoot fix — the first
+            // half closed the day-by-day budget-sizing gap, but THIS step
+            // was independently re-randomizing rate all over again,
+            // silently discarding it). `p.quantity`/`p.rate`/`p.amount`
+            // were already decided together, correctly, against the
+            // day's real budget in the loop above (productsOnDay) — this
+            // step's only real job is to SPLIT that already-budgeted
+            // quantity across one or more invoices when a single one
+            // can't fit it all under thresholdMax, never to invent a new
+            // price. It used to draw a brand-new random rate from
+            // [parseFloat(p.perDayRateMin) || 10, parseFloat(p.perDayRateMax) || 500]
+            // — fallback bounds that were ALWAYS used, for every product,
+            // because productsOnDay's pushed objects never actually
+            // carried perDayRateMin/perDayRateMax in the first place, so
+            // every line was priced from a meaningless 10-500 range
+            // completely disconnected from that product's real configured
+            // rate and from what was actually budgeted for it.
+            const rate = p.rate;
+            const config = productConfigById.get(p.product_id);
+            const prodMinQty = config ? parseFloat(config.perDayQtyMin) || 10 : 10;
+            const prodMaxQty = config
+              ? Math.max(prodMinQty, parseFloat(config.perDayQtyMax) || 100)
+              : Math.max(prodMinQty, 100);
 
-            const prodMinQty = parseFloat(p.perDayQtyMin) || 10;
-            const prodMaxQty = Math.max(
-              prodMinQty,
-              parseFloat(p.perDayQtyMax) || 100,
-            );
-
-            // The invoice's first line is exempt from the "don't exceed"
-            // check below (an invoice can't end up with zero lines) — so
-            // its rate must itself be capped to whatever thresholdMax can
-            // actually afford at the minimum commercial quantity, instead
-            // of using an uncapped random rate that can blow straight past
-            // the invoice ceiling before any line has even been added.
+            // The invoice's first line can't be skipped outright (an
+            // invoice can't end up with zero lines) — but rate is now
+            // fixed, so if even this product's own minimum commercial
+            // quantity at its already-decided rate can't fit under
+            // thresholdMax, there is no legal line for it on THIS
+            // invoice. Push it back to the pool and let the next
+            // candidate take the first-line slot instead — this one gets
+            // retried on a future invoice/day, same as any other
+            // capacity-driven deferral in this loop.
             if (currentInvoiceProducts.length === 0) {
               const remBudget = thresholdMax - currentInvoiceAmount;
-              const maxAffordableRate = remBudget / prodMinQty;
-              if (rate > maxAffordableRate) {
-                if (maxAffordableRate < minRate) {
-                  // Even at this product's cheapest legal rate, its own
-                  // minimum commercial quantity alone exceeds thresholdMax
-                  // — there is no legal line for this product that fits
-                  // under the invoice ceiling. Forcing it in anyway (the
-                  // old behaviour: Math.max(minRate, ...) silently pushed
-                  // the "capped" rate back ABOVE the budget) is exactly
-                  // what let generated invoices exceed the configured
-                  // maximum. Skip it as this invoice's first line instead —
-                  // the next candidate product gets a turn at being first,
-                  // and this one is retried on a future invoice/day.
-                  remainingPool.push(p);
-                  continue;
-                }
-                // A cap must always round DOWN — rounding to the nearest
-                // whole number (e.g. 999.9 -> 1000) can land back above the
-                // budget it was supposed to enforce.
-                rate = Math.max(minRate, Math.floor(maxAffordableRate));
+              if (rate * prodMinQty > remBudget) {
+                remainingPool.push(p);
+                continue;
               }
             }
-            p.rate = rate;
 
             const maxQtyFitting =
               (thresholdMax - currentInvoiceAmount) / (rate || 1);
@@ -6121,6 +6157,7 @@ export class InvoiceEngine {
     productConfigById: Map<string, ProductConfig>,
     occurrenceLedger?: Map<string, number>,
     supplierCategoryMap?: Map<string, "Fruits" | "Meat">,
+    availableStockMap?: Map<string, any> | null,
   ): void {
     if (!occurrenceLedger || invoices.length === 0) return;
     const reachableCategories = this.computeReachableCategoriesForSuppliers(
@@ -6255,17 +6292,40 @@ export class InvoiceEngine {
             // possible and as close as the product's own configured range
             // allows otherwise.
             const underMinQ = parseFloat(underConfig.perDayQtyMin as any) || 10;
-            const solved = this.solveLineForTargetCapped(
-              underId,
-              underMinQ,
-              line.amount,
-              productConfigById,
-            );
+            // Hotfix — real, confirmed overselling bug: this swap
+            // introduces `underId` as a BRAND NEW line on this invoice —
+            // it never previously appeared here, so none of its quantity
+            // has been reserved from real stock yet. The non-stock-aware
+            // solver had no way to know that and would happily size a
+            // line the day's real stock had no room for (confirmed via a
+            // real "Overstock Error: generated exceeds total purchased"
+            // failure). currentQuantity is 0 here (not underMinQ) so the
+            // stock-aware wrapper treats the ENTIRE resulting quantity as
+            // new growth to check, not just whatever's above underMinQ —
+            // Purchase (no availableStockMap) is completely unaffected,
+            // falling straight through to the exact same unconstrained
+            // behavior as before.
+            const solved = availableStockMap
+              ? this.solveLineForTargetWithinStockCapped(
+                  underId,
+                  inv.invoice_date,
+                  0,
+                  line.amount,
+                  productConfigById,
+                  availableStockMap,
+                )
+              : this.solveLineForTargetCapped(
+                  underId,
+                  underMinQ,
+                  line.amount,
+                  productConfigById,
+                );
             // The replacement product's own minimum can't get down to
-            // this line's amount at all — swapping it in would inflate
-            // this invoice's total with no way to absorb the difference
-            // by construction. Skip this specific swap rather than risk
-            // the batch/invoice total drifting.
+            // this line's amount at all (or, for Sales, real remaining
+            // stock can't support it) — swapping it in would inflate this
+            // invoice's total with no way to absorb the difference by
+            // construction, or would oversell. Skip this specific swap
+            // rather than risk either.
             if (!solved) continue;
             const newAmount = computeLineAmount(solved.quantity, solved.rate);
 
@@ -6311,14 +6371,27 @@ export class InvoiceEngine {
               if (drift !== 0) {
                 const absorbLine = lines[otherLineIdx];
                 const absorbTarget = Math.round(absorbLine.amount || 0) + drift;
+                // Same real-stock guarantee as the swap-in above — this
+                // line already exists on the invoice, so its CURRENT
+                // quantity is what's already reserved; only growth past
+                // that gets checked against real remaining stock.
                 const absorbSolved =
                   absorbTarget > 0
-                    ? this.solveLineForTargetCapped(
-                        absorbLine.product_id,
-                        absorbLine.quantity,
-                        absorbTarget,
-                        productConfigById,
-                      )
+                    ? availableStockMap
+                      ? this.solveLineForTargetWithinStockCapped(
+                          absorbLine.product_id,
+                          inv.invoice_date,
+                          absorbLine.quantity,
+                          absorbTarget,
+                          productConfigById,
+                          availableStockMap,
+                        )
+                      : this.solveLineForTargetCapped(
+                          absorbLine.product_id,
+                          absorbLine.quantity,
+                          absorbTarget,
+                          productConfigById,
+                        )
                     : null;
                 if (!absorbSolved) {
                   // Can't absorb the swap's residual without overshooting

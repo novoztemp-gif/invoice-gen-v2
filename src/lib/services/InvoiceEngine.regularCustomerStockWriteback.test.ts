@@ -142,11 +142,16 @@ describe("InvoiceEngine.generateAndSaveInvoices — regular-customer loop report
       invoice_date_to: dates[dates.length - 1],
       minimum_invoice_amount: 500,
       maximum_invoice_amount: 3000,
-      // Deliberately at (or just under) the theoretical max sellable value
-      // (7 days x 4 products x 40kg x up to rate 40 = 44,800) so the Exact
-      // Batch Total Balancing Routine has real pressure to grow lines
-      // toward the target rather than trivially landing on it.
-      total_amount: 44000,
+      // High relative to what a purely random-rate first pass naturally
+      // lands on (rates are drawn uniformly across [20, 40], averaging
+      // ~30, not the 40,800-theoretical-ceiling's implied 40), so the
+      // Exact Batch Total Balancing Routine has real pressure to grow
+      // lines toward the target rather than trivially landing on it —
+      // without asking for so much of the 44,800 theoretical maximum
+      // (every kg of real stock priced at the absolute ceiling rate) that
+      // the batch/invoice caps make it genuinely unreachable regardless of
+      // how correct the stock accounting is.
+      total_amount: 30000,
       products,
       selected_customers: ["cust-1", "cust-2", "cust-3"],
       major_customers: [],
