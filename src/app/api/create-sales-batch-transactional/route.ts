@@ -646,6 +646,66 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // ── Rate-only force-close (fast fix for residual reconciliation drift) ──
+      // The client-side Daily Stock Ledger reconciliation
+      // (solveRatesToHitTotal/repairInvoiceAmountRange) can leave a small
+      // residual drift under real constraints even after the earlier
+      // per-line ±1 rupee nudge fix — confirmed live on a real batch
+      // (configured ₹15,721,419, reconciled ₹15,729,661, ₹8,242 off).
+      // Quantity is locked (already confirmed via the Daily Stock Ledger
+      // review, and the stock-conservation check above already passed
+      // against these exact quantities), so this closes any remaining gap
+      // by nudging RATE only, walking invoices/lines from last to first,
+      // bounded by each product's real [rate_min, rate_max] — same
+      // force-close philosophy as InvoiceEngine's generation path,
+      // implemented inline here since this route can't call InvoiceEngine's
+      // private solving methods directly.
+      {
+        const targetTotal = Math.round(parseFloat(totalAmount));
+        let currentTotal = Math.round(
+          repairedInvoices.reduce(
+            (sum: number, inv: any) => sum + Math.round(inv.total_amount || 0),
+            0,
+          ),
+        );
+        let remaining = targetTotal - currentTotal;
+
+        const orderedInvoices = [...repairedInvoices].reverse();
+        for (const inv of orderedInvoices as any[]) {
+          if (remaining === 0) break;
+          const lines = [...(inv.products || [])].reverse();
+          for (const p of lines as any[]) {
+            if (remaining === 0) break;
+            const qty = Number(p.quantity || 0);
+            if (qty <= 0) continue;
+            const range = rateRangeById.get(p.product_id);
+            const curRate = Math.round(Number(p.rate || 1));
+            const minRate = range ? range.min : 1;
+            const maxRate = range ? range.max : Infinity;
+
+            const desiredDeltaRate = remaining / qty;
+            const deltaRate =
+              remaining > 0
+                ? Math.ceil(desiredDeltaRate)
+                : Math.floor(desiredDeltaRate);
+            const newRate = Math.max(
+              minRate,
+              Math.min(maxRate, curRate + deltaRate),
+            );
+            if (newRate === curRate) continue;
+
+            const oldAmt = Math.round(qty * curRate);
+            const newAmt = Math.round(qty * newRate);
+            p.rate = newRate;
+            p.amount = newAmt;
+            inv.total_amount = Math.round(
+              (inv.total_amount || 0) - oldAmt + newAmt,
+            );
+            remaining -= newAmt - oldAmt;
+          }
+        }
+      }
+
       // ── Server-side exact-total guard ────────────────────────────────
       // Explicit client requirement: the saved batch total must match the
       // configured Total Amount to the exact rupee, never even ₹1 off.
