@@ -432,35 +432,79 @@ export default function GenerateInvoice() {
             Array.isArray(result.batchDetails.products)
           ) {
             const batchProducts = result.batchDetails.products;
-            let meatSum = 0;
-            let fruitSum = 0;
-            for (const p of batchProducts) {
-              const occ = Number(p.occurrencePercentage || 0);
-              const cat = String(
-                p.category || p.category_name || "Meat",
-              ).toUpperCase();
-              if (cat.includes("FRUIT")) {
-                fruitSum += occ;
-              } else {
-                meatSum += occ;
-              }
-            }
-            meatSum = Math.round(meatSum * 100) / 100;
-            fruitSum = Math.round(fruitSum * 100) / 100;
-
             const numericTotal = parseFloat(formData.totalAmount) || 0;
-            const meatAmt =
-              Math.round(numericTotal * (meatSum / 100) * 100) / 100;
-            const fruitAmt = Math.round((numericTotal - meatAmt) * 100) / 100;
 
-            setCategorySplits([
-              { category_name: "Meat", percentage: meatSum, amount: meatAmt },
-              {
-                category_name: "Fruits",
-                percentage: fruitSum,
-                amount: fruitAmt,
-              },
-            ]);
+            // Hotfix — real bug: the source Purchase batch's own "By
+            // Category" mode was never reflected here at all. This block
+            // used to always sum each product's OWN occurrencePercentage
+            // by category — but in By Category mode, per-product
+            // occurrence isn't the user's real configured split; it's an
+            // auto-computed EQUAL share within each category (so
+            // generation has something concrete to work with), which
+            // always sums to exactly 100% per category regardless of the
+            // real Meat/Fruits split — summing Meat's 100% and Fruits'
+            // 100% together produced the nonsensical "Total Split: 200%"
+            // the client saw. The real split lives in the batch's own
+            // category_allocation field. Also failed to select "By
+            // Category" on this page at all, leaving it silently stuck on
+            // Global even though the source was clearly configured
+            // otherwise.
+            if (
+              result.batchDetails.occurrence_semantics === "CATEGORY" &&
+              result.batchDetails.category_allocation
+            ) {
+              const meatPct =
+                Number(result.batchDetails.category_allocation.Meat) || 0;
+              const fruitPct =
+                Number(result.batchDetails.category_allocation.Fruits) || 0;
+              const meatAmt =
+                Math.round(numericTotal * (meatPct / 100) * 100) / 100;
+              const fruitAmt = Math.round((numericTotal - meatAmt) * 100) / 100;
+
+              setOccurrenceSemantics("CATEGORY");
+              setCategoryAllocation({
+                Meat: String(meatPct),
+                Fruits: String(fruitPct),
+              });
+              setCategorySplits([
+                { category_name: "Meat", percentage: meatPct, amount: meatAmt },
+                {
+                  category_name: "Fruits",
+                  percentage: fruitPct,
+                  amount: fruitAmt,
+                },
+              ]);
+            } else {
+              setOccurrenceSemantics("GLOBAL");
+              let meatSum = 0;
+              let fruitSum = 0;
+              for (const p of batchProducts) {
+                const occ = Number(p.occurrencePercentage || 0);
+                const cat = String(
+                  p.category || p.category_name || "Meat",
+                ).toUpperCase();
+                if (cat.includes("FRUIT")) {
+                  fruitSum += occ;
+                } else {
+                  meatSum += occ;
+                }
+              }
+              meatSum = Math.round(meatSum * 100) / 100;
+              fruitSum = Math.round(fruitSum * 100) / 100;
+
+              const meatAmt =
+                Math.round(numericTotal * (meatSum / 100) * 100) / 100;
+              const fruitAmt = Math.round((numericTotal - meatAmt) * 100) / 100;
+
+              setCategorySplits([
+                { category_name: "Meat", percentage: meatSum, amount: meatAmt },
+                {
+                  category_name: "Fruits",
+                  percentage: fruitSum,
+                  amount: fruitAmt,
+                },
+              ]);
+            }
 
             // Auto-populate selectedProducts with occurrence percentages from the Purchase Batch
             const batchProdMap = new Map<string, any>();

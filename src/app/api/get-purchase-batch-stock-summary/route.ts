@@ -70,7 +70,7 @@ export async function GET(request: NextRequest) {
         supabase
           .from("invoice_batch")
           .select(
-            "id, total_amount, invoice_date_from, invoice_date_to, financial_year, products",
+            "id, total_amount, invoice_date_from, invoice_date_to, financial_year, products, occurrence_semantics, category_allocation",
           )
           .in("id", chunk),
       batchIds,
@@ -273,6 +273,15 @@ export async function GET(request: NextRequest) {
         financial_year: primaryBatch.financial_year || null,
         products_count: summary.length,
         products: Array.from(productMap.values()),
+        // Sales' own "Category Split" inheritance needs to know whether
+        // the source Purchase batch was configured in By Category mode —
+        // per-product occurrencePercentage alone can't distinguish that
+        // from Global mode (By Category auto-fills an equal split per
+        // product within each category, which always sums to 100% and
+        // would otherwise look identical to Global's own real
+        // percentages).
+        occurrence_semantics: primaryBatch.occurrence_semantics || null,
+        category_allocation: primaryBatch.category_allocation || null,
       },
     });
   } catch (error: any) {
