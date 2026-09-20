@@ -386,7 +386,24 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      let seqCounter = startingCounter;
+      // Hotfix — real numbering defects confirmed on a real batch: an
+      // invoice number (e.g. #165) missing entirely from the sequence, and
+      // brand-new "overflow" invoices (opened later by
+      // repairInvoiceAmountRange below) landing in the correct DATE
+      // position but keeping a NUMBER from the tail of the counter (e.g.
+      // #390 sitting between #114 and #115). Root cause: invoice_number
+      // used to be assigned HERE, before repairInvoiceAmountRange ran —
+      // which can both REMOVE invoices (merging a below-minimum invoice
+      // into a peer, permanently orphaning that invoice's
+      // already-assigned number) and ADD brand-new ones (shed overflow),
+      // numbered by simply continuing the counter from wherever the first
+      // pass left off, with no relationship to that new invoice's actual
+      // date. Fixed by deferring ALL numbering to a single final pass,
+      // below, after repairInvoiceAmountRange has finished adding and
+      // removing invoices — every survivor gets numbered together, once,
+      // in true date order, so numbers are always gap-free and always
+      // increase with date, whether an invoice came from the original
+      // pass or was opened during repair.
       const invoicesToInsert = sortedInvoicesOverride.map((inv: any, invIndex: number) => {
         const normalizedProducts = rawLines
           .filter((l) => l.invIndex === invIndex)
@@ -408,16 +425,8 @@ export async function POST(request: NextRequest) {
           ),
         );
 
-        const currentInvNumber = InvoiceNumberingService.formatInvoiceNumber(
-          companyAbbr,
-          canonicalFy,
-          "S",
-          seqCounter++,
-        );
-
         return {
           invoice_batch_id: newBatch.id,
-          invoice_number: currentInvNumber,
           invoice_date: inv.invoice_date,
           total_amount: totalAmt,
           products: normalizedProducts,
@@ -448,8 +457,8 @@ export async function POST(request: NextRequest) {
       console.log("NODE_ENV:", process.env.NODE_ENV);
       console.log("url:", request.url);
       console.log(
-        "first 5 invoices to insert:",
-        invoicesToInsert.slice(0, 5).map((i: any) => i.invoice_number),
+        "invoices before repair:",
+        invoicesToInsert.length,
       );
       console.log("==========================================");
 
@@ -543,7 +552,10 @@ export async function POST(request: NextRequest) {
               ? `below minimum ₹${(check.min ?? 0).toFixed(2)}`
               : `above maximum ₹${(check.max ?? 0).toFixed(2)}${majorMax ? " (major customer limit)" : ""}`
             : "range violation";
-          return `${inv.invoice_number || "(unnumbered)"}: ₹${check.total.toFixed(2)} (${rangeDesc})`;
+          // Numbering hasn't run yet at this point (moved to after repair
+          // so it can number every survivor gap-free — see the comment at
+          // invoicesToInsert above), so identify by date here instead.
+          return `invoice dated ${inv.invoice_date || "unknown date"}: ₹${check.total.toFixed(2)} (${rangeDesc})`;
         });
         await supabase.from("invoice_batch").delete().eq("id", newBatch.id);
         return NextResponse.json(
@@ -557,20 +569,33 @@ export async function POST(request: NextRequest) {
       // repairInvoiceAmountRange can open brand-new invoices for shed
       // overflow (no compatible peer had room) — those only carry
       // invoice_date/customer_id/products/total_amount, not yet the
-      // DB-required fields every other invoice already has. Backfill them
-      // here, continuing the same sequence used above.
+      // DB-required fields every other invoice already has. Backfill those
+      // here; invoice_number itself is assigned below, in one single pass
+      // over every survivor together (see the comment at invoicesToInsert
+      // above for why numbering was moved here instead of before repair).
       for (const inv of repairedInvoices) {
-        if (!(inv as any).invoice_number) {
+        if (!(inv as any).invoice_batch_id) {
           (inv as any).invoice_batch_id = newBatch.id;
-          (inv as any).invoice_number = InvoiceNumberingService.formatInvoiceNumber(
-            companyAbbr,
-            canonicalFy,
-            "S",
-            seqCounter++,
-          );
           (inv as any).status = "pending";
           (inv as any).batch_type = "SALES";
         }
+      }
+
+      // Single, final numbering pass — every invoice that survived repair
+      // (original or newly-opened), sorted by date, numbered together in
+      // one gap-free, strictly date-increasing sequence. A stable sort
+      // preserves same-date relative order from the earlier date sort.
+      const finalSortedInvoices = [...repairedInvoices].sort((a: any, b: any) =>
+        String(a.invoice_date || "").localeCompare(String(b.invoice_date || "")),
+      );
+      let seqCounter = startingCounter;
+      for (const inv of finalSortedInvoices) {
+        (inv as any).invoice_number = InvoiceNumberingService.formatInvoiceNumber(
+          companyAbbr,
+          canonicalFy,
+          "S",
+          seqCounter++,
+        );
       }
 
       // ── Server-side stock conservation (Sprint 1.3B) ──────────────────
