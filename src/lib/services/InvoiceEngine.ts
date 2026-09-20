@@ -3976,15 +3976,31 @@ export class InvoiceEngine {
         // total (see regularTargetAmount/dayBudget above) — whatever
         // stock isn't needed to hit the target is left unsold and carried
         // forward as leftover, exactly like the Daily Stock Ledger's
-        // Auto Allocate / manual edits already do downstream. This is
-        // also why quantity is estimated using the product's mid-range
-        // rate: the final per-line rate is chosen independently below and
-        // in the invoice composition step, so this is a budget guide, not
-        // an exact accounting — the "Exact Batch Total Balancing Routine"
-        // later closes any residual precisely.
+        // Auto Allocate / manual edits already do downstream.
         const minRate = parseFloat(prodConfig.perDayRateMin) || 0;
         const maxRate = parseFloat(prodConfig.perDayRateMax) || 0;
-        const midRate = (minRate + maxRate) / 2 || 1;
+
+        // Hotfix — real, confirmed structural overselling bug (produced a
+        // ₹18.6L / 24% overshoot on a real batch, unrecoverable even by
+        // the Exact Batch Total Balancing Routine's own per-invoice
+        // headroom). The budget cap below used to divide by this
+        // product's MID-RANGE rate as an estimate, on the assumption the
+        // "Exact Batch Total Balancing Routine" would close any resulting
+        // gap later — but the ACTUAL rate charged (below) is drawn
+        // uniformly at random from the FULL [rate_min, rate_max] range,
+        // which can land far above the midpoint. A product with a wide
+        // rate range (e.g. 750-1100) charged near its ceiling on a line
+        // sized for the ~925 midpoint overshoots that line's own budget
+        // contribution by ~19% — repeated across many products/days, that
+        // compounds into a drift far too large for the balancing routine
+        // (or the newer force-close) to absorb within any invoice's own
+        // [thresholdMin, thresholdMax] headroom. Fixed by deciding the
+        // real rate FIRST, then sizing quantity against THAT exact rate —
+        // the budget guide and the actual charge are now the same number,
+        // not an estimate and a surprise.
+        const rate = roundToWholeInteger(
+          minRate + Math.random() * (maxRate - minRate),
+        );
 
         let qtyToSell = roundToQuarterIncrement(available);
         let actualRemaining = 0;
@@ -4007,7 +4023,7 @@ export class InvoiceEngine {
             dayBudget - dayCumulativeSold,
           );
           const maxQtyByBudget = roundToQuarterIncrement(
-            dayBudgetRemaining / midRate,
+            dayBudgetRemaining / (rate || 1),
           );
           if (maxQtyByBudget < qtyToSell) {
             qtyToSell = Math.max(0, maxQtyByBudget);
@@ -4055,10 +4071,6 @@ export class InvoiceEngine {
             );
           }
         }
-
-        const rate = roundToWholeInteger(
-          minRate + Math.random() * (maxRate - minRate),
-        );
 
         const amount = computeLineAmount(qtyToSell, rate);
         dayCumulativeSold = Math.round((dayCumulativeSold + amount) * 100) / 100;
