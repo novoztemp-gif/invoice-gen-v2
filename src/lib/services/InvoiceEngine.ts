@@ -3026,7 +3026,7 @@ export class InvoiceEngine {
     occurrenceLedger?: Map<string, number>,
     categoryLedger?: Map<"Meat" | "Fruits", number>,
   ) {
-    const invoices = [];
+    const invoices: any[] = [];
     const thresholdMin = batch.minimum_invoice_amount;
     const thresholdMax = batch.maximum_invoice_amount;
 
@@ -3990,8 +3990,22 @@ export class InvoiceEngine {
         }
 
         if (available <= 0) {
-          // Nothing to sell today for this product; carry forward 0
+          // Nothing to sell today for this product; carry forward 0.
+          // Same staleness class as Part 3 above — this key never reaches
+          // the write-back below, so a stale, inflated val.opening from
+          // computeDailyChronologicalStock's original snapshot could
+          // survive untouched even though `available` (correctly derived
+          // from runningRemaining) says the true remaining is 0. Clear it
+          // here too so a later reader never sees that stale figure.
           runningRemaining.set(prodConfig.product_id, 0);
+          if (availableStockMap && val !== undefined && val !== null) {
+            if (typeof val === "object") {
+              val.opening = 0;
+              val.purchased = 0;
+            } else if (typeof val === "number") {
+              availableStockMap.set(ledgerKey, 0);
+            }
+          }
           continue;
         }
 
@@ -4058,9 +4072,7 @@ export class InvoiceEngine {
 
         runningRemaining.set(prodConfig.product_id, actualRemaining);
 
-        if (qtyToSell <= 0) continue;
-
-        // Hotfix — real, confirmed overselling bug, in two parts.
+        // Hotfix — real, confirmed overselling bug, in three parts.
         //
         // Part 1 (write-back): this loop decides qtyToSell against
         // `available` and tracks day-to-day carryover via its own private
@@ -4095,6 +4107,24 @@ export class InvoiceEngine {
         // key's entry to the true remaining amount (opening: 0, purchased:
         // actualRemaining) rather than trying to subtract from a baseline
         // that was never trustworthy for any day but the first.
+        //
+        // Part 3 (real, confirmed overselling bug in the Final
+        // Minimum-Amount Safety Net's donor-funded growth, added later):
+        // this write-back used to sit AFTER `if (qtyToSell <= 0) continue`
+        // — so on a day where THIS product's entire share got zeroed out
+        // by the day's BUDGET cap (not by real stock exhaustion — plenty
+        // of real stock, just no budget left to spend on it), the loop
+        // skipped straight past the write-back and left this exact
+        // (date, product) key holding its original STALE, pre-sale
+        // snapshot from computeDailyChronologicalStock — the same Part 2
+        // staleness, just for a day this loop never got the chance to
+        // correct. A later stock-aware growth pass reading that key had
+        // no way to tell it was stale and could grow a line into stock
+        // that earlier days had already actually consumed — confirmed via
+        // a real stress test: 15,259.75kg generated for a product against
+        // only 15,000kg ever purchased. Moved above the early-continue so
+        // this key is always corrected for every day this loop visits it,
+        // sold or not.
         if (availableStockMap && val !== undefined && val !== null) {
           if (typeof val === "object") {
             val.opening = 0;
@@ -4109,6 +4139,8 @@ export class InvoiceEngine {
             );
           }
         }
+
+        if (qtyToSell <= 0) continue;
 
         const amount = computeLineAmount(qtyToSell, rate);
         dayCumulativeSold = Math.round((dayCumulativeSold + amount) * 100) / 100;
@@ -4562,6 +4594,49 @@ export class InvoiceEngine {
       }
     }
 
+    // Hotfix — real, confirmed overselling bug (a stress test generated
+    // hundreds of kg more than a product's total purchased quantity, even
+    // though every one of this function's individual stock mutations was
+    // itself correct at the moment it ran). Root cause: availableStockMap's
+    // per-date entries for a product are a CHAIN, not independent buckets
+    // — the day-by-day loop above carries each date's own leftover forward
+    // into the NEXT date's `available` via runningRemaining, and once that
+    // next date sells it (fully or partially), it's already spoken for.
+    // Nothing ever went back and zeroed the EARLIER date's own map entry
+    // when a later date consumed its carried-forward remainder — so any
+    // stock-aware pass below that reads an EARLIER date's entry (the
+    // donor-funded growth further down, in particular) could see
+    // "leftover" that a later date had already actually sold, double-
+    // counting real stock that only exists once.
+    //
+    // The only amount that's genuinely still unclaimed, batch-wide, once
+    // this loop finishes is runningRemaining's FINAL value per product —
+    // the true end-of-range leftover after every date's chain of carry-
+    // forward and consumption. Collapse every per-date entry down to that
+    // single truth: zero every date's entry for this product, then set
+    // only the batch's LAST date to the real remaining amount. Any
+    // stock-aware pass below now only ever sees real, currently-unclaimed
+    // stock, never a historical snapshot something later already spent.
+    if (availableStockMap && dateList.length > 0) {
+      const lastDate = dateList[dateList.length - 1];
+      for (const prodConfig of batch.products) {
+        const trueLeftover =
+          Math.max(0, runningRemaining.get(prodConfig.product_id) ?? 0);
+        for (const dateStr of dateList) {
+          const key = `${dateStr}_${prodConfig.product_id}`;
+          const val = availableStockMap.get(key);
+          if (val === undefined || val === null) continue;
+          const amount = dateStr === lastDate ? trueLeftover : 0;
+          if (typeof val === "object") {
+            val.opening = 0;
+            val.purchased = Math.round(amount * 100) / 100;
+          } else if (typeof val === "number") {
+            availableStockMap.set(key, Math.round(amount * 100) / 100);
+          }
+        }
+      }
+    }
+
     // ── Final Minimum-Amount Safety Net ──
     // The per-day merge/grow logic above only ever looks at OTHER invoices
     // from the SAME day — a day with very little leftover stock can end up
@@ -4610,6 +4685,280 @@ export class InvoiceEngine {
         );
         invoices.splice(belowIdx, 1);
         mergedGlobally = true;
+      }
+
+      // ── Budget-neutral donor-funded growth ────────────────────────────
+      // Whatever the merge pass above couldn't fix for free (no compatible
+      // same-day/whole-batch peer to combine with) genuinely needs more
+      // money to reach thresholdMin. Inventing that money one-sidedly (the
+      // removed old design — see the comment where the per-day growth
+      // fallback used to be, above) is exactly what caused a real ₹15.5L /
+      // 20% batch total overshoot: nothing ever gave that money back.
+      //
+      // Fix: for each remaining below-minimum invoice, first RAISE the
+      // money from donor invoice(s) elsewhere in the batch that have real
+      // headroom above thresholdMin — taken purely via RATE reduction
+      // (never quantity, so a donor's real sold quantity is completely
+      // untouched, and it can never be pushed below its own thresholdMin
+      // since each donor's contribution is capped at its own headroom).
+      // Only once real money has actually been raised does the recipient
+      // line grow — via the same solveLineForTargetWithinStockCapped
+      // solver the rest of this function already trusts, which tries rate
+      // first and falls back to real remaining stock (never inventing
+      // supply, and never exceeding the funded amount). A line whose rate
+      // is already at its ceiling (no rate room at all) still benefits,
+      // because growth here isn't limited to rate the way a pure
+      // rate-for-rate swap would be — it can legitimately use more real
+      // stock, same as the old design could, but now only paid for by an
+      // equal cut somewhere else instead of inflating the batch total.
+      // Raises up to `need` from donor invoices (real headroom above
+      // thresholdMin only, taken via rate reduction, same rules as above)
+      // and returns however much was actually raised — shared by both the
+      // existing-line growth pass and the new-line fallback below.
+      // Read-only upper-bound estimate of how much a line could grow (via
+      // rate and/or real remaining stock) — used to decide how much to
+      // actually ask raiseFunds for. Critical that this never mutates
+      // anything: solveLineForTargetWithinStock* commits its stock effects
+      // immediately on every call, so raising funds BEFORE confirming a
+      // line can use them (the earlier version of this fix) meant a
+      // failed/undersized solve just wasted real donor money with nothing
+      // to show for it — silently starving every below-minimum invoice
+      // processed later in the same pass, since it drains donor headroom
+      // without any compensating benefit.
+      const estimateLineRoom = (
+        productId: string,
+        dateStr: string,
+        qty: number,
+        curRate: number,
+      ): number => {
+        const cfg = productConfigById.get(productId);
+        const maxRate = cfg ? parseFloat(cfg.perDayRateMax as any) || 0 : 0;
+        const maxQty = cfg ? parseFloat(cfg.perDayQtyMax as any) || 0 : 0;
+        const ledgerKey = `${dateStr}_${productId}`;
+        const val = availableStockMap ? availableStockMap.get(ledgerKey) : null;
+        const stockRoom =
+          val && typeof val === "object"
+            ? (val.opening || 0) + (val.purchased || 0)
+            : typeof val === "number"
+              ? val
+              : 0;
+        const qtyCeiling = Math.min(maxQty, qty + Math.max(0, stockRoom));
+        // Generous upper bound: every extra unit of quantity AND rate room
+        // priced at the ceiling rate — solveLineForTargetWithinStockCapped
+        // will never actually exceed what's real, this just avoids asking
+        // donors for more than this line could conceivably ever use.
+        return Math.max(0, qtyCeiling * maxRate - qty * curRate);
+      };
+
+      const raiseFunds = (recipient: any, need: number): number => {
+        let funded = 0;
+        for (const donor of invoices) {
+          if (funded >= need) break;
+          if (donor === recipient) continue;
+          let donorHeadroom = Math.round(donor.total_amount || 0) - thresholdMin;
+          if (donorHeadroom <= 0) continue;
+
+          for (const dLine of donor.products || []) {
+            if (funded >= need || donorHeadroom <= 0) break;
+            const dCfg = productConfigById.get(dLine.product_id);
+            const dMinRate = dCfg ? parseFloat(dCfg.perDayRateMin) || 0 : 0;
+            const dQty = Number(dLine.quantity || 0);
+            const dCurRate = Math.round(Number(dLine.rate || 0));
+            if (dQty <= 0 || dCurRate <= dMinRate) continue;
+
+            // Bounded by the donor's own real headroom (floor — a donor
+            // must never give up more than that, or this would push a
+            // compliant invoice back below thresholdMin, which nothing
+            // downstream re-checks) and its rate floor, but NOT capped to
+            // `remaining` itself: a donor line's own quantity is often
+            // larger than a small remaining shortfall (e.g. this line is
+            // worth 80/rupee-step but only ₹2 is still needed), and
+            // flooring against `remaining` in that case always yields
+            // zero — silently starving every below-minimum invoice of a
+            // donor that clearly has room, just because its granularity
+            // is coarser than the ask. Taking one whole covering step
+            // instead can overshoot `remaining` by at most this line's own
+            // quantity, which is harmless (the caller's target is always
+            // capped well under thresholdMax regardless of how much this
+            // raises).
+            const remaining = need - funded;
+            const stepsForNeed = Math.max(1, Math.ceil(remaining / dQty));
+            const dDeltaRate = Math.min(
+              dCurRate - dMinRate,
+              Math.floor(donorHeadroom / dQty),
+              stepsForNeed,
+            );
+            if (dDeltaRate <= 0) continue;
+
+            const dOldAmt = dLine.amount || 0;
+            dLine.rate = dCurRate - dDeltaRate;
+            dLine.amount = computeLineAmount(dLine.quantity, dLine.rate);
+            const dLoss = Math.round(dOldAmt - dLine.amount);
+            if (dLoss <= 0) continue;
+            donor.total_amount = Math.round((donor.total_amount || 0) - dLoss);
+            donorHeadroom -= dLoss;
+            funded += dLoss;
+          }
+        }
+        return funded;
+      };
+
+      for (const inv of invoices) {
+        let shortfall = thresholdMin - Math.round(inv.total_amount || 0);
+        if (shortfall <= 0) continue;
+
+        for (const rLine of inv.products || []) {
+          if (shortfall <= 0) break;
+
+          const room = estimateLineRoom(
+            rLine.product_id,
+            inv.invoice_date,
+            Number(rLine.quantity || 0),
+            Math.round(Number(rLine.rate || 0)),
+          );
+          const ask = Math.min(shortfall, Math.floor(room));
+          if (ask <= 0) continue;
+
+          const funded = raiseFunds(inv, ask);
+          if (funded <= 0) continue;
+
+          const previousAmount = rLine.amount || 0;
+          const targetLineAmt = Math.round(previousAmount + funded);
+          const solved = this.solveLineForTargetWithinStockCapped(
+            rLine.product_id,
+            inv.invoice_date,
+            rLine.quantity,
+            targetLineAmt,
+            productConfigById,
+            availableStockMap,
+          );
+          if (!solved) continue;
+
+          rLine.quantity = solved.quantity;
+          rLine.rate = solved.rate;
+          rLine.amount = computeLineAmount(rLine.quantity, rLine.rate);
+          const rGain = Math.round(rLine.amount - previousAmount);
+          inv.total_amount = Math.round((inv.total_amount || 0) + rGain);
+          shortfall -= rGain;
+        }
+
+        // Hotfix — real, confirmed gap: an invoice whose EXISTING lines
+        // are each simultaneously at their own real-stock ceiling for
+        // this exact date AND their configured rate ceiling (both hard
+        // limits) has nowhere left to grow, even though donor money is
+        // available and even though the SAME date's stock ledger may
+        // still hold plenty of an entirely different product this
+        // invoice just doesn't carry yet. Mirrors the identical lever
+        // repairInvoiceAmountRange (the client-side reconciliation path)
+        // already uses for this exact situation — reach for a new,
+        // same-category product line instead of giving up.
+        if (shortfall > 0 && (inv.products || []).length < 8) {
+          const invCategory = String(
+            inv.products?.[0]?.category || "Meat",
+          ).toUpperCase();
+          const existingProductIds = new Set(
+            (inv.products || []).map((p: any) => p.product_id),
+          );
+          let bestNewProduct: any = null;
+          let bestNewRoom = 0;
+          for (const cfg of batch.products as any[]) {
+            if (existingProductIds.has(cfg.product_id)) continue;
+            if (
+              String((cfg as any).category || (cfg as any).category_name || "Meat").toUpperCase() !==
+              invCategory
+            ) {
+              continue;
+            }
+            const newKey = `${inv.invoice_date}_${cfg.product_id}`;
+            const val = availableStockMap ? availableStockMap.get(newKey) : null;
+            const stockRoom =
+              val && typeof val === "object"
+                ? (val.opening || 0) + (val.purchased || 0)
+                : typeof val === "number"
+                  ? val
+                  : 0;
+            const maxQty = parseFloat(cfg.perDayQtyMax) || 0;
+            const room = Math.max(0, Math.min(maxQty, stockRoom));
+            if (room > bestNewRoom) {
+              bestNewRoom = room;
+              bestNewProduct = cfg;
+            }
+          }
+
+          if (bestNewProduct && bestNewRoom >= 0.25) {
+            const newRateMinEst = parseFloat(bestNewProduct.perDayRateMin) || 0;
+            const newRateMaxEst = parseFloat(bestNewProduct.perDayRateMax) || 0;
+            const ask = Math.min(
+              shortfall,
+              Math.floor(bestNewRoom * (newRateMaxEst || 1)),
+            );
+            const funded = ask > 0 ? raiseFunds(inv, ask) : 0;
+            if (funded > 0) {
+              const newRateMin = newRateMinEst;
+              const newRateMax = newRateMaxEst;
+              const solved = this.solveLineForTargetWithinStockCapped(
+                bestNewProduct.product_id,
+                inv.invoice_date,
+                0,
+                Math.round(funded),
+                productConfigById,
+                availableStockMap,
+              );
+              if (solved && solved.quantity > 0) {
+                const rate = Math.min(
+                  newRateMax || solved.rate,
+                  Math.max(newRateMin || solved.rate, solved.rate),
+                );
+                const amount = computeLineAmount(solved.quantity, rate);
+                inv.products.push({
+                  product_id: bestNewProduct.product_id,
+                  product_name: bestNewProduct.product_name || "Unknown Product",
+                  category: bestNewProduct.category || invCategory,
+                  hsn_code: bestNewProduct.hsn_code,
+                  unit_of_measure: bestNewProduct.unit_of_measure,
+                  quantity: solved.quantity,
+                  rate,
+                  amount,
+                  customer_id: inv.products?.[0]?.customer_id || null,
+                });
+                inv.total_amount = Math.round((inv.total_amount || 0) + amount);
+                shortfall -= amount;
+              }
+            }
+          }
+        }
+
+        // Absolute last resort — by this point real per-date stock and
+        // every existing/candidate product's configured rate ceiling have
+        // already been tried and exhausted; what's left is at most a
+        // handful of rupees (whole-rupee-rate granularity leaves a
+        // residual no combination of quantity/rate can land on exactly).
+        // Same lever repairInvoiceAmountRange already uses for this exact
+        // situation: push the largest line's rate past its configured
+        // ceiling by exactly enough to clear the minimum — but still
+        // funded from a donor's real headroom first, never invented.
+        if (shortfall > 0 && (inv.products || []).length > 0) {
+          const funded = raiseFunds(inv, shortfall);
+          if (funded > 0) {
+            const largestLine = [...inv.products].sort(
+              (a: any, b: any) =>
+                (Number(b.quantity) || 0) - (Number(a.quantity) || 0),
+            )[0];
+            const qty = Number(largestLine.quantity) || 0;
+            if (qty > 0) {
+              const neededBump = Math.ceil(funded / qty);
+              const oldAmt = largestLine.amount || 0;
+              largestLine.rate = Math.round(Number(largestLine.rate) || 0) + neededBump;
+              largestLine.amount = computeLineAmount(
+                largestLine.quantity,
+                largestLine.rate,
+              );
+              const gain = Math.round(largestLine.amount - oldAmt);
+              inv.total_amount = Math.round((inv.total_amount || 0) + gain);
+              shortfall -= gain;
+            }
+          }
+        }
       }
 
       const stillBelow = invoices.filter(
@@ -5901,10 +6250,26 @@ export class InvoiceEngine {
     const growthNeeded = solved.quantity - currentQuantity;
     if (growthNeeded <= availStock + 0.001) {
       // Fits within real stock — deduct the growth and return as-is.
+      //
+      // Hotfix — real, confirmed overselling bug: this used to only
+      // decrement val.purchased, leaving val.opening completely untouched.
+      // availStock above already correctly reads opening+purchased
+      // together, so whenever opening was non-zero (a date this growth
+      // pass reaches before the day-by-day loop's own write-back had a
+      // chance to zero it, or before the two "Part 3"/"available<=0"
+      // write-back fixes above existed), growthNeeded could exceed
+      // val.purchased alone, clamping it to 0 while leaving val.opening
+      // fully intact — so the very same stale opening figure was still
+      // sitting there for the NEXT grow call to read and consume all
+      // over again, unbounded. Set both fields from the TRUE combined
+      // remainder instead of decrementing purchased in isolation, so this
+      // key is self-consistent (opening: 0, purchased: true remainder)
+      // after every single mutation, not just the day loop's own.
       if (typeof val === "object" && val !== null) {
+        val.opening = 0;
         val.purchased = Math.max(
           0,
-          Math.round((val.purchased - growthNeeded) * 100) / 100,
+          Math.round((availStock - growthNeeded) * 100) / 100,
         );
       } else if (typeof val === "number") {
         availableStockMap.set(
@@ -5947,10 +6312,14 @@ export class InvoiceEngine {
       : Math.min(maxR, Math.max(minR, roundToWholeInteger(rawRate)));
     const actualGrowth = cappedQuantity - currentQuantity;
     if (actualGrowth > 0) {
+      // Same fix as the fits-within-stock branch above — set both fields
+      // from the true combined remainder (opening: 0) rather than
+      // decrementing purchased alone and leaving a stale opening behind.
       if (typeof val === "object" && val !== null) {
+        val.opening = 0;
         val.purchased = Math.max(
           0,
-          Math.round((val.purchased - actualGrowth) * 100) / 100,
+          Math.round((availStock - actualGrowth) * 100) / 100,
         );
       } else if (typeof val === "number") {
         availableStockMap.set(
