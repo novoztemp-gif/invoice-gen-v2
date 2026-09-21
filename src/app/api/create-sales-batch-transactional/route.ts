@@ -646,7 +646,7 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // ── Rate-only force-close (fast fix for residual reconciliation drift) ──
+      // ── Rate-only force-close (range-aware) ──────────────────────────
       // The client-side Daily Stock Ledger reconciliation
       // (solveRatesToHitTotal/repairInvoiceAmountRange) can leave a small
       // residual drift under real constraints even after the earlier
@@ -656,10 +656,28 @@ export async function POST(request: NextRequest) {
       // review, and the stock-conservation check above already passed
       // against these exact quantities), so this closes any remaining gap
       // by nudging RATE only, walking invoices/lines from last to first,
-      // bounded by each product's real [rate_min, rate_max] — same
-      // force-close philosophy as InvoiceEngine's generation path,
-      // implemented inline here since this route can't call InvoiceEngine's
-      // private solving methods directly.
+      // bounded by each product's real [rate_min, rate_max].
+      //
+      // Root-cause fix (v2): the first version of this force-close only
+      // respected the PRODUCT's rate range — nothing stopped it from
+      // nudging a line's rate far enough to push its INVOICE below
+      // minimumInvoiceAmount or above maximumInvoiceAmount. Confirmed live:
+      // it silently created invoices that then failed the separate
+      // finalize-time range gate (batch-status route) — e.g. ₹4,800 against
+      // a configured ₹6,000 minimum. By the time this runs, every invoice
+      // has ALREADY been verified in-range by repairInvoiceAmountRange
+      // above (repairResult.stillViolating already gated out anything that
+      // wasn't) — so this step only needs to keep that invariant true,
+      // never move a compliant invoice back out of range. It now bounds
+      // each candidate rate nudge so the invoice's own resulting total
+      // always stays within [minimumInvoiceAmount, maximumInvoiceAmount],
+      // skipping to the next line/invoice whenever a nudge big enough to
+      // help would breach that invoice's range — a batch this size has
+      // hundreds of other lines with real room to close a few-thousand-
+      // rupee gap without needing to touch any single invoice past its
+      // limit. Major Customer invoices are skipped entirely, same as
+      // repairInvoiceAmountRange (their amount is a separately-configured,
+      // untouched figure, not the batch-wide min/max).
       {
         const targetTotal = Math.round(parseFloat(totalAmount));
         let currentTotal = Math.round(
@@ -670,9 +688,16 @@ export async function POST(request: NextRequest) {
         );
         let remaining = targetTotal - currentTotal;
 
+        const minAmt = parseFloat(minimumInvoiceAmount) || 0;
+        const maxAmt = parseFloat(maximumInvoiceAmount) || 0;
+        const isMajorInv = (inv: any): boolean =>
+          majorCustomerIdSet.has(inv.customer_id) ||
+          majorCustomerIdSet.has(inv.products?.[0]?.customer_id);
+
         const orderedInvoices = [...repairedInvoices].reverse();
         for (const inv of orderedInvoices as any[]) {
           if (remaining === 0) break;
+          if (isMajorInv(inv)) continue;
           const lines = [...(inv.products || [])].reverse();
           for (const p of lines as any[]) {
             if (remaining === 0) break;
@@ -682,12 +707,23 @@ export async function POST(request: NextRequest) {
             const curRate = Math.round(Number(p.rate || 1));
             const minRate = range ? range.min : 1;
             const maxRate = range ? range.max : Infinity;
+            const invTotal = Number(inv.total_amount || 0);
 
-            const desiredDeltaRate = remaining / qty;
-            const deltaRate =
-              remaining > 0
-                ? Math.ceil(desiredDeltaRate)
-                : Math.floor(desiredDeltaRate);
+            let deltaRate: number;
+            if (remaining > 0) {
+              deltaRate = Math.ceil(remaining / qty);
+              if (maxAmt) {
+                const capDelta = Math.floor((maxAmt - invTotal) / qty);
+                deltaRate = Math.min(deltaRate, capDelta);
+              }
+            } else {
+              deltaRate = Math.floor(remaining / qty);
+              if (minAmt) {
+                const floorDelta = -Math.floor((invTotal - minAmt) / qty);
+                deltaRate = Math.max(deltaRate, floorDelta);
+              }
+            }
+
             const newRate = Math.max(
               minRate,
               Math.min(maxRate, curRate + deltaRate),
@@ -696,11 +732,15 @@ export async function POST(request: NextRequest) {
 
             const oldAmt = Math.round(qty * curRate);
             const newAmt = Math.round(qty * newRate);
+            const newInvTotal = invTotal - oldAmt + newAmt;
+            // Belt-and-braces against rounding at the boundary — never
+            // actually cross the invoice's own configured range.
+            if (maxAmt && newInvTotal > maxAmt + 0.01) continue;
+            if (minAmt && newInvTotal < minAmt - 0.01) continue;
+
             p.rate = newRate;
             p.amount = newAmt;
-            inv.total_amount = Math.round(
-              (inv.total_amount || 0) - oldAmt + newAmt,
-            );
+            inv.total_amount = Math.round(newInvTotal);
             remaining -= newAmt - oldAmt;
           }
         }

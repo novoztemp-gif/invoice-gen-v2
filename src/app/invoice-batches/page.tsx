@@ -16,6 +16,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllQueryRows } from "@/lib/supabase/fetchAll";
 
 type InvoiceBatch = {
   id: string;
@@ -59,23 +60,27 @@ export default function InvoiceBatches() {
       setLoading(true);
       try {
         const supabase = createClient();
-        const { data, error } = await supabase
-          .from("invoice_batch")
-          .select(
-            `
-            *,
-            issuing_companies:issuing_company_id(company_name),
-            receiving_companies:receiving_company_id(company_name)
-          `,
-          )
-          .or("batch_type.eq.SALES,batch_type.is.null")
-          .order("created_at", { ascending: false });
-
-        if (error) {
-          console.error("Error fetching batches:", error);
-          alert("Failed to load invoice batches.");
-          return;
-        }
+        // Paginated — the app has accumulated enough batches over time to
+        // clear PostgREST's default 1000-row cap, which silently dropped
+        // whichever batches fell past the cutoff (older ones, since this is
+        // ordered created_at DESC) from this list entirely — including from
+        // the Delete button here, letting old Sales batches (and their
+        // still-orphanable invoice rows) go on existing forever with no way
+        // to remove them through the UI.
+        const data = await fetchAllQueryRows((from, to) =>
+          supabase
+            .from("invoice_batch")
+            .select(
+              `
+              *,
+              issuing_companies:issuing_company_id(company_name),
+              receiving_companies:receiving_company_id(company_name)
+            `,
+            )
+            .or("batch_type.eq.SALES,batch_type.is.null")
+            .order("created_at", { ascending: false })
+            .range(from, to),
+        );
 
         setBatches(data || []);
       } catch (error) {
