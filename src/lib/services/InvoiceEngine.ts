@@ -4637,6 +4637,7 @@ export class InvoiceEngine {
       }
     }
 
+
     // ── Final Minimum-Amount Safety Net ──
     // The per-day merge/grow logic above only ever looks at OTHER invoices
     // from the SAME day — a day with very little leftover stock can end up
@@ -4644,10 +4645,30 @@ export class InvoiceEngine {
     // partner and no rate/quantity headroom left to grow into thresholdMin
     // (both are hard product-rule ceilings), silently persisting a
     // below-minimum invoice. Give every remaining below-minimum invoice one
-    // more chance against the WHOLE batch (any day, same category, no
-    // overlapping product, ₹ headroom under thresholdMax) before accepting
-    // defeat — date is not treated as a hard constraint elsewhere in this
-    // pipeline either.
+    // more chance against the WHOLE batch (same category, no overlapping
+    // product, ₹ headroom under thresholdMax) before accepting defeat.
+    //
+    // Hotfix — real, confirmed stock-ledger corruption bug (found via
+    // stress testing, not something this session introduced — this merge
+    // predates it). This used to also relax the DATE constraint ("any
+    // day"), on the reasoning that date isn't a hard constraint elsewhere
+    // in the pipeline. But merging pushes belowInv's product LINES onto
+    // targetInv wholesale — and every downstream consumer (the Daily
+    // Stock Ledger, validateStockConservation, this same function's own
+    // per-date availableStockMap) attributes a line's quantity to
+    // whichever invoice_date it ends up living under. A line that was
+    // correctly sized against ITS OWN date's real stock silently becomes
+    // "sold on targetInv's date" once merged across dates — a date that
+    // may have had little or no real stock left for that product,
+    // confirmed via a real repro: 2026-03-01 showing 543.25kg "sold" of a
+    // product against only 500kg ever purchased that day, entirely from
+    // cross-date merges (no growth involved). The batch-wide total was
+    // always fine; only the PER-DATE attribution the ledger depends on
+    // broke. Restricted to same-date merges — money-neutral recombination
+    // is only ledger-safe when it doesn't change which day a line's
+    // quantity is attributed to. The donor-funded growth pass below (and
+    // its own date-scoped, stock-aware levers) is what now covers
+    // whatever a same-day merge can't reach.
     if (thresholdMin > 0) {
       let mergedGlobally = true;
       while (mergedGlobally) {
@@ -4665,6 +4686,7 @@ export class InvoiceEngine {
         const targetIdx = invoices.findIndex(
           (inv: any, idx: number) =>
             idx !== belowIdx &&
+            inv.invoice_date === belowInv.invoice_date &&
             inv.products?.[0]?.category === belowCategory &&
             Math.round(inv.total_amount || 0) +
               Math.round(belowInv.total_amount || 0) <=
@@ -4971,6 +4993,7 @@ export class InvoiceEngine {
       }
     }
 
+
     // ── Exact Batch Total Balancing Routine (Issue 6) ──
     // Guarantees sum(invoice.total_amount) === batch.total_amount to exact ₹0 (whole integer rupees)
     const targetTotal = Math.round(batch.total_amount);
@@ -5253,6 +5276,7 @@ export class InvoiceEngine {
         numberingCounter++,
       );
     }
+
 
     return invoices;
   }
