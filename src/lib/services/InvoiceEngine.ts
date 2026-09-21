@@ -4345,47 +4345,31 @@ export class InvoiceEngine {
         }
       }
 
-      // Last resort for invoices no merge could fix: grow their existing
-      // lines toward thresholdMin via solveLineForTarget (same mechanism
-      // already used for the Major Customer balance guard above) before
-      // accepting a below-minimum invoice.
-      for (const inv of unfixable) {
-        if (inv.total_amount >= thresholdMin) continue;
-        const shortfall = thresholdMin - inv.total_amount;
-        let remaining = shortfall;
-        for (const item of inv.products) {
-          if (remaining <= 0) break;
-          const targetLineAmt = Math.round((item.amount || 0) + remaining);
-          const previousAmount = item.amount || 0;
-          // Hotfix — no preferFloor/preferCeiling meant the "closest
-          // achievable" search could land BELOW targetLineAmt just as
-          // easily as at or above it, even though the whole point of this
-          // pass is growing UP toward thresholdMin. Leave this line
-          // untouched and let the loop try the next one when even this
-          // product's own bounds can't reach at least targetLineAmt.
-          const solved = this.solveLineForTargetWithinStockFloored(
-            item.product_id,
-            inv.invoice_date,
-            item.quantity,
-            targetLineAmt,
-            productConfigById,
-            availableStockMap,
-          );
-          if (!solved) continue;
-          item.quantity = solved.quantity;
-          item.rate = solved.rate;
-          item.amount = computeLineAmount(item.quantity, item.rate);
-          remaining =
-            Math.round((remaining - (item.amount - previousAmount)) * 100) /
-            100;
-        }
-        inv.total_amount = Math.round(
-          inv.products.reduce(
-            (sum: number, p: any) => sum + Math.round(p.amount || 0),
-            0,
-          ),
-        );
-      }
+      // Hotfix — real, confirmed structural overshoot bug (a ₹15.5L / 20%
+      // drift the Exact Batch Total Balancing Routine below couldn't close,
+      // confirmed live). This used to grow an unfixable below-minimum
+      // invoice's lines toward thresholdMin via solveLineForTarget — but
+      // that GROWTH is one-sided: it invents real, uncounted money on top
+      // of whatever the day's budget cap (regularTargetAmount/dayBudget,
+      // above) already decided, with nothing anywhere shrinking a
+      // correspondingly over-funded invoice to compensate. A day whose
+      // budget share splits into several naturally-small invoices can
+      // easily produce many such "unfixable" invoices, and each one's
+      // growth silently pushes the running total further past the
+      // configured batch total — compounding into a drift measured in
+      // lakhs, far beyond what the end-of-generation Balancing Routine's
+      // bounded last-invoice nudge can ever recover (that routine is sized
+      // for closing a few thousand rupees of rounding residue, not
+      // systematic double-digit-lakh inflation from this).
+      //
+      // Fix: don't grow here at all. Leave these invoices below threshold
+      // and let them fall through to the "Final Minimum-Amount Safety Net"
+      // below, which merges (never invents money) across the WHOLE batch —
+      // every day, not just this one — so it has a far better chance of
+      // finding a real same-category donor invoice anyway. If truly
+      // nothing in the entire batch can absorb it, that safety net still
+      // throws a clear, honest, small rejection instead of a large,
+      // confusing one after silently drifting the total.
 
       for (const inv of dayInvoices) {
         let assignedCustomerId = null;
