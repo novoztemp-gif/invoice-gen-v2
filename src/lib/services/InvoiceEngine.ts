@@ -6702,16 +6702,6 @@ export class InvoiceEngine {
             if (lines.some((l) => l.product_id === underId)) continue;
 
             const line = lines[lineIdx];
-            // Hotfix — findExactLineForAmount (whole-integer rate, exact
-            // rupee match only) required the replacement product to
-            // reproduce the over-product's line amount EXACTLY, which is
-            // often unsatisfiable and left large real deviations
-            // unrepaired even after every pass. solveLineForTarget is the
-            // same best-fit-with-widening-search solver STEP 2 already
-            // uses for its own drift correction (:7072, :7106) — it always
-            // returns a usable result, landing exactly on line.amount when
-            // possible and as close as the product's own configured range
-            // allows otherwise.
             const underMinQ = parseFloat(underConfig.perDayQtyMin as any) || 10;
             // Hotfix — real, confirmed overselling bug: this swap
             // introduces `underId` as a BRAND NEW line on this invoice —
@@ -6723,9 +6713,34 @@ export class InvoiceEngine {
             // failure). currentQuantity is 0 here (not underMinQ) so the
             // stock-aware wrapper treats the ENTIRE resulting quantity as
             // new growth to check, not just whatever's above underMinQ —
-            // Purchase (no availableStockMap) is completely unaffected,
-            // falling straight through to the exact same unconstrained
-            // behavior as before.
+            // Purchase (no availableStockMap) is completely unaffected.
+            //
+            // Hotfix — real, confirmed non-convergence at large scale
+            // (target 37, actual 63 — every single repair pass unable to
+            // place even one swap for this pair, no matter how many passes
+            // ran). Root cause: the previous solve used preferFloor
+            // (capped AT OR UNDER line.amount, returning null otherwise),
+            // sized for a design where only ONE fixed neighboring line
+            // ever absorbed the residual — so keeping the residual small
+            // mattered more than landing close. Two products in the same
+            // broad category (e.g. Meat spanning a ₹50/kg cut and a
+            // ₹500/kg cut) can sit at very different price points; the
+            // moment the under-target product's own cheapest achievable
+            // line already exceeded the over-target line's amount, EVERY
+            // swap attempt for that pair failed here, permanently — that
+            // is exactly the shape of the real failure. Purchase has no
+            // stock ceiling to respect, so it can safely use the ordinary
+            // closest-match solve (lands exactly on line.amount when
+            // reachable, otherwise as close as the product's own range
+            // allows in EITHER direction, not just at-or-under) — the
+            // absorption step below now searches every other line on the
+            // invoice for one with room to take up the resulting drift
+            // (see its own comment), so a larger residual is no longer
+            // the swap-killer a single fixed neighbor used to make it.
+            // Sales keeps its existing stock-capped solve completely
+            // untouched below — real remaining stock must never be
+            // exceeded, so that guarantee stays exactly as conservative
+            // as before.
             const solved = availableStockMap
               ? this.solveLineForTargetWithinStockCapped(
                   underId,
@@ -6735,39 +6750,27 @@ export class InvoiceEngine {
                   productConfigById,
                   availableStockMap,
                 )
-              : this.solveLineForTargetCapped(
+              : this.solveLineForTarget(
                   underId,
                   underMinQ,
                   line.amount,
                   productConfigById,
                 );
-            // The replacement product's own minimum can't get down to
-            // this line's amount at all (or, for Sales, real remaining
-            // stock can't support it) — swapping it in would inflate this
-            // invoice's total with no way to absorb the difference by
-            // construction, or would oversell. Skip this specific swap
-            // rather than risk either.
+            // Sales' stock-capped solve can still legitimately return null
+            // (real remaining stock genuinely can't support this product
+            // at all here) — skip this specific swap rather than oversell.
+            // Purchase's plain closest-match solve above never returns
+            // null.
             if (!solved) continue;
             const newAmount = computeLineAmount(solved.quantity, solved.rate);
 
-            // Unlike the old exact-match-only solver, this can land a few
-            // rupees off the original line's amount — that residual must
-            // be absorbed by a DIFFERENT line on the same invoice (mirrors
-            // STEP 2's own last-line drift correction, :7101-7116) so the
-            // invoice's, and therefore the batch's, total never moves. An
-            // invoice with only this one line has nowhere to absorb a
+            // The swap's residual (newAmount vs. the vacated line.amount)
+            // must be absorbed by a DIFFERENT line on the same invoice so
+            // the invoice's, and therefore the batch's, total never moves.
+            // An invoice with only this one line has nowhere to absorb a
             // residual into — skip this specific swap rather than let its
             // total drift.
             const originalTotal = Math.round(inv.total_amount || 0);
-            const otherLineIdx =
-              lines.length > 1
-                ? lines.length - 1 === lineIdx
-                  ? lines.length - 2
-                  : lines.length - 1
-                : -1;
-            if (otherLineIdx === -1 && newAmount !== Math.round(line.amount)) {
-              continue;
-            }
 
             lines[lineIdx] = {
               ...line,
@@ -6781,56 +6784,91 @@ export class InvoiceEngine {
               amount: newAmount,
             };
 
-            if (otherLineIdx !== -1) {
-              const currentSum = Math.round(
-                lines.reduce(
-                  (s: number, l: any) => s + Math.round(l.amount || 0),
-                  0,
-                ),
-              );
-              const drift = originalTotal - currentSum;
-              if (drift !== 0) {
+            const currentSum = Math.round(
+              lines.reduce(
+                (s: number, l: any) => s + Math.round(l.amount || 0),
+                0,
+              ),
+            );
+            const drift = originalTotal - currentSum;
+
+            let absorbed = drift === 0;
+            if (!absorbed) {
+              // Hotfix — real, confirmed non-convergence: absorbing into
+              // just ONE arbitrarily-picked neighboring line (always the
+              // last, or second-to-last, line on the invoice) meant a
+              // swap failed and reverted whenever THAT SPECIFIC other
+              // line's own configured range couldn't take up the drift —
+              // even when a completely different line on the very same
+              // invoice had plenty of room. Trying every other line,
+              // largest amount first (more absolute rupee room to flex
+              // within its own range, so more likely to succeed first
+              // try), fixes swaps that used to fail purely because of
+              // which line happened to be picked, not because no valid
+              // absorber actually existed on the invoice.
+              const candidateIdxs = lines
+                .map((_: any, idx: number) => idx)
+                .filter((idx: number) => idx !== lineIdx)
+                .sort(
+                  (a: number, b: number) =>
+                    Math.round(lines[b].amount || 0) -
+                    Math.round(lines[a].amount || 0),
+                );
+
+              for (const otherLineIdx of candidateIdxs) {
                 const absorbLine = lines[otherLineIdx];
-                const absorbTarget = Math.round(absorbLine.amount || 0) + drift;
+                const absorbTarget =
+                  Math.round(absorbLine.amount || 0) + drift;
+                if (absorbTarget <= 0) continue;
                 // Same real-stock guarantee as the swap-in above — this
                 // line already exists on the invoice, so its CURRENT
                 // quantity is what's already reserved; only growth past
                 // that gets checked against real remaining stock.
-                const absorbSolved =
-                  absorbTarget > 0
-                    ? availableStockMap
-                      ? this.solveLineForTargetWithinStockCapped(
-                          absorbLine.product_id,
-                          inv.invoice_date,
-                          absorbLine.quantity,
-                          absorbTarget,
-                          productConfigById,
-                          availableStockMap,
-                        )
-                      : this.solveLineForTargetCapped(
-                          absorbLine.product_id,
-                          absorbLine.quantity,
-                          absorbTarget,
-                          productConfigById,
-                        )
-                    : null;
-                if (!absorbSolved) {
-                  // Can't absorb the swap's residual without overshooting
-                  // this other line's own floor — revert the swap
-                  // entirely rather than let the invoice's total drift.
-                  lines[lineIdx] = line;
-                  continue;
-                }
+                const absorbSolved = availableStockMap
+                  ? this.solveLineForTargetWithinStockCapped(
+                      absorbLine.product_id,
+                      inv.invoice_date,
+                      absorbLine.quantity,
+                      absorbTarget,
+                      productConfigById,
+                      availableStockMap,
+                    )
+                  : this.solveLineForTargetCapped(
+                      absorbLine.product_id,
+                      absorbLine.quantity,
+                      absorbTarget,
+                      productConfigById,
+                    );
+                if (!absorbSolved) continue;
+                const absorbAmount = computeLineAmount(
+                  absorbSolved.quantity,
+                  absorbSolved.rate,
+                );
+                // solveLineForTargetCapped only guarantees landing AT OR
+                // UNDER absorbTarget, not exactly on it — a partial
+                // absorb (this line hit its own floor before fully
+                // closing the gap) would still leave the invoice's total
+                // adrift by the shortfall. Only an exact match actually
+                // closes it; try the next candidate line otherwise.
+                if (absorbAmount !== absorbTarget) continue;
+
                 lines[otherLineIdx] = {
                   ...absorbLine,
                   quantity: absorbSolved.quantity,
                   rate: absorbSolved.rate,
-                  amount: computeLineAmount(
-                    absorbSolved.quantity,
-                    absorbSolved.rate,
-                  ),
+                  amount: absorbAmount,
                 };
+                absorbed = true;
+                break;
               }
+            }
+
+            if (!absorbed) {
+              // No line on this invoice could take up the residual —
+              // revert the swap entirely rather than let the invoice's
+              // total drift.
+              lines[lineIdx] = line;
+              continue;
             }
 
             overRemaining--;
