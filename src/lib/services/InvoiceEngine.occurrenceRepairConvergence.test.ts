@@ -312,3 +312,181 @@ describe("InvoiceEngine.repairOccurrenceDeviations — converges even when the u
     }
   });
 });
+
+/**
+ * Root cause of a second, real confirmed live failure (a 348-invoice batch,
+ * violations on BOTH sides — an over-target product AND a separate
+ * under-target product simultaneously) that survived the price-floor fix
+ * above. The same-invoice swap requires ONE invoice to simultaneously
+ * carry the over-target product AND lack the under-target one — when every
+ * invoice carrying the over-target product happens to already carry the
+ * under-target one too (a dense/correlated category), that pairing is
+ * impossible no matter how compatible their prices are or how many passes
+ * run.
+ *
+ * This fixture makes that concrete: every "Group A" invoice carries BOTH
+ * OVER and UNDER (so the same-invoice swap can never find a non-duplicate
+ * candidate for this pair), while "Group B" invoices carry neither — and
+ * a third product, BUDDY, is deliberately already exactly on its own
+ * target, so it never becomes an alternate under-target destination that
+ * would let OVER route around UNDER entirely. The only way to close this
+ * gap is the cross-invoice shed+fill fallback: shed OVER from a Group A
+ * invoice (redistributing into its remaining UNDER line) and separately
+ * add UNDER to a Group B invoice (funded by shrinking its BUDDY line).
+ */
+describe("InvoiceEngine.repairOccurrenceDeviations — converges via cross-invoice shed+fill when every over-target invoice already carries the under-target product", () => {
+  function product(
+    id: string,
+    occurrencePercentage: number,
+    ranges: { rateMin: string; rateMax: string; qtyMin: string; qtyMax: string },
+  ): any {
+    return {
+      product_id: id,
+      product_name: id,
+      hsn_code: "0207",
+      unit_of_measure: "kg",
+      perDayRateMin: ranges.rateMin,
+      perDayRateMax: ranges.rateMax,
+      perDayQtyMin: ranges.qtyMin,
+      perDayQtyMax: ranges.qtyMax,
+      occurrencePercentage,
+      category: "Meat",
+    };
+  }
+
+  // Fixed at exactly ₹10 — same as OVER in the fixture above.
+  const OVER = product("OVER", 22.5, {
+    rateMin: "10",
+    rateMax: "10",
+    qtyMin: "1",
+    qtyMax: "1",
+  });
+  // Wide, flexible range — needs to both absorb growth (as the donor's
+  // remaining line) and land exactly on ₹10 as a brand-new recipient line.
+  const UNDER = product("UNDER", 52.5, {
+    rateMin: "1",
+    rateMax: "1000",
+    qtyMin: "1",
+    qtyMax: "200",
+  });
+  // Wide, flexible range — needs to shrink by exactly ₹10 to fund UNDER's
+  // new line on a Group B invoice. Deliberately given a target matching
+  // its actual count exactly, so it carries zero deviation and never
+  // becomes an alternate (easier) swap destination for OVER.
+  const BUDDY = product("BUDDY", 25, {
+    rateMin: "1",
+    rateMax: "1000",
+    qtyMin: "1",
+    qtyMax: "200",
+  });
+  const products = [OVER, UNDER, BUDDY];
+  const productConfigById = new Map(products.map((p) => [p.product_id, p]));
+
+  const batch = {
+    id: "batch-3",
+    products,
+    category_allocation: null,
+    occurrence_semantics: "GLOBAL",
+  } as any;
+
+  const GROUP_A = 60;
+  const GROUP_B = 40;
+
+  // 60 invoices x 2 lines (OVER, UNDER) + 40 invoices x 1 line (BUDDY) =
+  // 160 slots -> targets (22.5%/52.5%/25%): OVER=36, UNDER=84, BUDDY=40.
+  // Actual: OVER=60 (+24 over target), UNDER=60 (-24 under target),
+  // BUDDY=40 (exact — never enters underIds, so OVER has no alternate
+  // destination to route around UNDER through).
+  function buildInvoices(): any[] {
+    const groupA = Array.from({ length: GROUP_A }, (_, i) => ({
+      invoice_number: `A-${i + 1}`,
+      invoice_date: "2026-01-01",
+      category_key: "Meat",
+      total_amount: 510,
+      products: [
+        { product_id: "OVER", quantity: 1, rate: 10, amount: 10 },
+        { product_id: "UNDER", quantity: 10, rate: 50, amount: 500 },
+      ],
+    }));
+    const groupB = Array.from({ length: GROUP_B }, (_, i) => ({
+      invoice_number: `B-${i + 1}`,
+      invoice_date: "2026-01-01",
+      category_key: "Meat",
+      total_amount: 500,
+      products: [
+        { product_id: "BUDDY", quantity: 10, rate: 50, amount: 500 },
+      ],
+    }));
+    return [...groupA, ...groupB];
+  }
+
+  function countActual(invoices: any[]): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const inv of invoices) {
+      for (const line of inv.products) {
+        counts.set(line.product_id, (counts.get(line.product_id) || 0) + 1);
+      }
+    }
+    return counts;
+  }
+
+  it("closes OVER from 60->36 and UNDER from 60->84, matching target exactly, with BUDDY untouched", () => {
+    const invoices = buildInvoices();
+    const Engine = InvoiceEngine as any;
+
+    Engine.repairOccurrenceDeviations(
+      invoices,
+      batch,
+      productConfigById,
+      new Map([["dummy", 1]]),
+      undefined,
+    );
+
+    const actual = countActual(invoices);
+    expect(actual.get("OVER")).toBe(36);
+    expect(actual.get("UNDER")).toBe(84);
+    expect(actual.get("BUDDY")).toBe(40);
+  });
+
+  it("never changes any invoice's total_amount, and every invoice's lines still sum to it exactly", () => {
+    const invoices = buildInvoices();
+    const totalsBefore = invoices.map((inv) => inv.total_amount);
+    const Engine = InvoiceEngine as any;
+
+    Engine.repairOccurrenceDeviations(
+      invoices,
+      batch,
+      productConfigById,
+      new Map([["dummy", 1]]),
+      undefined,
+    );
+
+    expect(invoices.map((inv) => inv.total_amount)).toEqual(totalsBefore);
+    for (const inv of invoices) {
+      const lineSum = inv.products.reduce(
+        (s: number, p: any) => s + p.amount,
+        0,
+      );
+      expect(lineSum).toBe(inv.total_amount);
+    }
+  });
+
+  it("never produces a duplicate product line on the same invoice, and never leaves an invoice with zero lines", () => {
+    const invoices = buildInvoices();
+    const Engine = InvoiceEngine as any;
+
+    Engine.repairOccurrenceDeviations(
+      invoices,
+      batch,
+      productConfigById,
+      new Map([["dummy", 1]]),
+      undefined,
+    );
+
+    for (const inv of invoices) {
+      const ids = inv.products.map((p: any) => p.product_id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(inv.products.length).toBeGreaterThan(0);
+    }
+  });
+});

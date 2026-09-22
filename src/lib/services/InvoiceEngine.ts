@@ -6528,6 +6528,75 @@ export class InvoiceEngine {
    * without-config/CATEGORY-without-config paths are byte-identical to
    * before this fix).
    */
+  /**
+   * Tries to change the total of `lines` (excluding `lines[excludeIdx]`,
+   * usually because that index was just replaced/removed/added) by exactly
+   * `drift` rupees, by adjusting ONE other line's quantity/rate within its
+   * own configured range — tried largest-amount-first (more absolute
+   * rupee room to flex), since a bigger line is more likely to have room.
+   * Mutates `lines` in place on success; leaves it untouched on failure.
+   * Shared by repairOccurrenceDeviations' same-invoice swap and its
+   * cross-invoice shed/fill fallback — both need the exact same
+   * "adjust one sibling line without moving the invoice's total" move.
+   */
+  private static absorbDriftAcrossLines(
+    lines: any[],
+    excludeIdx: number,
+    drift: number,
+    dateStr: string,
+    productConfigById: Map<string, ProductConfig>,
+    availableStockMap?: Map<string, any> | null,
+  ): boolean {
+    if (drift === 0) return true;
+    const candidateIdxs = lines
+      .map((_: any, idx: number) => idx)
+      .filter((idx: number) => idx !== excludeIdx)
+      .sort(
+        (a: number, b: number) =>
+          Math.round(lines[b].amount || 0) - Math.round(lines[a].amount || 0),
+      );
+
+    for (const idx of candidateIdxs) {
+      const absorbLine = lines[idx];
+      const absorbTarget = Math.round(absorbLine.amount || 0) + drift;
+      if (absorbTarget <= 0) continue;
+      const absorbSolved = availableStockMap
+        ? this.solveLineForTargetWithinStockCapped(
+            absorbLine.product_id,
+            dateStr,
+            absorbLine.quantity,
+            absorbTarget,
+            productConfigById,
+            availableStockMap,
+          )
+        : this.solveLineForTargetCapped(
+            absorbLine.product_id,
+            absorbLine.quantity,
+            absorbTarget,
+            productConfigById,
+          );
+      if (!absorbSolved) continue;
+      const absorbAmount = computeLineAmount(
+        absorbSolved.quantity,
+        absorbSolved.rate,
+      );
+      // solveLineForTargetCapped only guarantees landing AT OR UNDER
+      // absorbTarget, not exactly on it — a partial absorb would still
+      // leave the invoice's total adrift by the shortfall. Only an exact
+      // match actually closes it; try the next candidate line otherwise.
+      if (absorbAmount !== absorbTarget) continue;
+
+      lines[idx] = {
+        ...absorbLine,
+        quantity: absorbSolved.quantity,
+        rate: absorbSolved.rate,
+        amount: absorbAmount,
+      };
+      return true;
+    }
+    return false;
+  }
+
   private static repairOccurrenceDeviations(
     invoices: any[],
     batch: InvoiceBatch,
@@ -6792,76 +6861,24 @@ export class InvoiceEngine {
             );
             const drift = originalTotal - currentSum;
 
-            let absorbed = drift === 0;
-            if (!absorbed) {
-              // Hotfix — real, confirmed non-convergence: absorbing into
-              // just ONE arbitrarily-picked neighboring line (always the
-              // last, or second-to-last, line on the invoice) meant a
-              // swap failed and reverted whenever THAT SPECIFIC other
-              // line's own configured range couldn't take up the drift —
-              // even when a completely different line on the very same
-              // invoice had plenty of room. Trying every other line,
-              // largest amount first (more absolute rupee room to flex
-              // within its own range, so more likely to succeed first
-              // try), fixes swaps that used to fail purely because of
-              // which line happened to be picked, not because no valid
-              // absorber actually existed on the invoice.
-              const candidateIdxs = lines
-                .map((_: any, idx: number) => idx)
-                .filter((idx: number) => idx !== lineIdx)
-                .sort(
-                  (a: number, b: number) =>
-                    Math.round(lines[b].amount || 0) -
-                    Math.round(lines[a].amount || 0),
-                );
-
-              for (const otherLineIdx of candidateIdxs) {
-                const absorbLine = lines[otherLineIdx];
-                const absorbTarget =
-                  Math.round(absorbLine.amount || 0) + drift;
-                if (absorbTarget <= 0) continue;
-                // Same real-stock guarantee as the swap-in above — this
-                // line already exists on the invoice, so its CURRENT
-                // quantity is what's already reserved; only growth past
-                // that gets checked against real remaining stock.
-                const absorbSolved = availableStockMap
-                  ? this.solveLineForTargetWithinStockCapped(
-                      absorbLine.product_id,
-                      inv.invoice_date,
-                      absorbLine.quantity,
-                      absorbTarget,
-                      productConfigById,
-                      availableStockMap,
-                    )
-                  : this.solveLineForTargetCapped(
-                      absorbLine.product_id,
-                      absorbLine.quantity,
-                      absorbTarget,
-                      productConfigById,
-                    );
-                if (!absorbSolved) continue;
-                const absorbAmount = computeLineAmount(
-                  absorbSolved.quantity,
-                  absorbSolved.rate,
-                );
-                // solveLineForTargetCapped only guarantees landing AT OR
-                // UNDER absorbTarget, not exactly on it — a partial
-                // absorb (this line hit its own floor before fully
-                // closing the gap) would still leave the invoice's total
-                // adrift by the shortfall. Only an exact match actually
-                // closes it; try the next candidate line otherwise.
-                if (absorbAmount !== absorbTarget) continue;
-
-                lines[otherLineIdx] = {
-                  ...absorbLine,
-                  quantity: absorbSolved.quantity,
-                  rate: absorbSolved.rate,
-                  amount: absorbAmount,
-                };
-                absorbed = true;
-                break;
-              }
-            }
+            // Hotfix — real, confirmed non-convergence: absorbing into
+            // just ONE arbitrarily-picked neighboring line (always the
+            // last, or second-to-last, line on the invoice) meant a swap
+            // failed and reverted whenever THAT SPECIFIC other line's own
+            // configured range couldn't take up the drift — even when a
+            // completely different line on the very same invoice had
+            // plenty of room. absorbDriftAcrossLines tries every other
+            // line, largest amount first, fixing swaps that used to fail
+            // purely because of which line happened to be picked, not
+            // because no valid absorber actually existed on the invoice.
+            const absorbed = this.absorbDriftAcrossLines(
+              lines,
+              lineIdx,
+              drift,
+              inv.invoice_date,
+              productConfigById,
+              availableStockMap,
+            );
 
             if (!absorbed) {
               // No line on this invoice could take up the residual —
@@ -6870,6 +6887,196 @@ export class InvoiceEngine {
               lines[lineIdx] = line;
               continue;
             }
+
+            overRemaining--;
+            underRemaining--;
+            deviationByProductId.set(overId, overRemaining);
+            deviationByProductId.set(underId, -underRemaining);
+            swapsThisPass++;
+          }
+        }
+      }
+
+      // ── Fallback: cross-invoice shed + fill ──────────────────────────
+      // Hotfix — real, confirmed non-convergence on a real 348-invoice
+      // batch (violations on both sides — over AND under target — even
+      // after the same-invoice swap fix above). Root cause: the swap
+      // above requires ONE invoice to simultaneously carry overId AND
+      // lack underId — in a category dense enough that most invoices
+      // already carry most of its products, that pairing can be
+      // genuinely impossible for many (over, under) combinations even
+      // though both products individually have plenty of separate
+      // candidate invoices elsewhere. Decoupling into two independent
+      // moves removes that same-invoice requirement entirely: shed
+      // overId's line from ANY invoice that carries it (redistributing
+      // its amount across that invoice's other lines via
+      // absorbDriftAcrossLines), and separately add underId as a
+      // brand-new line to ANY DIFFERENT category-matching invoice that
+      // doesn't already carry it (funded by shrinking one of ITS existing
+      // lines by the exact same amount, same helper) — reusing the exact
+      // same amount-preservation math as the swap above on both sides,
+      // just applied across two invoices instead of requiring both
+      // conditions on one.
+      const RECIPIENT_SEARCH_CAP = 300;
+      const invoicesByCategory = new Map<string, any[]>();
+      for (const inv of invoices) {
+        const cat = inv.category_key || "Meat";
+        const list = invoicesByCategory.get(cat);
+        if (list) {
+          list.push(inv);
+        } else {
+          invoicesByCategory.set(cat, [inv]);
+        }
+      }
+
+      for (const overId of overIds) {
+        let overRemaining = deviationByProductId.get(overId) || 0;
+        if (overRemaining <= 0) continue;
+        const overConfig = productConfigById.get(overId);
+        if (!overConfig) continue;
+        const overCategory = resolveProductCategory(overConfig);
+
+        // Only invoices with more than one line can shed overId — nothing
+        // left to redistribute its amount into otherwise.
+        const donorCandidates = (invoicesByProduct.get(overId) || []).filter(
+          (inv) => (inv.products || []).length > 1,
+        );
+        if (donorCandidates.length === 0) continue;
+
+        for (const underId of underIds) {
+          if (overRemaining <= 0) break;
+          let underRemaining = -(deviationByProductId.get(underId) || 0);
+          if (underRemaining <= 0) continue;
+          const underConfig = productConfigById.get(underId);
+          if (!underConfig) continue;
+          if (resolveProductCategory(underConfig) !== overCategory) continue;
+
+          const underMinQ = parseFloat(underConfig.perDayQtyMin as any) || 10;
+          // Pre-filtered ONCE per underId (not per donor): every invoice
+          // in this category that doesn't already carry underId. A plain
+          // per-donor scan of the full category pool, capped, is prone to
+          // finding nothing at all whenever donor-side invoices happen to
+          // be clustered together in array order ahead of real recipients
+          // (confirmed on a real-shaped 3479-invoice fixture: the first
+          // 300 candidates were ALL donor-group invoices, already
+          // carrying underId by construction, so the capped scan never
+          // reached an actual eligible one). Filtering first means every
+          // remaining entry is already known-eligible on the "doesn't
+          // already carry underId" front — the cap below only has to
+          // account for candidates that fail the amount solve.
+          const eligibleRecipients = (
+            invoicesByCategory.get(overCategory) || []
+          ).filter(
+            (inv) => !(inv.products || []).some((l: any) => l.product_id === underId),
+          );
+          // An invoice successfully filled earlier in THIS underId loop
+          // must never be reused — eligibleRecipients was computed once
+          // up front and doesn't see that mutation, so track it here
+          // instead of re-deriving the filter on every donor attempt.
+          const consumedRecipients = new Set<any>();
+
+          for (const donorInv of donorCandidates) {
+            if (overRemaining <= 0 || underRemaining <= 0) break;
+            const donorLines: any[] = donorInv.products || [];
+            const donorLineIdx = donorLines.findIndex(
+              (l) => l.product_id === overId,
+            );
+            if (donorLineIdx === -1) continue;
+            const shedAmount = Math.round(donorLines[donorLineIdx].amount || 0);
+            if (shedAmount <= 0) continue;
+
+            // Find a recipient invoice FIRST, without mutating anything —
+            // a failed search must leave both invoices completely
+            // untouched.
+            let recipientInv: any = null;
+            let recipientSolved: { quantity: number; rate: number } | null =
+              null;
+            let tries = 0;
+            for (const candidate of eligibleRecipients) {
+              if (candidate === donorInv || consumedRecipients.has(candidate))
+                continue;
+              if (++tries > RECIPIENT_SEARCH_CAP) break;
+              const solved = availableStockMap
+                ? this.solveLineForTargetWithinStockCapped(
+                    underId,
+                    candidate.invoice_date,
+                    0,
+                    shedAmount,
+                    productConfigById,
+                    availableStockMap,
+                  )
+                : this.solveLineForTarget(
+                    underId,
+                    underMinQ,
+                    shedAmount,
+                    productConfigById,
+                  );
+              if (!solved) continue;
+              recipientInv = candidate;
+              recipientSolved = solved;
+              break;
+            }
+            if (!recipientInv || !recipientSolved) continue;
+
+            // Shed overId from the donor — try to absorb the resulting
+            // gap across its OTHER lines first, before touching the
+            // recipient at all, so a failure here costs nothing.
+            const donorWithoutOver = donorLines.filter(
+              (_: any, idx: number) => idx !== donorLineIdx,
+            );
+            const donorAbsorbed = this.absorbDriftAcrossLines(
+              donorWithoutOver,
+              -1,
+              shedAmount,
+              donorInv.invoice_date,
+              productConfigById,
+              availableStockMap,
+            );
+            if (!donorAbsorbed) continue;
+
+            // Add underId to the recipient, funded by shrinking one of
+            // its existing lines by the exact same amount.
+            const newUnderAmount = computeLineAmount(
+              recipientSolved.quantity,
+              recipientSolved.rate,
+            );
+            const recipientWithUnder = [
+              ...(recipientInv.products || []),
+              {
+                product_id: underConfig.product_id,
+                product_name: underConfig.product_name,
+                hsn_code: underConfig.hsn_code,
+                unit_of_measure: underConfig.unit_of_measure,
+                category: overCategory,
+                quantity: recipientSolved.quantity,
+                rate: recipientSolved.rate,
+                amount: newUnderAmount,
+              },
+            ];
+            const recipientAbsorbed = this.absorbDriftAcrossLines(
+              recipientWithUnder,
+              recipientWithUnder.length - 1,
+              -newUnderAmount,
+              recipientInv.invoice_date,
+              productConfigById,
+              availableStockMap,
+            );
+            if (!recipientAbsorbed) {
+              // Donor mutations only exist in the local donorWithoutOver
+              // array so far — nothing written back yet, safe to just
+              // discard it. Mark this recipient consumed anyway — it
+              // failed on its OWN lines' flexibility, independent of
+              // which donor proposed it, so retrying it against a
+              // different donor this same pass would just fail the same
+              // way; it gets a fresh chance next pass regardless.
+              consumedRecipients.add(recipientInv);
+              continue;
+            }
+
+            // Both sides succeeded — commit.
+            donorInv.products = donorWithoutOver;
+            recipientInv.products = recipientWithUnder;
+            consumedRecipients.add(recipientInv);
 
             overRemaining--;
             underRemaining--;
