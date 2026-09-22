@@ -1484,7 +1484,7 @@ Public Sub HandleInvoiceListRowChange(listWs As Worksheet, Target As Range)
  If tailStartCol = 0 Then Exit Sub
 
  Dim touched As New Collection, area As Range, c As Range
- Dim dosRows As New Collection
+ Dim dosRows As New Collection, partnerRows As New Collection
  For Each area In Target.Areas
  For Each c In area.Cells
  If c.Row >= PS_DATA_START_ROW And c.Column >= PS_PRODUCT_BLOCK_START_COL And c.Column < tailStartCol Then
@@ -1503,6 +1503,15 @@ Public Sub HandleInvoiceListRowChange(listWs As Worksheet, Target As Range)
  ' PropagateDateOfSupply for the reverse direction).
  ElseIf c.Row >= PS_DATA_START_ROW And c.Column = 3 Then
  AddUnique dosRows, CStr(c.Row)
+ ' Hotfix - real, confirmed gap: Customer/Supplier (column 4) was
+ ' never checked here at all, silently between the Date of Supply
+ ' special-case above and the product block starting at column 5 -
+ ' editing it here did nothing, no matter how the row was touched.
+ ' Same reverse-direction treatment as Date of Supply: write the
+ ' correction straight into this row's own invoice sheet (see
+ ' HandleInvoiceListPartnerEdit below).
+ ElseIf c.Row >= PS_DATA_START_ROW And c.Column = 4 Then
+ AddUnique partnerRows, CStr(c.Row)
  End If
  Next c
  Next area
@@ -1517,6 +1526,56 @@ Public Sub HandleInvoiceListRowChange(listWs As Worksheet, Target As Range)
  For j = 1 To dosRows.Count
  HandleInvoiceListDateOfSupplyEdit listWs, CLng(dosRows(j))
  Next j
+
+ Dim k As Long
+ For k = 1 To partnerRows.Count
+ HandleInvoiceListPartnerEdit listWs, CLng(partnerRows(k))
+ Next k
+End Sub
+
+' Reverse direction of the invoice-sheet-side partner rename (see
+' HandleInvoiceSheetChange's PropagatePartnerRename call) - a user edited
+' the Customer/Supplier column directly on Purchase/Sales Summary. Unlike
+' that rename (which retargets every invoice sharing the same partner ID
+' by name), this is a per-row correction, exactly like
+' HandleInvoiceListDateOfSupplyEdit right below it: writes the new value
+' into ONLY this row's own invoice sheet, at whichever cell that sheet
+' actually shows its partner identity - row 9 col 3 on a Sales sheet, or
+' the top-banner seller identity at row 1 col 1 on a Purchase sheet (same
+' branch HandleInvoiceSheetChange itself already uses for the reverse
+' direction).
+Private Sub HandleInvoiceListPartnerEdit(listWs As Worksheet, rowNum As Long)
+ gSyncInProgress = True
+ Application.EnableEvents = False
+ On Error GoTo CleanFail
+
+ Dim sheetName As String
+ sheetName = SheetNameForInvoiceRow(rowNum)
+ If sheetName = "" Then GoTo CleanFail
+
+ Dim ws As Worksheet
+ On Error Resume Next
+ Set ws = ThisWorkbook.Worksheets(sheetName)
+ On Error GoTo CleanFail
+ If ws Is Nothing Then GoTo CleanFail
+
+ Dim isSalesSheet As Boolean
+ isSalesSheet = (InvoiceListSheet().Name = SHEET_SALES_SUMMARY)
+ Dim partnerNameCellRow As Long, partnerNameCellCol As Long
+ If isSalesSheet Then
+ partnerNameCellRow = INV_PARTNER_ROW
+ partnerNameCellCol = INV_PARTNER_VALUE_COL
+ Else
+ partnerNameCellRow = 1
+ partnerNameCellCol = 1
+ End If
+
+ ws.Cells(partnerNameCellRow, partnerNameCellCol).Value = listWs.Cells(rowNum, 4).Value
+
+ Application.Calculate
+CleanFail:
+ Application.EnableEvents = True
+ gSyncInProgress = False
 End Sub
 
 ' Reverse direction of PropagateDateOfSupply - a user edited Date of
