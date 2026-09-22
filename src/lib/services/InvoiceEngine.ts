@@ -6600,7 +6600,21 @@ export class InvoiceEngine {
     // the old cap of 5 was cutting convergence off early, which is why
     // large real batches kept shipping with residual violations despite
     // this pass already running.
-    const MAX_REPAIR_PASSES = 50;
+    // Hotfix — real, confirmed scale ceiling: this cap was sized against
+    // the largest batch this pass had actually been tested/tuned against
+    // at the time (~1000 invoices). A real 3479-invoice By Category batch
+    // still failed the occurrence gate with large (+24/+26 on a target of
+    // 37) residual deviations after exhausting all 50 passes — and each
+    // pass itself was slow enough (see the invoicesByProduct index just
+    // below) that 50 passes alone consumed a large share of a 237s+
+    // generation that still ended in failure. The pass loop already exits
+    // itself immediately the moment a whole pass makes zero swaps
+    // (`if (swapsThisPass === 0) return`, below) — so raising this can
+    // never waste time grinding through a genuinely stuck state, only
+    // give real, still-converging cases (which a much larger invoice
+    // count needs more of, simultaneously satisfying more independent
+    // per-product targets) enough passes to actually finish.
+    const MAX_REPAIR_PASSES = 400;
     for (let pass = 0; pass < MAX_REPAIR_PASSES; pass++) {
       const targetByProductId = this.computeCategoryCapacityAwareTargets(
         quotaAllocation,
@@ -6635,6 +6649,35 @@ export class InvoiceEngine {
 
       let swapsThisPass = 0;
 
+      // Hotfix — real, confirmed performance bottleneck at large scale:
+      // this used to scan the FULL `invoices` array (linear, with its own
+      // internal .findIndex/.some scans) for every single (overId,
+      // underId) pair — O(products² × invoices) per pass. A product only
+      // ever appears on a small fraction of a large batch's invoices, so
+      // scanning every invoice to find the ones that actually carry
+      // overId wastes enormous work at 3000+ invoices — confirmed as a
+      // major contributor to a real batch's 237s+ generation time that
+      // still failed. Indexed once per pass (invoice product membership
+      // only changes via a swap, so a fresh index at the top of each pass
+      // is accurate for that pass — a swap changing a line mid-pass just
+      // means this index has an occasional stale entry, which is already
+      // handled safely below: every candidate is still re-verified via
+      // the exact same eligibility checks as before, so a stale entry is
+      // just extra (cheap) work skipped, never a wrong swap).
+      const invoicesByProduct = new Map<string, any[]>();
+      for (const inv of invoices) {
+        for (const line of inv.products || []) {
+          const pid = line.product_id;
+          if (!pid) continue;
+          const list = invoicesByProduct.get(pid);
+          if (list) {
+            list.push(inv);
+          } else {
+            invoicesByProduct.set(pid, [inv]);
+          }
+        }
+      }
+
       for (const overId of overIds) {
         const overConfig = productConfigById.get(overId);
         if (!overConfig) continue;
@@ -6650,7 +6693,8 @@ export class InvoiceEngine {
           if (!underConfig) continue;
           if (resolveProductCategory(underConfig) !== overCategory) continue;
 
-          for (const inv of invoices) {
+          const candidateInvoices = invoicesByProduct.get(overId) || [];
+          for (const inv of candidateInvoices) {
             if (overRemaining <= 0 || underRemaining <= 0) break;
             const lines: any[] = inv.products || [];
             const lineIdx = lines.findIndex((l) => l.product_id === overId);
