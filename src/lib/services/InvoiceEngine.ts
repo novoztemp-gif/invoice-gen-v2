@@ -3702,24 +3702,58 @@ export class InvoiceEngine {
         );
         const invDrift = Math.round(targetBudget) - currentSum;
         if (Math.abs(invDrift) > 0 && currentInvoiceProducts.length > 0) {
-          const lastItem =
-            currentInvoiceProducts[currentInvoiceProducts.length - 1];
-          const targetLineAmt = Math.round((lastItem.amount || 0) + invDrift);
-          if (targetLineAmt > 0) {
-            const solved = this.solveLineForTargetWithinStock(
-              lastItem.product_id,
-              dateStr,
-              lastItem.quantity,
-              targetLineAmt,
-              productConfigById,
-              availableStockMap,
+          // Hotfix — real, confirmed live bug: this only ever tried the
+          // LAST line to close the drift — if that specific product's own
+          // rate/quantity range or REAL remaining stock on this date
+          // couldn't take up the full gap, the invoice (and, summed
+          // across this customer's other invoices, the customer's whole
+          // balancing check further down) was left short even when a
+          // DIFFERENT line on the very same invoice had real room to
+          // absorb it. Confirmed live: a Major Customer short by ₹1,386
+          // on a ₹745,673 target. absorbDriftAcrossLines (already proven
+          // for the identical problem in the occurrence-repair swap pass)
+          // tries every line, largest amount first, instead of one
+          // arbitrarily fixed one — falling back to the exact previous
+          // behavior (best-effort on whichever line has the most room)
+          // only when no line can close it exactly, so this can never do
+          // worse than before, only better.
+          const exactlyAbsorbed = this.absorbDriftAcrossLines(
+            currentInvoiceProducts,
+            -1,
+            invDrift,
+            dateStr,
+            productConfigById,
+            availableStockMap,
+          );
+          if (!exactlyAbsorbed) {
+            const targetIdx = currentInvoiceProducts.reduce(
+              (bestIdx, _item, idx, arr) =>
+                Math.round(arr[idx].amount || 0) >
+                Math.round(arr[bestIdx].amount || 0)
+                  ? idx
+                  : bestIdx,
+              0,
             );
-            lastItem.quantity = solved.quantity;
-            lastItem.rate = solved.rate;
-            lastItem.amount = computeLineAmount(
-              lastItem.quantity,
-              lastItem.rate,
+            const targetItem = currentInvoiceProducts[targetIdx];
+            const targetLineAmt = Math.round(
+              (targetItem.amount || 0) + invDrift,
             );
+            if (targetLineAmt > 0) {
+              const solved = this.solveLineForTargetWithinStock(
+                targetItem.product_id,
+                dateStr,
+                targetItem.quantity,
+                targetLineAmt,
+                productConfigById,
+                availableStockMap,
+              );
+              targetItem.quantity = solved.quantity;
+              targetItem.rate = solved.rate;
+              targetItem.amount = computeLineAmount(
+                targetItem.quantity,
+                targetItem.rate,
+              );
+            }
           }
         }
 
@@ -8575,22 +8609,42 @@ export class InvoiceEngine {
         );
         const invDrift = Math.round(targetBudget) - currentSum;
         if (Math.abs(invDrift) > 0 && currentInvoiceProducts.length > 0) {
-          const lastItem =
-            currentInvoiceProducts[currentInvoiceProducts.length - 1];
-          const targetAmt = Math.round(lastItem.amount + invDrift);
-          const solved = this.solveLineForTargetCapped(
-            lastItem.product_id,
-            lastItem.quantity,
-            targetAmt,
+          // Hotfix — same real, confirmed bug as the other two Major
+          // Customer drift-closing sites in this file (Sales' main loop,
+          // and Purchase's own STEP-1 loop above): only ever trying the
+          // LAST item left the drift unclosed whenever that specific
+          // product's own rate/quantity bounds couldn't reach it, even
+          // when a different line on the same invoice had real room.
+          // absorbDriftAcrossLines tries every line, largest amount
+          // first, falling back to the exact previous last-item behavior
+          // only when no line can close it exactly — never worse than
+          // before, only better.
+          const exactlyAbsorbed = this.absorbDriftAcrossLines(
+            currentInvoiceProducts,
+            -1,
+            invDrift,
+            "",
             productConfigById,
+            null,
           );
-          if (solved) {
-            lastItem.quantity = solved.quantity;
-            lastItem.rate = solved.rate;
-            lastItem.amount = computeLineAmount(
+          if (!exactlyAbsorbed) {
+            const lastItem =
+              currentInvoiceProducts[currentInvoiceProducts.length - 1];
+            const targetAmt = Math.round(lastItem.amount + invDrift);
+            const solved = this.solveLineForTargetCapped(
+              lastItem.product_id,
               lastItem.quantity,
-              lastItem.rate,
+              targetAmt,
+              productConfigById,
             );
+            if (solved) {
+              lastItem.quantity = solved.quantity;
+              lastItem.rate = solved.rate;
+              lastItem.amount = computeLineAmount(
+                lastItem.quantity,
+                lastItem.rate,
+              );
+            }
           }
         }
 
