@@ -1306,11 +1306,18 @@ export class InvoiceEngine {
           return `- ${v.productId}: target ${v.target}, actual ${v.actual}, deviation ${sign}${v.deviation}`;
         })
         .join("\n");
+      // See setOccurrenceRepairDiagnostic's own comment — surfaces WHY the
+      // repair pass didn't close this gap (didn't run at all vs. ran and
+      // stalled vs. ran and exhausted its pass budget) directly in the
+      // error every caller already has to read anyway, instead of that
+      // being invisible without server log access.
+      const repairDiagnostic = (invoices as any).__occurrenceRepairDiagnostic;
       throw new Error(
         `Product occurrence validation failed.\n` +
           `Invoice count: ${actualInvoiceCount}\n` +
-          `Semantics: ${quotaAllocation.occurrenceSemantics}\n\n` +
-          `Violations:\n${violationLines}`,
+          `Semantics: ${quotaAllocation.occurrenceSemantics}\n` +
+          (repairDiagnostic ? `Repair: ${repairDiagnostic}\n` : "") +
+          `\nViolations:\n${violationLines}`,
       );
     }
   }
@@ -6597,6 +6604,27 @@ export class InvoiceEngine {
     return false;
   }
 
+  /**
+   * Diagnostic breadcrumb — repairOccurrenceDeviations has several silent
+   * early-return points (no ledger, invalid quota config, zero-progress
+   * pass) and, before this, there was no visibility at all into WHICH one
+   * fired for a real failing batch: a repair fix could be entirely correct
+   * in isolation yet never actually run for a specific batch, and nothing
+   * distinguished that from "ran and genuinely couldn't converge." Stashed
+   * on the SAME `invoices` array repair was given (mutated in place
+   * throughout generation, never reassigned — see
+   * generatePurchaseInvoiceSplitupsInternal's own final `return invoices`)
+   * so checkProductOccurrenceGate can surface it directly in the thrown
+   * error message, the one channel already confirmed reachable via the
+   * browser's Network tab without needing server log access.
+   */
+  private static setOccurrenceRepairDiagnostic(
+    invoices: any[],
+    reason: string,
+  ): void {
+    (invoices as any).__occurrenceRepairDiagnostic = reason;
+  }
+
   private static repairOccurrenceDeviations(
     invoices: any[],
     batch: InvoiceBatch,
@@ -6605,7 +6633,15 @@ export class InvoiceEngine {
     supplierCategoryMap?: Map<string, "Fruits" | "Meat">,
     availableStockMap?: Map<string, any> | null,
   ): void {
-    if (!occurrenceLedger || invoices.length === 0) return;
+    if (!occurrenceLedger || invoices.length === 0) {
+      this.setOccurrenceRepairDiagnostic(
+        invoices,
+        !occurrenceLedger
+          ? "did not run (no occurrence ledger for this generation)"
+          : "did not run (no invoices)",
+      );
+      return;
+    }
     const reachableCategories = this.computeReachableCategoriesForSuppliers(
       batch,
       supplierCategoryMap,
@@ -6647,10 +6683,20 @@ export class InvoiceEngine {
         categoryAllocationForQuota,
         occurrenceSemanticsForQuota,
       );
-    } catch {
+    } catch (err: any) {
+      this.setOccurrenceRepairDiagnostic(
+        invoices,
+        `did not run (quota calculation threw: ${err?.message || err})`,
+      );
       return;
     }
-    if (!quotaAllocation.valid) return;
+    if (!quotaAllocation.valid) {
+      this.setOccurrenceRepairDiagnostic(
+        invoices,
+        `did not run (quota invalid: ${quotaAllocation.errors.join(" | ")})`,
+      );
+      return;
+    }
 
     // Hotfix — iterate repair to convergence. A single pass only ever
     // sees the (over, under) pairings available BEFORE any swap — but
@@ -6705,7 +6751,13 @@ export class InvoiceEngine {
         const dev = actual - target;
         if (dev !== 0) deviationByProductId.set(pid, dev);
       }
-      if (deviationByProductId.size === 0) return;
+      if (deviationByProductId.size === 0) {
+        this.setOccurrenceRepairDiagnostic(
+          invoices,
+          `converged after ${pass + 1} pass(es)`,
+        );
+        return;
+      }
 
       const overIds = Array.from(deviationByProductId.entries())
         .filter(([, dev]) => dev > 0)
@@ -7087,8 +7139,18 @@ export class InvoiceEngine {
         }
       }
 
-      if (swapsThisPass === 0) return;
+      if (swapsThisPass === 0) {
+        this.setOccurrenceRepairDiagnostic(
+          invoices,
+          `stalled after ${pass + 1} pass(es): zero swaps that pass, ${deviationByProductId.size} product(s) still deviating`,
+        );
+        return;
+      }
     }
+    this.setOccurrenceRepairDiagnostic(
+      invoices,
+      `exhausted all ${MAX_REPAIR_PASSES} passes without fully converging`,
+    );
   }
 
   private static generatePurchaseInvoiceSplitupsInternal(
