@@ -3859,44 +3859,73 @@ export class InvoiceEngine {
           // Spread the drift across every line of every invoice belonging to
           // this major customer, solving each line back onto a valid
           // rate/quantity via solveLineForTarget (never a raw amount/qty
-          // rate that could fall outside the product's configured range),
-          // until it's closed or every line is exhausted.
+          // rate that could fall outside the product's configured range).
+          //
+          // Hotfix — real, confirmed live bug: a single pass through every
+          // line ONCE left real, closeable drift unclosed. A stock/rate-
+          // constrained line early in iteration order can only partially
+          // absorb whatever (large) remainingDrift it's asked for at that
+          // point — but once LATER lines have absorbed their own share and
+          // remainingDrift has shrunk, that SAME early line might easily
+          // close the new, smaller remainder, if only it got a second
+          // chance. Confirmed live: a Major Customer short by ₹1,094 on a
+          // ₹745,673 target even after this pass already ran once.
+          // Iterating until a whole pass makes zero further progress (the
+          // drift stops shrinking, meaning every line is now genuinely at
+          // its own real ceiling/floor) gives every line as many chances as
+          // it takes — same convergence principle already proven for the
+          // occurrence-repair pass elsewhere in this file.
           const productConfigById = new Map<string, ProductConfig>(
             (batch.products || []).map((p: any) => [p.product_id, p]),
           );
           let remainingDrift = majorDrift;
-          for (const inv of mCustInvoices) {
-            if (Math.abs(remainingDrift) <= 0.5) break;
-            if (!inv.products || inv.products.length === 0) continue;
-            for (const item of inv.products) {
+          const MAX_MAJOR_DRIFT_PASSES = 20;
+          for (
+            let driftPass = 0;
+            driftPass < MAX_MAJOR_DRIFT_PASSES &&
+            Math.abs(remainingDrift) > 0.5;
+            driftPass++
+          ) {
+            const driftBeforePass = remainingDrift;
+            for (const inv of mCustInvoices) {
               if (Math.abs(remainingDrift) <= 0.5) break;
-              const targetLineAmt = Math.round(
-                (item.amount || 0) + remainingDrift,
+              if (!inv.products || inv.products.length === 0) continue;
+              for (const item of inv.products) {
+                if (Math.abs(remainingDrift) <= 0.5) break;
+                const targetLineAmt = Math.round(
+                  (item.amount || 0) + remainingDrift,
+                );
+                if (targetLineAmt <= 0) continue;
+                const previousAmount = item.amount || 0;
+                const solved = this.solveLineForTargetWithinStock(
+                  item.product_id,
+                  inv.invoice_date,
+                  item.quantity,
+                  targetLineAmt,
+                  productConfigById,
+                  availableStockMap,
+                );
+                item.quantity = solved.quantity;
+                item.rate = solved.rate;
+                item.amount = computeLineAmount(item.quantity, item.rate);
+                remainingDrift =
+                  Math.round(
+                    (remainingDrift - (item.amount - previousAmount)) * 100,
+                  ) / 100;
+              }
+              inv.total_amount = Math.round(
+                inv.products.reduce(
+                  (sum: number, item: any) => sum + Math.round(item.amount || 0),
+                  0,
+                ),
               );
-              if (targetLineAmt <= 0) continue;
-              const previousAmount = item.amount || 0;
-              const solved = this.solveLineForTargetWithinStock(
-                item.product_id,
-                inv.invoice_date,
-                item.quantity,
-                targetLineAmt,
-                productConfigById,
-                availableStockMap,
-              );
-              item.quantity = solved.quantity;
-              item.rate = solved.rate;
-              item.amount = computeLineAmount(item.quantity, item.rate);
-              remainingDrift =
-                Math.round(
-                  (remainingDrift - (item.amount - previousAmount)) * 100,
-                ) / 100;
             }
-            inv.total_amount = Math.round(
-              inv.products.reduce(
-                (sum: number, item: any) => sum + Math.round(item.amount || 0),
-                0,
-              ),
-            );
+            // No line anywhere changed the total by even a rupee this
+            // whole pass — genuinely stuck (every line already at its own
+            // real ceiling/floor), not worth another identical pass.
+            if (Math.round(driftBeforePass) === Math.round(remainingDrift)) {
+              break;
+            }
           }
         }
 
@@ -7888,38 +7917,59 @@ export class InvoiceEngine {
         if (Math.abs(majorDrift) > 0) {
           // A single line can only absorb so much drift before hitting its
           // own rate/quantity ceiling. Spread the remaining drift across
-          // every line of every invoice belonging to this major customer
-          // until it's closed or every line is exhausted.
+          // every line of every invoice belonging to this major customer.
+          //
+          // Hotfix — same real, confirmed bug as the identical Sales-side
+          // correction guard: a single pass through every line ONCE left
+          // real, closeable drift unclosed, since an early line can only
+          // partially absorb whatever (large) remainingDrift it's asked
+          // for at that point — a later, smaller remainder (after other
+          // lines contributed their share) might easily fit a line that
+          // couldn't take the original, larger ask. Iterating until a
+          // whole pass makes zero further progress gives every line as
+          // many chances as it takes.
           let remainingDrift = majorDrift;
-          for (const inv of mCustInvoices) {
-            if (Math.abs(remainingDrift) <= 0.5) break;
-            if (!inv.products || inv.products.length === 0) continue;
-            for (const item of inv.products) {
+          const MAX_MAJOR_DRIFT_PASSES = 20;
+          for (
+            let driftPass = 0;
+            driftPass < MAX_MAJOR_DRIFT_PASSES &&
+            Math.abs(remainingDrift) > 0.5;
+            driftPass++
+          ) {
+            const driftBeforePass = remainingDrift;
+            for (const inv of mCustInvoices) {
               if (Math.abs(remainingDrift) <= 0.5) break;
-              const targetLineAmt = Math.round(
-                (item.amount || 0) + remainingDrift,
+              if (!inv.products || inv.products.length === 0) continue;
+              for (const item of inv.products) {
+                if (Math.abs(remainingDrift) <= 0.5) break;
+                const targetLineAmt = Math.round(
+                  (item.amount || 0) + remainingDrift,
+                );
+                if (targetLineAmt <= 0) continue;
+                const previousAmount = item.amount || 0;
+                const solved = this.solveLineForTarget(
+                  item.product_id,
+                  item.quantity,
+                  targetLineAmt,
+                  productConfigById,
+                );
+                item.quantity = solved.quantity;
+                item.rate = solved.rate;
+                item.amount = computeLineAmount(item.quantity, item.rate);
+                remainingDrift =
+                  Math.round((remainingDrift - (item.amount - previousAmount)) * 100) /
+                  100;
+              }
+              inv.total_amount = Math.round(
+                inv.products.reduce(
+                  (sum: number, item: any) => sum + Math.round(item.amount || 0),
+                  0,
+                ),
               );
-              if (targetLineAmt <= 0) continue;
-              const previousAmount = item.amount || 0;
-              const solved = this.solveLineForTarget(
-                item.product_id,
-                item.quantity,
-                targetLineAmt,
-                productConfigById,
-              );
-              item.quantity = solved.quantity;
-              item.rate = solved.rate;
-              item.amount = computeLineAmount(item.quantity, item.rate);
-              remainingDrift =
-                Math.round((remainingDrift - (item.amount - previousAmount)) * 100) /
-                100;
             }
-            inv.total_amount = Math.round(
-              inv.products.reduce(
-                (sum: number, item: any) => sum + Math.round(item.amount || 0),
-                0,
-              ),
-            );
+            if (Math.round(driftBeforePass) === Math.round(remainingDrift)) {
+              break;
+            }
           }
         }
 
