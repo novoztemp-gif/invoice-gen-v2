@@ -7140,9 +7140,37 @@ export class InvoiceEngine {
       }
 
       if (swapsThisPass === 0) {
+        // Diagnostic breadcrumb (see setOccurrenceRepairDiagnostic) —
+        // distinguishes the two known structural blockers a stall can
+        // mean: an over-target product whose every invoice is single-line
+        // (nothing to shed its line's amount into, so neither the swap
+        // nor the cross-invoice fallback can ever touch it), vs. an
+        // under-target product with no same-category over-target
+        // counterpart to draw from at all (category purity correctly
+        // refusing a cross-category fix, which would then point at
+        // target computation itself rather than at this repair pass).
+        const overWithNoMultiLineDonor = overIds.filter((pid) => {
+          const invs = invoicesByProduct.get(pid) || [];
+          return !invs.some((inv) => (inv.products || []).length > 1);
+        });
+        const overCategoriesPresent = new Set(
+          overIds
+            .map((pid) => productConfigById.get(pid))
+            .filter((cfg): cfg is ProductConfig => Boolean(cfg))
+            .map((cfg) => resolveProductCategory(cfg)),
+        );
+        const underWithNoSameCategoryOver = underIds.filter((pid) => {
+          const cfg = productConfigById.get(pid);
+          if (!cfg) return true;
+          return !overCategoriesPresent.has(resolveProductCategory(cfg));
+        });
         this.setOccurrenceRepairDiagnostic(
           invoices,
-          `stalled after ${pass + 1} pass(es): zero swaps that pass, ${deviationByProductId.size} product(s) still deviating`,
+          `stalled after ${pass + 1} pass(es): zero swaps that pass, ` +
+            `${deviationByProductId.size} product(s) still deviating ` +
+            `(${overIds.length} over-target, ${underIds.length} under-target; ` +
+            `${overWithNoMultiLineDonor.length}/${overIds.length} over-target product(s) have NO multi-line donor invoice; ` +
+            `${underWithNoSameCategoryOver.length}/${underIds.length} under-target product(s) have NO same-category over-target counterpart)`,
         );
         return;
       }
