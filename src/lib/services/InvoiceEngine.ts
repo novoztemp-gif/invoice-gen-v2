@@ -5289,6 +5289,28 @@ export class InvoiceEngine {
       }
     }
 
+    // Hotfix — real, confirmed live bug: Sales generation never called
+    // repairOccurrenceDeviations at all (only the Purchase branch,
+    // generatePurchaseInvoiceSplitupsInternal, did) — every occurrence
+    // fix made to that function this session had zero effect on Sales
+    // batches, since repair genuinely never ran for them. Confirmed on a
+    // real 662-invoice CATEGORY Sales batch: one product hit target 55,
+    // actual 409 (+354) with nothing to correct it. Mirrors the Purchase
+    // call exactly — same function, same rationale — with `undefined` for
+    // supplierCategoryMap (Sales customers have no analogous
+    // reachability-restriction concept) and this function's own
+    // `availableStockMap` passed through so repair stays stock-aware,
+    // same as every other stock-sensitive step in this function already
+    // is.
+    this.repairOccurrenceDeviations(
+      invoices,
+      batch,
+      productConfigById,
+      occurrenceLedger,
+      undefined,
+      availableStockMap,
+    );
+
     // ── Chronological Sort, then ONE-PASS Invoice Numbering ──
     // Sort by date only — Array.prototype.sort is stable (guaranteed by
     // spec since ES2019), so invoices sharing a date keep whatever
