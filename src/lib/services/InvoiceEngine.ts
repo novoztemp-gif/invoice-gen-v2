@@ -1642,9 +1642,35 @@ export class InvoiceEngine {
         realCatInvoices > 0
           ? (realLinesByCat.get(cat) || 0) / realCatInvoices
           : overallAvgLines;
+      // Hotfix — real, confirmed per-category conservation violation: this
+      // used catInvoiceTarget (what category_allocation's configured
+      // percentages IMPLY this category should get) to size catSlotsTarget
+      // and cap each product — but pickCategoryFromLedger assigns each
+      // invoice's category via a WEIGHTED RANDOM draw, which can (and,
+      // confirmed on a real 348-invoice CATEGORY batch, does) realize a
+      // meaningfully different split than configured by chance, especially
+      // at smaller batch sizes where statistical variance is proportionally
+      // larger — one category landing dozens of invoices short of what was
+      // implied, the other correspondingly over. avgLinesForCat right above
+      // already uses the REAL, measured count when available; catSlotsTarget
+      // silently didn't, reintroducing the exact "target sized for an
+      // invoice count this category doesn't actually have" mismatch this
+      // whole function exists to close — and since an invoice's category is
+      // fixed at generation time (repair only ever moves slots WITHIN a
+      // category, by design), a category that's short on REAL invoices can
+      // never make up that gap no matter how repair runs. Using the real
+      // count instead makes catSlotsTarget exactly equal to this category's
+      // real total occupied lines whenever real data exists (repair and the
+      // final gate always have some) — guaranteeing every category's own
+      // targets sum to exactly what it actually holds, i.e. true
+      // conservation — falling back to the config-implied estimate only
+      // when there's truly no real data yet (a pre-generation dry-run
+      // sample with zero invoices landing in this category).
+      const catInvoiceBasis =
+        realCatInvoices > 0 ? realCatInvoices : catInvoiceTarget;
       const catSlotsTarget = Math.max(
         0,
-        Math.round(catInvoiceTarget * avgLinesForCat),
+        Math.round(catInvoiceBasis * avgLinesForCat),
       );
       const capByProductId = new Map<string, number>();
       for (const p of catProducts) {
@@ -1652,8 +1678,8 @@ export class InvoiceEngine {
         capByProductId.set(
           p.product_id,
           affordable !== undefined
-            ? Math.min(catInvoiceTarget, affordable)
-            : catInvoiceTarget,
+            ? Math.min(catInvoiceBasis, affordable)
+            : catInvoiceBasis,
         );
       }
       const catTargets = this.apportionCategoryTargetsWithPerInvoiceCap(
