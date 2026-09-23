@@ -115,12 +115,21 @@ describe("InvoiceEngine.computeCategoryCapacityAwareTargets — per-category con
     expect(quotaAllocation.valid).toBe(true);
 
     const Engine = InvoiceEngine as any;
+    // reachableCategories is `undefined` here deliberately — that's what
+    // computeReachableCategoriesForSuppliers actually returns for the
+    // single most common real CATEGORY-batch shape: suppliers spanning
+    // BOTH categories, no restriction to just one. An earlier version of
+    // this fix passed a Set here explicitly and passed — but the real
+    // batch this reproduces never has one, which is exactly what let the
+    // early-return guard above silently skip this whole recalculation for
+    // it. Reproducing that exact (undefined, no major customers) shape is
+    // the point of this test.
     const targets: Map<string, number> = Engine.computeCategoryCapacityAwareTargets(
       quotaAllocation,
       products,
       invoices,
       true,
-      new Set(["Meat", "Fruits"]),
+      undefined,
       undefined,
       { Meat: 70, Fruits: 30 },
     );

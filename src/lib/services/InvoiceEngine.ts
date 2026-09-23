@@ -1385,7 +1385,6 @@ export class InvoiceEngine {
       ]),
     );
     const majorCounts = majorCustomerCategoryCounts || { Meat: 0, Fruits: 0 };
-    const hasMajorCustomerLock = majorCounts.Meat > 0 || majorCounts.Fruits > 0;
     // Hotfix — CATEGORY semantics has the identical reachability gap
     // GLOBAL had (see below): quotaAllocation.categoryTargets/
     // productTargets are computed purely from the user's explicit
@@ -1394,14 +1393,29 @@ export class InvoiceEngine {
     // THIS batch. Previously this function returned immediately for any
     // non-GLOBAL semantics, so a CATEGORY-semantics batch with a real
     // "category has zero suppliers" mismatch got none of the correction
-    // GLOBAL now gets. When there's nothing to correct (no reachability
-    // restriction detected AND no Major Supplier category lock, or
-    // CATEGORY's own targets aren't available at all), fall through
-    // unchanged — byte-identical to pre-existing behavior.
+    // GLOBAL now gets.
+    //
+    // Hotfix — real, confirmed live bug: this used to ALSO skip the
+    // capacity-aware recalculation below whenever neither a reachability
+    // restriction NOR a Major Supplier lock was detected, on the
+    // assumption that with neither of those in play there was "nothing to
+    // correct." That assumption is wrong — it's exactly the ORDINARY case
+    // (a batch with suppliers spanning both categories, no Major
+    // Suppliers configured) where reachableCategories is always undefined
+    // regardless of anything else, which made this guard skip the
+    // capacity-aware pass for the single most common real CATEGORY-batch
+    // shape there is. pickCategoryFromLedger's weighted-RANDOM per-invoice
+    // category draw can diverge from the configured category_allocation
+    // split by chance in that ordinary case too (confirmed on a real
+    // 348-invoice batch, unaffected by either reachability or Major
+    // Suppliers) — this guard was silently routing that batch straight
+    // back to the raw, config-implied targets every single time, making
+    // the real-invoice-count fix below completely unreachable for it. Only
+    // skip now when CATEGORY's own targets genuinely aren't available at
+    // all (nothing to recalculate against).
     if (
       quotaAllocation.occurrenceSemantics !== "GLOBAL" &&
-      (!quotaAllocation.categoryTargets ||
-        (!reachableCategories && !hasMajorCustomerLock))
+      !quotaAllocation.categoryTargets
     ) {
       return targetsByProductId;
     }
