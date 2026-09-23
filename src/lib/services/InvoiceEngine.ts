@@ -7077,6 +7077,20 @@ export class InvoiceEngine {
         }
       }
 
+      // Diagnostic tallies (see setOccurrenceRepairDiagnostic) — the
+      // existence checks in the stall message below ("has a donor", "has
+      // a same-category counterpart") are necessary but not sufficient:
+      // a specific (donor, recipient) pairing can still fail for several
+      // different reasons, and for Sales specifically (real stock-
+      // constrained) it's genuinely ambiguous from the outside whether a
+      // stall means "search wasn't thorough enough" or "real stock
+      // doesn't support this product on any tried date" — these counts
+      // tell them apart.
+      let fallbackNoRecipientFound = 0;
+      let fallbackDonorAbsorbFailed = 0;
+      let fallbackRecipientAbsorbFailed = 0;
+      let fallbackCommitted = 0;
+
       for (const overId of overIds) {
         let overRemaining = deviationByProductId.get(overId) || 0;
         if (overRemaining <= 0) continue;
@@ -7164,7 +7178,10 @@ export class InvoiceEngine {
               recipientSolved = solved;
               break;
             }
-            if (!recipientInv || !recipientSolved) continue;
+            if (!recipientInv || !recipientSolved) {
+              fallbackNoRecipientFound++;
+              continue;
+            }
 
             // Shed overId from the donor — try to absorb the resulting
             // gap across its OTHER lines first, before touching the
@@ -7180,7 +7197,10 @@ export class InvoiceEngine {
               productConfigById,
               availableStockMap,
             );
-            if (!donorAbsorbed) continue;
+            if (!donorAbsorbed) {
+              fallbackDonorAbsorbFailed++;
+              continue;
+            }
 
             // Add underId to the recipient, funded by shrinking one of
             // its existing lines by the exact same amount.
@@ -7217,6 +7237,7 @@ export class InvoiceEngine {
               // which donor proposed it, so retrying it against a
               // different donor this same pass would just fail the same
               // way; it gets a fresh chance next pass regardless.
+              fallbackRecipientAbsorbFailed++;
               consumedRecipients.add(recipientInv);
               continue;
             }
@@ -7225,6 +7246,7 @@ export class InvoiceEngine {
             donorInv.products = donorWithoutOver;
             recipientInv.products = recipientWithUnder;
             consumedRecipients.add(recipientInv);
+            fallbackCommitted++;
 
             overRemaining--;
             underRemaining--;
@@ -7266,7 +7288,8 @@ export class InvoiceEngine {
             `${deviationByProductId.size} product(s) still deviating ` +
             `(${overIds.length} over-target, ${underIds.length} under-target; ` +
             `${overWithNoMultiLineDonor.length}/${overIds.length} over-target product(s) have NO multi-line donor invoice; ` +
-            `${underWithNoSameCategoryOver.length}/${underIds.length} under-target product(s) have NO same-category over-target counterpart)`,
+            `${underWithNoSameCategoryOver.length}/${underIds.length} under-target product(s) have NO same-category over-target counterpart; ` +
+            `fallback attempts this pass: ${fallbackCommitted} committed, ${fallbackNoRecipientFound} found no eligible recipient (stock/rate couldn't fit${availableStockMap ? " on any date tried" : ""}), ${fallbackDonorAbsorbFailed} failed shedding from the donor, ${fallbackRecipientAbsorbFailed} failed funding the recipient)`,
         );
         return;
       }
