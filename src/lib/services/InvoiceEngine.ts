@@ -8285,6 +8285,47 @@ export class InvoiceEngine {
           }
         }
 
+        // Hotfix — real, confirmed live bug: this only ever corrected an
+        // OVERSHOOT (the block above) — an UNDERSHOOT (the far more common
+        // case: the per-line building loop above stops the instant one
+        // more line would exceed `target`, routinely leaving a real gap
+        // between what was built and the actual reservation goal) had
+        // nothing closing it at all. Confirmed live: a Major Customer
+        // whose Anticipated reservation was configured correctly (right
+        // amount, set up before the Purchase batch's first generation)
+        // still landed ₹16,896 short on a ₹365,986 target — small
+        // per-invoice undershoots here, compounding across every
+        // reservation invoice on every reservation day, add up to exactly
+        // this shape of gap. absorbDriftAcrossLines (already proven for
+        // the identical problem in both the occurrence-repair swap pass
+        // and the Major Customer drift-closing pass) tries every line,
+        // largest amount first, to grow the invoice up to `target`
+        // exactly; if no line can hit it exactly, the invoice is left as
+        // it was (this can never do worse than before this fix, only
+        // better).
+        if (
+          finalInvoiceTotal < target &&
+          currentInvoiceProducts.length > 0
+        ) {
+          const growDrift = Math.round(target) - Math.round(finalInvoiceTotal);
+          const grown = this.absorbDriftAcrossLines(
+            currentInvoiceProducts,
+            -1,
+            growDrift,
+            dateStr,
+            productConfigById,
+            null,
+          );
+          if (grown) {
+            finalInvoiceTotal = Math.round(
+              currentInvoiceProducts.reduce(
+                (sum, p) => sum + Math.round(p.amount || 0),
+                0,
+              ),
+            );
+          }
+        }
+
         const abbr2 = (batch as any).issuing_company_abbreviation || "IC";
         const fy2 = (batch.financial_year || "2026-27").replace(/^FY/i, "");
         const draftInvNumber2 = InvoiceNumberingService.formatInvoiceNumber(
@@ -8358,6 +8399,7 @@ export class InvoiceEngine {
         const usedSuppliersToday = new Set<string>();
         let supplierCursor = b;
         let guard = supplierPool.length + 1;
+        const invoicesBeforeThisDay = invoices.length;
 
         while (remainingForDay > 0.01 && guard-- > 0) {
           let supplierId: string | undefined;
@@ -8394,6 +8436,48 @@ export class InvoiceEngine {
             Math.round((dayReservedSum + finalInvoiceTotal) * 100) / 100;
           remainingForDay =
             Math.round((remainingForDay - finalInvoiceTotal) * 100) / 100;
+        }
+
+        // Hotfix — real, confirmed live bug: whatever remained once the
+        // loop above stopped (too small to open a new invoice under this
+        // batch's own minimum) used to just be discarded — "best-effort
+        // concentration, not an exact guarantee." Rather than lose it,
+        // fold it into the invoice this day already built, same
+        // multi-line-search top-up already used elsewhere in this
+        // function, as long as doing so doesn't push that invoice over
+        // the batch's own maximum. Only runs when this day actually built
+        // at least one invoice to top up; if the loop above never got
+        // that far (e.g. every supplier already used today), there is
+        // nothing to top up and this is a no-op, matching prior behavior.
+        if (remainingForDay > 0.01 && invoices.length > invoicesBeforeThisDay) {
+          const lastDayInvoice = invoices[invoices.length - 1];
+          const currentTotal = Math.round(lastDayInvoice.total_amount || 0);
+          const room = thresholdMax - currentTotal;
+          const topUp = Math.min(remainingForDay, room);
+          if (topUp > 0.5) {
+            const toppedUp = this.absorbDriftAcrossLines(
+              lastDayInvoice.products,
+              -1,
+              Math.round(topUp),
+              dateStr,
+              productConfigById,
+              null,
+            );
+            if (toppedUp) {
+              const newTotal = Math.round(
+                lastDayInvoice.products.reduce(
+                  (s: number, p: any) => s + Math.round(p.amount || 0),
+                  0,
+                ),
+              );
+              const actualAdded = newTotal - currentTotal;
+              lastDayInvoice.total_amount = newTotal;
+              dayReservedSum =
+                Math.round((dayReservedSum + actualAdded) * 100) / 100;
+              remainingForDay =
+                Math.round((remainingForDay - actualAdded) * 100) / 100;
+            }
+          }
         }
 
         anticipatedReservedTotal =

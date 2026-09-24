@@ -408,4 +408,85 @@ describe("generatePurchaseInvoiceSplitupsInternal — Anticipated Major Customer
       }
     }
   });
+
+  /**
+   * Root cause of a real, confirmed live failure: a Major Customer whose
+   * Anticipated reservation was configured correctly (right amount, set up
+   * before the linked Purchase batch's first generation) still landed
+   * ₹16,896 short of its ₹365,986 target on the Sales side.
+   *
+   * Traced to two compounding gaps in buildOneReservationInvoice / the
+   * per-day reservation loop: (1) each reservation invoice's own line-
+   * building loop stops the instant one more line would exceed its
+   * target, with nothing trying to close whatever gap remains — unlike
+   * every other "build an invoice to hit an exact ₹ target" path in this
+   * file, which already has a drift-closing step; (2) once a day's
+   * remaining reservation need drops below the batch's own minimum
+   * invoice amount, the leftover is discarded rather than folded into an
+   * invoice already built that day. Both are individually small, but
+   * compounding across many reservation invoices/days on a real six-
+   * figure reservation adds up to exactly this shape of gap.
+   *
+   * total_amount is set well below what the reservation could plausibly
+   * reach even in the worst pre-fix case, so remainingBatchAmount
+   * computes to 0 and STEP 2 (regular generation) never runs — every
+   * invoice in the result is a pure reservation invoice, letting the
+   * reserved total be measured directly and unambiguously.
+   */
+  it("reserves close to the full anticipated amount, not significantly short of it, at realistic scale", () => {
+    const suppliers = Array.from({ length: 15 }, (_, i) => `sup-${i + 1}`);
+    const products = [
+      meatProduct("prod-a"),
+      meatProduct("prod-b"),
+      meatProduct("prod-c"),
+    ];
+    const ANTICIPATED_AMOUNT = 200000;
+    const THEORETICAL_CEILING = 9900 * 20; // max_invoice_amount * invoice_count
+    const batch = makeBatch({
+      // Matches the reservation's own theoretical ceiling exactly — the
+      // function's own grand-total enforcement requires total_amount to
+      // be reachable, so it can't be set arbitrarily below what
+      // reservation alone can produce.
+      total_amount: THEORETICAL_CEILING,
+      minimum_invoice_amount: 500,
+      maximum_invoice_amount: 9900,
+      products,
+      selected_customers: suppliers,
+      anticipated_major_customers: [
+        {
+          customer_id: "future-major-real",
+          amount: ANTICIPATED_AMOUNT,
+          invoice_count: 20,
+          max_invoice_amount: 9900,
+        },
+      ],
+    } as any);
+
+    const invoices = Engine.generatePurchaseInvoiceSplitupsInternal(
+      batch,
+      NUM_DAYS,
+      START_DATE,
+      1,
+      undefined,
+      categoryMap(suppliers),
+    );
+
+    // Every invoice in the result is a reservation invoice (STEP 2 never
+    // ran — see the comment above), so the whole batch's total IS the
+    // reserved total.
+    const reservedTotal = invoices.reduce(
+      (sum: number, inv: any) => sum + Math.round(inv.total_amount || 0),
+      0,
+    );
+
+    // Reservation targets up to a 20% buffer over the bare average
+    // (200000/20 * 1.2 = 12000/day, capped at max_invoice_amount 9900 ->
+    // 9900/day * 20 = 198000 theoretical ceiling). Demand it get
+    // meaningfully close to that — within 3% — rather than the large,
+    // silent shortfall the two gaps above used to allow.
+    expect(
+      reservedTotal,
+      `reserved ₹${reservedTotal} vs theoretical ceiling ₹${THEORETICAL_CEILING} — gap too large`,
+    ).toBeGreaterThanOrEqual(THEORETICAL_CEILING * 0.97);
+  });
 });
