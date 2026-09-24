@@ -429,12 +429,22 @@ export default function GenerateInvoice() {
             // Auto-fill Major Customers from this Purchase batch's own
             // Anticipated Major Customer entries — same customer/amount/
             // invoice-count/max-per-invoice the user already configured
-            // there, so it doesn't have to be typed in twice.
-            if (
-              Array.isArray(bd.anticipated_major_customers) &&
-              bd.anticipated_major_customers.length > 0
-            ) {
-              applyAnticipatedMajorCustomers(bd.anticipated_major_customers);
+            // there, so it doesn't have to be typed in twice. Isolated in
+            // its own try/catch — this block runs BEFORE the product
+            // occurrence inheritance below in the same effect, so any
+            // throw here (this app's target platform, Safari/older
+            // browsers, or unexpected data shape) would otherwise silently
+            // skip that inheritance too, since both share the same
+            // surrounding try/catch further up.
+            try {
+              if (
+                Array.isArray(bd.anticipated_major_customers) &&
+                bd.anticipated_major_customers.length > 0
+              ) {
+                applyAnticipatedMajorCustomers(bd.anticipated_major_customers);
+              }
+            } catch (err) {
+              console.error("Error auto-filling Major Customers:", err);
             }
           }
 
