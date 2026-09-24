@@ -70,7 +70,7 @@ export async function GET(request: NextRequest) {
         supabase
           .from("invoice_batch")
           .select(
-            "id, total_amount, invoice_date_from, invoice_date_to, financial_year, products, occurrence_semantics, category_allocation",
+            "id, total_amount, invoice_date_from, invoice_date_to, financial_year, products, occurrence_semantics, category_allocation, anticipated_major_customers",
           )
           .in("id", chunk),
       batchIds,
@@ -282,6 +282,14 @@ export async function GET(request: NextRequest) {
         // percentages).
         occurrence_semantics: primaryBatch.occurrence_semantics || null,
         category_allocation: primaryBatch.category_allocation || null,
+        // Sales' own Major Customer auto-fill (see generate-invoice/page.tsx)
+        // — Anticipated Major Customer entries on this Purchase batch
+        // already reference the real Sales customer master
+        // (receiving_companies, same table Sales' own Major Customer picker
+        // uses — see useInvoiceForm.ts's anticipatedCustomers comment), so
+        // customer_id is directly usable without any translation.
+        anticipated_major_customers:
+          primaryBatch.anticipated_major_customers || [],
       },
     });
   } catch (error: any) {

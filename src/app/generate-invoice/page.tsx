@@ -92,6 +92,7 @@ export default function GenerateInvoice() {
     handleProductChange,
     handleAddMajorCustomer,
     handleRemoveMajorCustomer,
+    applyAnticipatedMajorCustomers,
     handleToggleCustomer,
     handleSelectAllCustomers,
     handleAddProduct,
@@ -424,6 +425,17 @@ export default function GenerateInvoice() {
               if (dateTo) next.invoiceDateTo = dateTo;
               return next;
             });
+
+            // Auto-fill Major Customers from this Purchase batch's own
+            // Anticipated Major Customer entries — same customer/amount/
+            // invoice-count/max-per-invoice the user already configured
+            // there, so it doesn't have to be typed in twice.
+            if (
+              Array.isArray(bd.anticipated_major_customers) &&
+              bd.anticipated_major_customers.length > 0
+            ) {
+              applyAnticipatedMajorCustomers(bd.anticipated_major_customers);
+            }
           }
 
           // Inherit Product Occurrence Distribution & Category Split from Purchase Batch

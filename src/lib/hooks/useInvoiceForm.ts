@@ -533,6 +533,54 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     setMajorCustomers(majorCustomers.filter((_, i) => i !== index));
   };
 
+  /**
+   * Auto-fills Sales' own Major Customer list from the linked Purchase
+   * batch's Anticipated Major Customer entries, so the same customer/
+   * amount/invoice-count/max-per-invoice doesn't have to be typed in
+   * twice — once as "anticipated" on Purchase, again as "major" on Sales.
+   * Called from generate-invoice/page.tsx whenever exactly one stock
+   * source batch is selected and it carries anticipated entries (same
+   * "single source only" guard the rest of that inheritance effect
+   * already uses).
+   *
+   * Additive and dedupe-by-customer_id (never overwrites an entry the
+   * user already has, whether added manually or by an earlier run of
+   * this same auto-fill) — safe to call every time the effect re-fires.
+   * Mirrors handleAddMajorCustomer's own behavior of moving the customer
+   * out of the regular selectedCustomers list once they're a major one.
+   */
+  const applyAnticipatedMajorCustomers = (
+    entries: Array<{
+      customer_id: string;
+      amount: number;
+      invoice_count: number;
+      max_invoice_amount?: number;
+    }>,
+  ) => {
+    if (!entries || entries.length === 0) return;
+    const existingIds = new Set(majorCustomers.map((m) => m.customer_id));
+    const toAdd = entries.filter(
+      (e) => e.customer_id && !existingIds.has(e.customer_id),
+    );
+    if (toAdd.length === 0) return;
+
+    setMajorCustomers([
+      ...majorCustomers,
+      ...toAdd.map((e) => ({
+        customer_id: e.customer_id,
+        amount: String(e.amount),
+        invoice_count: String(e.invoice_count),
+        max_invoice_amount: String(
+          e.max_invoice_amount || e.amount,
+        ),
+      })),
+    ]);
+    const addedIds = new Set(toAdd.map((e) => e.customer_id));
+    setSelectedCustomers(
+      selectedCustomers.filter((id) => !addedIds.has(id)),
+    );
+  };
+
   const handleAddAnticipatedMajorCustomer = () => {
     if (!tempAnticipatedMajorCustomer.customer_id) return;
     const amt = parseFloat(tempAnticipatedMajorCustomer.amount);
@@ -1735,6 +1783,7 @@ export function useInvoiceForm({ batchType }: UseInvoiceFormParams) {
     handleProductChange,
     handleAddMajorCustomer,
     handleRemoveMajorCustomer,
+    applyAnticipatedMajorCustomers,
     handleToggleCustomer,
     handleSelectAllCustomers,
     handleAddProduct,
