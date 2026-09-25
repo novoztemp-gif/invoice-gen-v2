@@ -1329,6 +1329,12 @@ Private Sub HandleInvoiceLineEdit(ws As Worksheet, productRow As Long)
  qty, rate, amount, newPartnerId, newPartnerName, ws.Name, blockIdx
  hRow = FindHiddenRowBySheetAndBlock(ws.Name, blockIdx)
  productId = matchedProductId
+ ' Item 7: give this partner's own block in Supplier/Customer Summary
+ ' a breakdown row for it too - a no-op if it already has one, or if
+ ' this product couldn't be matched to a real Product ID at all.
+ If matchedProductId <> "" Then
+ EnsurePartnerSummaryProductRow newPartnerId, matchedProductId, prodName, hsn
+ End If
  End If
  End If
 
@@ -1586,6 +1592,11 @@ Private Sub HandleInvoiceListProductEdit(listWs As Worksheet, rowNum As Long, bl
  qty, rate, qty * rate, newPartnerId, newPartnerName, newSheetName, blockIdx
  hRow = FindHiddenRowByInvoiceAndBlock(invoiceId, blockIdx)
  If hRow = 0 Then GoTo CleanFail
+ ' Item 7: same Supplier/Customer Summary breakdown-row fix as
+ ' HandleInvoiceLineEdit's own hRow=0 branch.
+ If matchedProductId <> "" Then
+ EnsurePartnerSummaryProductRow newPartnerId, matchedProductId, prodName, hsn
+ End If
  End If
 
  Dim hws As Worksheet
@@ -2063,6 +2074,84 @@ Private Sub AppendPartnerSummaryRow(partnerId As String, name As String)
  ws.Range(ws.Cells(totalRow, 1), ws.Cells(totalRow, 3)).Merge
  ws.Cells(totalRow, 1).Value = "Total"
  ws.Cells(totalRow, 4).Formula = "=SUMIF(" & partnerIdRange & ",E" & newRow & "," & amountRange & ")"
+End Sub
+
+' Finds a partner's own group-header row by Partner ID - blank on every
+' row except a block's own header row (see PT_COL_PARTNER_ID's comment).
+Private Function FindPartnerSummaryHeaderRowById(partnerId As String) As Long
+ Dim ws As Worksheet, r As Long, n As Long
+ Set ws = PartnerSummarySheet()
+ n = PartnerSummaryRowCount()
+ For r = PT_DATA_START_ROW To PT_DATA_START_ROW + n - 1
+ If CStr(ws.Cells(r, PT_COL_PARTNER_ID).Value) = partnerId Then
+ FindPartnerSummaryHeaderRowById = r
+ Exit Function
+ End If
+ Next r
+ FindPartnerSummaryHeaderRowById = 0
+End Function
+
+' Every block's own Total row is the first row below its header whose
+' column 1 literally reads "Total" (written by both
+' buildPartnerSummarySheet's own generation-time loop and
+' AppendPartnerSummaryRow above) - never a product row, since a real
+' product name never equals that literal string.
+Private Function FindPartnerBlockTotalRow(headerRow As Long) As Long
+ Dim ws As Worksheet, r As Long
+ Set ws = PartnerSummarySheet()
+ r = headerRow + 1
+ Do While ws.Cells(r, 1).Value <> "Total" And ws.Cells(r, 1).Value <> ""
+ r = r + 1
+ Loop
+ FindPartnerBlockTotalRow = r
+End Function
+
+' Item 4/7 gap fix: a brand-new product typed onto an invoice (see
+' HandleInvoiceLineEdit/HandleInvoiceListProductEdit's own hRow=0
+' registration) previously updated _hidden_invoice_data and Purchase/
+' Sales Summary, but never gave that partner's own block in Supplier/
+' Customer Summary a row for it - the partner's Total still counted it
+' correctly (it's a SUMIF by Partner ID alone), but the per-product
+' breakdown silently missed it. Inserts one new row for (partnerId,
+' productId) right above that partner's own Total row, if one doesn't
+' already exist there - a no-op if the partner isn't tracked in Partner
+' Summary at all, or already has a row for this exact product.
+Private Sub EnsurePartnerSummaryProductRow(partnerId As String, productId As String, prodName As String, hsn As String)
+ If partnerId = "" Or productId = "" Then Exit Sub
+ Dim headerRow As Long
+ headerRow = FindPartnerSummaryHeaderRowById(partnerId)
+ If headerRow = 0 Then Exit Sub
+
+ Dim totalRow As Long
+ totalRow = FindPartnerBlockTotalRow(headerRow)
+
+ Dim ws As Worksheet
+ Set ws = PartnerSummarySheet()
+ Dim r As Long
+ For r = headerRow + 1 To totalRow - 1
+ If CStr(ws.Cells(r, 6).Value) = productId Then Exit Sub ' already has its own row
+ Next r
+
+ ws.Rows(totalRow).Insert Shift:=xlDown, CopyOrigin:=xlFormatFromLeftOrAbove
+ Dim newRow As Long
+ newRow = totalRow
+
+ Dim nameCell As String
+ nameCell = IIf(hsn <> "", prodName & " (" & hsn & ")", prodName)
+ ws.Cells(newRow, 1).Value = nameCell
+ ws.Cells(newRow, 6).Value = productId
+
+ Dim partnerIdRange As String, productIdRange As String, qtyRange As String, amountRange As String
+ partnerIdRange = SHEET_HIDDEN_DATA & "!$" & ColLetter(HID_COL_PARTNER_ID) & ":$" & ColLetter(HID_COL_PARTNER_ID)
+ productIdRange = SHEET_HIDDEN_DATA & "!$" & ColLetter(HID_COL_PRODUCT_ID) & ":$" & ColLetter(HID_COL_PRODUCT_ID)
+ qtyRange = SHEET_HIDDEN_DATA & "!$" & ColLetter(HID_COL_QTY) & ":$" & ColLetter(HID_COL_QTY)
+ amountRange = SHEET_HIDDEN_DATA & "!$" & ColLetter(HID_COL_AMOUNT) & ":$" & ColLetter(HID_COL_AMOUNT)
+ Dim headerIdCell As String, newIdCell As String
+ headerIdCell = "$E$" & headerRow
+ newIdCell = "$F" & newRow
+ ws.Cells(newRow, 2).Formula = "=SUMIFS(" & qtyRange & "," & partnerIdRange & "," & headerIdCell & "," & productIdRange & "," & newIdCell & ")"
+ ws.Cells(newRow, 3).Formula = "=IF(B" & newRow & "=0,0,D" & newRow & "/B" & newRow & ")"
+ ws.Cells(newRow, 4).Formula = "=SUMIFS(" & amountRange & "," & partnerIdRange & "," & headerIdCell & "," & productIdRange & "," & newIdCell & ")"
 End Sub
 
 Private Function CurrentBatchId() As String
@@ -2904,7 +2993,13 @@ End Function
 ' the invoice-sheet-side equivalent below) instead of always restarting at
 ' 1 using each row's own prior prefix - the delete-triggered call sites
 ' below pass neither, so they keep the original gap-free 1..N behavior.
-Public Sub RenumberAllInvoices(Optional startSeq As Long = 1, Optional anchorFormatNumber As String = "")
+' fromPosition (1-based, in current top-to-bottom row order) lets a
+' caller renumber only the TAIL of the batch, leaving every row before it
+' completely untouched (no rename, no cell write, no wasted work) - see
+' the section 5 fix: deleting one invoice must never restart the whole
+' batch's numbering at 1, only close the gap for whatever came after it.
+' The default (1) renumbers everything, unchanged from before.
+Public Sub RenumberAllInvoices(Optional startSeq As Long = 1, Optional anchorFormatNumber As String = "", Optional fromPosition As Long = 1)
  Dim listWs As Worksheet, hws As Worksheet
  Set listWs = InvoiceListSheet()
  Set hws = HiddenDataSheet()
@@ -2913,6 +3008,7 @@ Public Sub RenumberAllInvoices(Optional startSeq As Long = 1, Optional anchorFor
  Dim n As Long
  n = InvoiceListRowCount()
  If n = 0 Then Exit Sub
+ If fromPosition > n Then Exit Sub ' nothing after the gap - e.g. the deleted row was the last one
 
  Dim oldSheetNames() As String, newNumbers() As String, newSheetNames() As String, tempSheetNames() As String
  ReDim oldSheetNames(1 To n)
@@ -2927,7 +3023,7 @@ Public Sub RenumberAllInvoices(Optional startSeq As Long = 1, Optional anchorFor
  Next wsAll
 
  Dim r As Long, i As Long
- For i = 1 To n
+ For i = fromPosition To n
  r = PS_DATA_START_ROW + i - 1
  Dim curNumber As String
  ' Prompt 6 (latest revision): Purchase Summary's own column now
@@ -2942,11 +3038,11 @@ Public Sub RenumberAllInvoices(Optional startSeq As Long = 1, Optional anchorFor
  curNumber = FullInvoiceNumberForRow(r)
  End If
  oldSheetNames(i) = SheetNameForInvoiceRow(r)
- newNumbers(i) = FormatInvoiceNumberVba(curNumber, startSeq + i - 1)
+ newNumbers(i) = FormatInvoiceNumberVba(curNumber, startSeq + (i - fromPosition))
  Next i
 
  ' Phase 1: every affected sheet to a unique temporary name.
- For i = 1 To n
+ For i = fromPosition To n
  If oldSheetNames(i) <> "" Then
  Dim tempName As String
  tempName = "__tmp_renum_" & i
@@ -2965,7 +3061,7 @@ Public Sub RenumberAllInvoices(Optional startSeq As Long = 1, Optional anchorFor
  AddUnique finalUsed, UCase(SHEET_CUSTOMER_SUMMARY)
  AddUnique finalUsed, UCase(SHEET_PRODUCT_SUMMARY)
  AddUnique finalUsed, UCase(SHEET_HIDDEN_DATA)
- For i = 1 To n
+ For i = fromPosition To n
  If tempSheetNames(i) <> "" Then
  ' Sheet tab = exactly the invoice number as displayed everywhere
  ' else (prefix-stripped for Purchase, full for Sales) - never
@@ -2984,7 +3080,7 @@ Public Sub RenumberAllInvoices(Optional startSeq As Long = 1, Optional anchorFor
  ' _hidden_invoice_data row's InvoiceNumber/SheetName columns.
  Dim hLastRow As Long
  hLastRow = HiddenDataLastRow()
- For i = 1 To n
+ For i = fromPosition To n
  r = PS_DATA_START_ROW + i - 1
  ' Prompt 6 (latest revision): Purchase Summary's own column is now
  ' ALSO the prefix-stripped display number, same as the invoice
@@ -3162,6 +3258,43 @@ End Function
 
 ' --------------------------- Prompt 5: invoice deletion ------------------------
 
+' Shared by every deletion call site below: closes the gap a deleted
+' invoice leaves by renumbering only what comes AFTER it, picking up
+' exactly where the deleted one left off - e.g. deleting AT-...-000345
+' makes the invoice that was next become AT-...-000345, not some
+' restart-from-1 renumber of the entire batch. If the deleted row was the
+' very last one, RenumberAllInvoices's own fromPosition > n guard makes
+' this a safe no-op (nothing after it needs to shift).
+Private Sub RenumberAfterDeletion(deletedPosition As Long, deletedNumber As String)
+ If deletedNumber = "" Then Exit Sub
+ Dim prefix As String, width As Long, seqValue As Long
+ seqValue = ExtractTrailingDigits(deletedNumber, prefix, width)
+ If seqValue = -1 Then Exit Sub ' no trailing digit run to continue from - leave the rest alone
+ RenumberAllInvoices seqValue, deletedNumber, deletedPosition
+End Sub
+
+' Same idea as RenumberAfterDeletion, but for ReconcileDeletedInvoiceRows,
+' which only learns about a deletion AFTER the row is already gone (a
+' native Excel row-delete, possibly several rows/invoices at once) - so
+' there's no "position" to read off a still-existing row. Counting how
+' many of the SURVIVING invoices have a lower sequence number than the
+' earliest deleted one gives the same answer without needing one:
+' whatever's left below that count is exactly where the gap now sits,
+' regardless of whether the batch's numbering starts at 1 or continues
+' from some earlier batch (e.g. 24000).
+Private Function CountRowsWithSeqBelow(seqThreshold As Long) As Long
+ Dim n As Long, r As Long, count As Long
+ n = InvoiceListRowCount()
+ count = 0
+ For r = PS_DATA_START_ROW To PS_DATA_START_ROW + n - 1
+ Dim num As String, prefix As String, width As Long, seq As Long
+ num = FullInvoiceNumberForRow(r)
+ seq = ExtractTrailingDigits(num, prefix, width)
+ If seq <> -1 And seq < seqThreshold Then count = count + 1
+ Next r
+ CountRowsWithSeqBelow = count
+End Function
+
 ' Section 3: deletes one invoice by its stable Invoice ID, then renumbers
 ' the remaining ones. Product/Partner Summary totals need no separate
 ' recalculation step (section 8) - their SUMIF/COUNTIF formulas already
@@ -3183,6 +3316,14 @@ Public Sub DeleteInvoiceByStableId(invoiceId As String)
  Dim r As Long
  r = FindInvoiceListRowByInvoiceId(invoiceId)
  If r = 0 Then GoTo CleanFail
+
+ ' Section 5 fix: capture this row's own position + number BEFORE
+ ' deleting it, so the gap it leaves closes by shifting only the
+ ' invoices AFTER it up into its old number - never a full restart of
+ ' the whole batch's sequence back to 1 (see RenumberAfterDeletion).
+ Dim deletedPosition As Long, deletedNumber As String
+ deletedPosition = r - PS_DATA_START_ROW + 1
+ deletedNumber = FullInvoiceNumberForRow(r)
 
  Dim sheetName As String
  sheetName = SheetNameForInvoiceRow(r)
@@ -3211,7 +3352,7 @@ Public Sub DeleteInvoiceByStableId(invoiceId As String)
  End If
  Next hr
 
- RenumberAllInvoices
+ RenumberAfterDeletion deletedPosition, deletedNumber
 
  Application.Calculate
 CleanFail:
@@ -3274,12 +3415,40 @@ Public Function ReconcileDeletedInvoiceRows(listWs As Worksheet) As Boolean
  Application.EnableEvents = False
  On Error GoTo CleanFail
 
+ ' Section 5 fix: capture the EARLIEST deleted invoice's own number
+ ' before RemoveInvoiceArtifacts erases its hidden-data row - that
+ ' number (and where it now falls among the survivors) anchors the
+ ' renumber below, so only what comes after the gap shifts, never the
+ ' whole batch back to 1.
  Dim delId As Variant
+ Dim earliestNumber As String, earliestSeq As Long
+ earliestNumber = ""
+ earliestSeq = -1
+ For Each delId In toDelete
+ Dim delHr As Long
+ For delHr = HID_DATA_START_ROW To lastRow
+ If CStr(hws.Cells(delHr, HID_COL_INVOICE_ID).Value) = CStr(delId) Then
+ Dim delNum As String, delPrefix As String, delWidth As Long, delSeq As Long
+ delNum = CStr(hws.Cells(delHr, HID_COL_INVOICE_NUMBER).Value)
+ delSeq = ExtractTrailingDigits(delNum, delPrefix, delWidth)
+ If delSeq <> -1 Then
+ If earliestSeq = -1 Or delSeq < earliestSeq Then
+ earliestSeq = delSeq
+ earliestNumber = delNum
+ End If
+ End If
+ Exit For
+ End If
+ Next delHr
+ Next delId
+
  For Each delId In toDelete
  RemoveInvoiceArtifacts CStr(delId)
  Next delId
 
- RenumberAllInvoices
+ If earliestNumber <> "" Then
+ RenumberAllInvoices earliestSeq, earliestNumber, CountRowsWithSeqBelow(earliestSeq) + 1
+ End If
  Application.Calculate
  ReconcileDeletedInvoiceRows = True
 
@@ -3368,7 +3537,14 @@ Public Sub HandleInvoiceSheetBeforeDelete(deletedSheetName As String)
 
  Dim r As Long
  r = FindInvoiceListRowByInvoiceId(invoiceId)
- If r > 0 Then listWs.Rows(r).Delete
+ Dim deletedPosition As Long, deletedNumber As String
+ deletedPosition = 0
+ deletedNumber = ""
+ If r > 0 Then
+ deletedPosition = r - PS_DATA_START_ROW + 1
+ deletedNumber = FullInvoiceNumberForRow(r)
+ listWs.Rows(r).Delete
+ End If
 
  Dim hr2 As Long
  For hr2 = HiddenDataLastRow() To HID_DATA_START_ROW Step -1
@@ -3377,7 +3553,7 @@ Public Sub HandleInvoiceSheetBeforeDelete(deletedSheetName As String)
  End If
  Next hr2
 
- RenumberAllInvoices
+ RenumberAfterDeletion deletedPosition, deletedNumber
  Application.Calculate
 
 CleanFail:
