@@ -350,33 +350,67 @@ describe("Summary sheets — data correctness", () => {
     // Prompt 3: totals are now SUMIF formulas against the sheet's own
     // hidden line-item table, not hardcoded values — assert both the
     // formula exists and the cached result is still numerically correct.
+    // Column order is Product/HSN/Qty(3)/Avg Rate(4)/Amount(5).
     const qtyCell = dataRow.getCell(3).value as any;
-    const amtCell = dataRow.getCell(4).value as any;
+    const avgRateCell = dataRow.getCell(4).value as any;
+    const amtCell = dataRow.getCell(5).value as any;
     expect(qtyCell.formula).toContain("SUMIF");
     expect(qtyCell.result).toBe(15); // total quantity
     expect(amtCell.formula).toContain("SUMIF");
     expect(amtCell.result).toBe(1500); // total amount
+    expect(avgRateCell.formula).toContain("IF(");
+    expect(avgRateCell.result).toBe(100); // 1500 / 15
   });
 
-  it("Supplier Summary aggregates invoice count and total amount per partner", async () => {
+  it("Supplier Summary shows a per-product breakdown per partner, then that partner's own Total", async () => {
     const invoices = [
       invoice({ id: "a", invoice_number: "AT-1", customer_id: "party-1", total_amount: 1000 }),
-      invoice({ id: "b", invoice_number: "AT-2", customer_id: "party-1", total_amount: 2000 }),
+      invoice({ id: "b", invoice_number: "AT-2", customer_id: "party-1", total_amount: 1000 }),
     ];
     const workbook = await SummaryWorkbookService.build(
       makeInput({ invoices }),
     );
     const sheet = workbook.getWorksheet("Supplier Summary")!;
-    const dataRow = sheet.getRow(4);
-    expect(dataRow.getCell(1).value).toBe("Acme Traders");
-    // Prompt 3: invoice count/total amount are now COUNTIF/SUMIF formulas
-    // against the Purchase Summary sheet's hidden Partner ID column.
-    const countCell = dataRow.getCell(2).value as any;
-    const amountCell = dataRow.getCell(3).value as any;
+
+    // Row 4: group header — bare name at column 1 (SyncEngine.bas reads/
+    // writes this exact cell for rename propagation, so it must never be
+    // a composite "Name (N invoices)" string), Invoice Count as a live
+    // COUNTIF formula at column 2, Partner ID hidden at column 5.
+    const headerRow = sheet.getRow(4);
+    expect(headerRow.getCell(1).value).toBe("Acme Traders");
+    const countCell = headerRow.getCell(2).value as any;
     expect(countCell.formula).toContain("COUNTIF");
     expect(countCell.result).toBe(2);
-    expect(amountCell.formula).toContain("SUMIF");
-    expect(amountCell.result).toBe(3000);
+    expect(headerRow.getCell(5).value).toBe("party-1");
+
+    // Row 5: the one product both invoices share (Chicken, qty 10 @ 100
+    // each) — Qty/Amount are live SUMIFS formulas against
+    // _hidden_invoice_data by Partner ID + Product ID, Avg Rate a live
+    // formula off this row's own Qty/Amount.
+    const productRow = sheet.getRow(5);
+    expect(productRow.getCell(1).value).toBe("Chicken (0207)");
+    const qtyCell = productRow.getCell(2).value as any;
+    const avgRateCell = productRow.getCell(3).value as any;
+    const amountCell = productRow.getCell(4).value as any;
+    expect(qtyCell.formula).toContain("SUMIFS");
+    expect(qtyCell.result).toBe(20);
+    expect(avgRateCell.formula).toContain("IF(");
+    expect(avgRateCell.result).toBe(100);
+    expect(amountCell.formula).toContain("SUMIFS");
+    expect(amountCell.result).toBe(2000);
+
+    // Row 6: this partner's own Total — a SUMIF by Partner ID alone
+    // against _hidden_invoice_data (matches AppendPartnerSummaryRow's own
+    // VBA formula exactly), never a SUM over the product rows above it.
+    const totalRow = sheet.getRow(6);
+    expect(totalRow.getCell(1).value).toBe("Total");
+    const totalAmountCell = totalRow.getCell(4).value as any;
+    expect(totalAmountCell.formula).toContain("SUMIF");
+    expect(totalAmountCell.result).toBe(2000);
+
+    // Row 7: GRAND TOTAL — sums every partner's own Total row.
+    const grandTotalRow = sheet.getRow(7);
+    expect(grandTotalRow.getCell(1).value).toBe("GRAND TOTAL");
   });
 
   it("Purchase Summary row reflects the actual finalized invoice number, date, partner, and amount", async () => {
@@ -442,17 +476,21 @@ describe("Prompt 3 — stable identifiers and formula-based data model", () => {
   it("Supplier/Customer Summary has a stable, hidden Partner ID column", async () => {
     const workbook = await SummaryWorkbookService.build(makeInput());
     const sheet = workbook.getWorksheet("Supplier Summary")!;
-    expect(sheet.getRow(3).getCell(4).value).toBe("Partner ID");
-    expect(sheet.getRow(4).getCell(4).value).toBe("party-1");
-    expect(sheet.getColumn(4).hidden).toBe(true);
+    // Column 5 now — column 4 is "Amount" (product/Total rows), since
+    // Partner ID must be blank on every row except a block's own header
+    // row (see PT_COL_PARTNER_ID's own comment in SyncEngine.bas).
+    expect(sheet.getRow(3).getCell(5).value).toBe("Partner ID");
+    expect(sheet.getRow(4).getCell(5).value).toBe("party-1");
+    expect(sheet.getColumn(5).hidden).toBe(true);
   });
 
   it("Product Summary has a stable, hidden Product ID column", async () => {
     const workbook = await SummaryWorkbookService.build(makeInput());
     const sheet = workbook.getWorksheet("Product Summary")!;
-    expect(sheet.getRow(3).getCell(5).value).toBe("Product ID");
-    expect(sheet.getRow(4).getCell(5).value).toBe("p1");
-    expect(sheet.getColumn(5).hidden).toBe(true);
+    // Column 6 now — Avg Rate (4) pushed Total Amount from 4 to 5.
+    expect(sheet.getRow(3).getCell(6).value).toBe("Product ID");
+    expect(sheet.getRow(4).getCell(6).value).toBe("p1");
+    expect(sheet.getColumn(6).hidden).toBe(true);
   });
 
   it("Total Amount (per product row) and the grand Total row are both formula-based (Prompt 15)", async () => {
@@ -472,16 +510,18 @@ describe("Prompt 3 — stable identifiers and formula-based data model", () => {
     expect(totalCell.formula.startsWith("=")).toBe(false);
   });
 
-  it("Supplier/Customer Summary totals are COUNTIF/SUMIF formulas, not hardcoded", async () => {
+  it("Supplier/Customer Summary's Invoice Count and per-partner Total are COUNTIF/SUMIF formulas, not hardcoded", async () => {
     const invoices = [
-      invoice({ id: "a", invoice_number: "AT-1", customer_id: "party-1", total_amount: 1000 }),
-      invoice({ id: "b", invoice_number: "AT-2", customer_id: "party-1", total_amount: 2000 }),
+      invoice({ id: "a", invoice_number: "AT-1", customer_id: "party-1" }),
+      invoice({ id: "b", invoice_number: "AT-2", customer_id: "party-1" }),
     ];
     const workbook = await SummaryWorkbookService.build(makeInput({ invoices }));
     const sheet = workbook.getWorksheet("Supplier Summary")!;
-    const row = sheet.getRow(4);
-    expect((row.getCell(2).value as any).formula).toContain("COUNTIF");
-    expect((row.getCell(3).value as any).formula).toContain("SUMIF");
+    // Row 4: header (Invoice Count). Row 5: the shared product. Row 6:
+    // this partner's own Total.
+    expect((sheet.getRow(4).getCell(2).value as any).formula).toContain("COUNTIF");
+    expect((sheet.getRow(5).getCell(4).value as any).formula).toContain("SUMIFS");
+    expect((sheet.getRow(6).getCell(4).value as any).formula).toContain("SUMIF");
   });
 
   it("Product Summary quantity totals are formula-based, not hardcoded", async () => {
@@ -503,7 +543,7 @@ describe("Prompt 3 — stable identifiers and formula-based data model", () => {
     ];
     const workbook = await SummaryWorkbookService.build(makeInput({ invoices }));
     const sheet = workbook.getWorksheet("Product Summary")!;
-    const cell = sheet.getRow(4).getCell(4).value as any;
+    const cell = sheet.getRow(4).getCell(5).value as any; // column 5 — Avg Rate now sits at 4
     expect(cell.formula).toContain("SUMIF");
     expect(cell.result).toBe(1500);
   });
@@ -807,14 +847,19 @@ describe("Prompt 6, sections D/E/F/G/H/I/J — Purchase invoice restructuring", 
     const sheet = workbook.getWorksheet("2021-22-P-00000001")!;
     // Prompt 13: left-side values now at column 3; State Code (right side)
     // label at column 4, value at column 7.
+    // Name/Address/GSTIN/PAN are FORMULAS pointing at Batch Overview's
+    // "Company Details" section (editable there, propagates to every
+    // Purchase invoice via Excel's own recalculation) rather than plain
+    // values baked in at generation time — see BATCH_OVERVIEW_PURCHASE_
+    // COMPANY_*_ROW.
     expect(sheet.getRow(9).getCell(1).value).toBe("Name");
-    expect(sheet.getRow(9).getCell(3).value).toBe(fullIssuingCompany.company_name);
+    expect(sheet.getRow(9).getCell(3).value).toEqual({ formula: "'Batch Overview'!C25" });
     expect(sheet.getRow(10).getCell(1).value).toBe("Address");
-    expect(sheet.getRow(10).getCell(3).value).toBe(fullIssuingCompany.address);
+    expect(sheet.getRow(10).getCell(3).value).toEqual({ formula: "'Batch Overview'!C26" });
     expect(sheet.getRow(11).getCell(1).value).toBe("GSTIN");
-    expect(sheet.getRow(11).getCell(3).value).toBe(fullIssuingCompany.gstin);
+    expect(sheet.getRow(11).getCell(3).value).toEqual({ formula: "'Batch Overview'!C27" });
     expect(sheet.getRow(12).getCell(1).value).toBe("PAN");
-    expect(sheet.getRow(12).getCell(3).value).toBe(fullIssuingCompany.pan);
+    expect(sheet.getRow(12).getCell(3).value).toEqual({ formula: "'Batch Overview'!C28" });
     expect(sheet.getRow(13).getCell(1).value).toBe("State");
     expect(sheet.getRow(13).getCell(3).value).toBe(fullIssuingCompany.state);
     // Prompt 15: State Code is a single concatenated "Label : value" cell
@@ -975,21 +1020,26 @@ describe("Prompt 9, sections 5/6/7 — Invoice Summary horizontal product blocks
 });
 
 describe("Prompt 9, section 8 — Supplier/Customer Summary uses a robust (whole-column) range", () => {
-  it("COUNTIF/SUMIF reference whole columns, not a range bounded to today's invoice count", async () => {
+  it("Invoice Count/per-product/Total formulas reference _hidden_invoice_data whole columns, not a range bounded to today's invoice count", async () => {
     const workbook = await SummaryWorkbookService.build(makeInput());
     const sheet = workbook.getWorksheet("Supplier Summary")!;
-    const row = sheet.getRow(4);
-    const countFormula = (row.getCell(2).value as any).formula;
-    const amountFormula = (row.getCell(3).value as any).formula;
-    // The old bug: a range like $I$4:$I$524 frozen at generation time,
-    // which silently stops covering any invoice added after it. A
-    // whole-column reference has no "last row" to fall behind. Prompt 11:
-    // the referenced column is no longer a fixed I/E — 1 product -> block
-    // at 5-8, Invoice Amount at 9 (I), Partner ID at 13 (M).
-    expect(countFormula).toContain("$M:$M");
-    expect(countFormula).not.toMatch(/\$[A-Z]+\$\d+:\$[A-Z]+\$\d+/);
-    expect(amountFormula).toContain("$I:$I");
-    expect(amountFormula).not.toMatch(/\$[A-Z]+\$\d+:\$[A-Z]+\$\d+/);
+    // Formulas now reference the hidden data sheet's own FIXED column
+    // layout (K = PartnerID, D = ProductID, H = Qty, J = Amount — see
+    // HIDDEN_DATA_COLUMNS), never Purchase/Sales Summary's own columns,
+    // which move with the batch's widest invoice — so there's no
+    // "resolve the current column letter" step here at all any more, and
+    // no bounded range (e.g. $K$4:$K$524) to silently fall behind as the
+    // batch grows.
+    const countFormula = (sheet.getRow(4).getCell(2).value as any).formula;
+    const qtyFormula = (sheet.getRow(5).getCell(2).value as any).formula;
+    const amountFormula = (sheet.getRow(5).getCell(4).value as any).formula;
+    const totalFormula = (sheet.getRow(6).getCell(4).value as any).formula;
+    for (const f of [countFormula, qtyFormula, amountFormula, totalFormula]) {
+      expect(f).toContain("_hidden_invoice_data!$K:$K");
+      expect(f).not.toMatch(/\$[A-Z]+\$\d+:\$[A-Z]+\$\d+/);
+    }
+    expect(qtyFormula).toContain("_hidden_invoice_data!$H:$H");
+    expect(amountFormula).toContain("_hidden_invoice_data!$J:$J");
   });
 });
 
@@ -1168,21 +1218,27 @@ describe("Prompt 11, section 8 — Purchase/Sales Summary's only fixed columns a
     expect(headerRow.getCell(5).value).toBe("Product & HSN");
   });
 
-  it("Supplier/Customer Summary: Name stays at column 1, Partner ID at column 4 (PT_COL_* in SyncEngine.bas)", async () => {
+  it("Supplier/Customer Summary: header row is Product/Qty/Avg Rate/Amount, partner Name stays at column 1 of its own group-header row, Partner ID at column 5 (PT_COL_* in SyncEngine.bas)", async () => {
     const workbook = await SummaryWorkbookService.build(makeInput());
     const sheet = workbook.getWorksheet("Supplier Summary")!;
-    expect(sheet.getRow(3).getCell(1).value).toBe("Supplier Name");
-    expect(sheet.getRow(3).getCell(4).value).toBe("Partner ID");
+    expect(sheet.getRow(3).getCell(1).value).toBe("Product");
+    expect(sheet.getRow(3).getCell(5).value).toBe("Partner ID");
+    // Row 4 is the first (and here, only) partner's own group-header row —
+    // bare name at column 1, matching PT_COL_NAME/PT_COL_PARTNER_ID
+    // exactly (see that constant's own comment in SyncEngine.bas).
+    expect(sheet.getRow(4).getCell(1).value).toBe("Acme Traders");
+    expect(sheet.getRow(4).getCell(5).value).toBe("party-1");
   });
 
-  it("Product Summary: Name/HSN/Qty/Amount/ProductID stay at columns 1-5 (PR_COL_* in SyncEngine.bas)", async () => {
+  it("Product Summary: Name/HSN/Qty/Avg Rate/Amount/ProductID stay at columns 1-6 (PR_COL_* in SyncEngine.bas)", async () => {
     const workbook = await SummaryWorkbookService.build(makeInput());
     const sheet = workbook.getWorksheet("Product Summary")!;
     expect(sheet.getRow(3).getCell(1).value).toBe("Product");
     expect(sheet.getRow(3).getCell(2).value).toBe("HSN");
     expect(sheet.getRow(3).getCell(3).value).toBe("Total Quantity");
-    expect(sheet.getRow(3).getCell(4).value).toBe("Total Amount");
-    expect(sheet.getRow(3).getCell(5).value).toBe("Product ID");
+    expect(sheet.getRow(3).getCell(4).value).toBe("Avg Rate");
+    expect(sheet.getRow(3).getCell(5).value).toBe("Total Amount");
+    expect(sheet.getRow(3).getCell(6).value).toBe("Product ID");
   });
 
   it("individual invoice sheet: the fixed VBA anchor rows (9, 14-15, 16, then invoiceFooterRows off the product table) are all present at the expected positions", async () => {

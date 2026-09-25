@@ -195,7 +195,11 @@ Private Const SHEET_HIDDEN_DATA As String = "_hidden_invoice_data"
 
 ' --- Purchase/Sales Summary column layout - header row 3, data from row 4.
 ' PROMPT 11: columns 1-4 (Invoice Number/Invoice Date/Date of Supply/
-' Supplier or Customer) are the ONLY fixed visible columns now. The client
+' Supplier or Customer) are the ONLY fixed visible columns now. (Invoice
+' Date, column 2, was later made two-way editable, same treatment as
+' Date of Supply - see PropagateInvoiceDate/HandleInvoiceListInvoiceDateEdit.
+' Only Invoice Number, column 1, and Supplier/Customer, column 4, remain
+' fixed here.) The client
 ' rejected the previous layout (Invoice Amount/Transport/Vehicle/hidden IDs
 ' sitting between Supplier and the product blocks) - the product blocks
 ' now come immediately after column 4, and Invoice Amount/Transport Mode/
@@ -211,18 +215,31 @@ Private Const PS_DATA_START_ROW As Long = 4
 Private Const PS_PRODUCT_BLOCK_START_COL As Long = 5
 
 ' --- Supplier/Customer Summary column layout --------------------------------
+' Each partner now owns a whole block: a group-header row (Name at column
+' 1, Invoice Count at column 2, Partner ID at column 5 - hidden), one row
+' per product they appear on (Qty/Avg Rate/Amount at columns 2-4, Product
+' ID at column 6 - hidden), then that partner's own Total row (Amount at
+' column 4) - see buildPartnerSummarySheet in SummaryWorkbookService.ts.
+' Column 1 is always populated (every row type writes something there),
+' so it - never PT_COL_PARTNER_ID - is what any "walk to the end of the
+' sheet" loop should terminate on; PT_COL_PARTNER_ID is blank except on a
+' block's own header row.
 Private Const PT_COL_NAME As Long = 1
-Private Const PT_COL_PARTNER_ID As Long = 4
+Private Const PT_COL_PARTNER_ID As Long = 5
 Private Const PT_DATA_START_ROW As Long = 4
 
 ' --- Product Summary column layout ------------------------------------------
 ' (Prompt 4B: no longer holds a copy of the line-item data - just a Product
-' ID pointer, exactly like Purchase Summary's Invoice ID / Partner ID.)
+' ID pointer, exactly like Purchase Summary's Invoice ID / Partner ID. Avg
+' Rate - column 4 - was added later, pushing Total Amount from column 4 to
+' 5 and Product ID from 5 to 6 - see SummaryWorkbookService.ts's own
+' buildProductSummarySheet for the matching TS-side layout.)
 Private Const PR_COL_NAME As Long = 1
 Private Const PR_COL_HSN As Long = 2
 Private Const PR_COL_QTY As Long = 3
-Private Const PR_COL_AMOUNT As Long = 4
-Private Const PR_COL_PRODUCT_ID As Long = 5
+Private Const PR_COL_AVG_RATE As Long = 4
+Private Const PR_COL_AMOUNT As Long = 5
+Private Const PR_COL_PRODUCT_ID As Long = 6
 Private Const PR_DATA_START_ROW As Long = 4
 
 ' --- _hidden_invoice_data column layout (Prompt 4B, section 16) ------------
@@ -280,6 +297,19 @@ Private Const BANK_DETAILS_NAME_OF_ACCOUNT_ROW As Long = 37 ' TOTAL_ROW_VBA + 5
 Private Const BANK_DETAILS_IFSC_ROW As Long = 41 ' TOTAL_ROW_VBA + 9
 Private Const CERTIFICATION_TERMS_ROW_VBA As Long = 43 ' TOTAL_ROW_VBA + 11
 Private Const BATCH_OVERVIEW_SHEET_NAME_VBA As String = "Batch Overview"
+' Batch Overview's "Company Details" section (item 5/6 of the feature
+' request) - must be kept in sync with SummaryWorkbookService.ts's own
+' BATCH_OVERVIEW_PURCHASE_COMPANY_*_ROW / BATCH_OVERVIEW_SALES_COMPANY_*_ROW
+' constants exactly (same maintenance convention as the pre-existing
+' BANK_DETAILS_* row constants above, which mirror Batch Overview's bank
+' rows the same way).
+Private Const BATCH_OVERVIEW_PURCHASE_COMPANY_NAME_ROW_VBA As Long = 25
+Private Const BATCH_OVERVIEW_PURCHASE_COMPANY_ADDRESS_ROW_VBA As Long = 26
+Private Const BATCH_OVERVIEW_PURCHASE_COMPANY_GSTIN_ROW_VBA As Long = 27
+Private Const BATCH_OVERVIEW_PURCHASE_COMPANY_PAN_ROW_VBA As Long = 28
+Private Const BATCH_OVERVIEW_SALES_COMPANY_NAME_ROW_VBA As Long = 33
+Private Const BATCH_OVERVIEW_SALES_COMPANY_ADDRESS_ROW_VBA As Long = 34
+Private Const BATCH_OVERVIEW_SALES_COMPANY_GSTIN_ROW_VBA As Long = 35
 
 ' --- Purchase/Sales Summary lifecycle-control trigger cells (Prompt 5) -----
 Private Const ADD_INVOICE_ROW As Long = 2
@@ -609,10 +639,17 @@ End Function
 Private Sub WriteProductSummaryFormulas(r As Long)
  Dim ws As Worksheet
  Set ws = ProductSummarySheet()
+ Dim idCell As String
+ idCell = ColLetter(PR_COL_PRODUCT_ID) & r
  ws.Cells(r, PR_COL_QTY).Formula = _
- "=SUMIF(" & SHEET_HIDDEN_DATA & "!$D:$D,E" & r & "," & SHEET_HIDDEN_DATA & "!$H:$H)"
+ "=SUMIF(" & SHEET_HIDDEN_DATA & "!$D:$D," & idCell & "," & SHEET_HIDDEN_DATA & "!$H:$H)"
  ws.Cells(r, PR_COL_AMOUNT).Formula = _
- "=SUMIF(" & SHEET_HIDDEN_DATA & "!$D:$D,E" & r & "," & SHEET_HIDDEN_DATA & "!$J:$J)"
+ "=SUMIF(" & SHEET_HIDDEN_DATA & "!$D:$D," & idCell & "," & SHEET_HIDDEN_DATA & "!$J:$J)"
+ Dim qtyCell As String, amountCell As String
+ qtyCell = ColLetter(PR_COL_QTY) & r
+ amountCell = ColLetter(PR_COL_AMOUNT) & r
+ ws.Cells(r, PR_COL_AVG_RATE).Formula = _
+ "=IF(" & qtyCell & "=0,0," & amountCell & "/" & qtyCell & ")"
 End Sub
 
 ' Inserts a brand-new product row just above the TOTAL row (section 8:
@@ -633,8 +670,13 @@ Private Function AppendProductSummaryRow(productId As String, name As String, hs
  WriteProductSummaryFormulas newRow
 
  totalRow = newRow + 1
- ws.Cells(totalRow, PR_COL_QTY).Formula = "=SUM(C" & PR_DATA_START_ROW & ":C" & newRow & ")"
- ws.Cells(totalRow, PR_COL_AMOUNT).Formula = "=SUM(D" & PR_DATA_START_ROW & ":D" & newRow & ")"
+ Dim qtyColLetter As String, amountColLetter As String
+ qtyColLetter = ColLetter(PR_COL_QTY)
+ amountColLetter = ColLetter(PR_COL_AMOUNT)
+ ws.Cells(totalRow, PR_COL_QTY).Formula = "=SUM(" & qtyColLetter & PR_DATA_START_ROW & ":" & qtyColLetter & newRow & ")"
+ ws.Cells(totalRow, PR_COL_AMOUNT).Formula = "=SUM(" & amountColLetter & PR_DATA_START_ROW & ":" & amountColLetter & newRow & ")"
+ ws.Cells(totalRow, PR_COL_AVG_RATE).Formula = _
+ "=IF(" & qtyColLetter & totalRow & "=0,0," & amountColLetter & totalRow & "/" & qtyColLetter & totalRow & ")"
 
  AppendProductSummaryRow = newRow
 End Function
@@ -882,8 +924,15 @@ Public Sub PropagatePartnerRename(partnerId As String, newName As String)
  Set listWs = InvoiceListSheet()
  Set hws = HiddenDataSheet()
 
+ ' Each partner now owns a whole block (group-header row + one row per
+ ' product + its own Total row - the per-product breakdown feature), not
+ ' one row each, so column 1 (always populated - header/product/Total/
+ ' GRAND TOTAL rows all write something there) is what marks the real
+ ' end of the sheet; PT_COL_PARTNER_ID (column 5) is blank on every row
+ ' except a group's own header row, so it's only ever TESTED, never used
+ ' to decide when to stop scanning.
  r = PT_DATA_START_ROW
- Do While partnerWs.Cells(r, PT_COL_PARTNER_ID).Value <> ""
+ Do While partnerWs.Cells(r, 1).Value <> ""
  If CStr(partnerWs.Cells(r, PT_COL_PARTNER_ID).Value) = partnerId Then
  partnerWs.Cells(r, PT_COL_NAME).Value = newName
  End If
@@ -942,10 +991,10 @@ CleanFail:
 End Sub
 
 ' Date of Supply - the invoice sheet's own value cell (row 7, col 3 -
-' WriteReferenceStyleLeft) was edited directly. Columns 1-4 on Purchase/
-' Sales Summary are otherwise "fixed" (Invoice Number/Invoice Date/
-' Partner never sync back from the summary side), but Date of Supply is
-' the one exception - the same field the user can also edit ON the
+' WriteReferenceStyleLeft) was edited directly. Columns 1, 3, 4 on
+' Purchase/Sales Summary are otherwise "fixed" (Invoice Number/Partner
+' never sync back from the summary side), but Date of Supply is
+' one exception - the same field the user can also edit ON the
 ' summary side (see HandleInvoiceListDateOfSupplyEdit, the reverse
 ' direction), so both must actually agree.
 Public Sub PropagateDateOfSupply(invoiceId As String, newValue As String)
@@ -961,6 +1010,31 @@ Public Sub PropagateDateOfSupply(invoiceId As String, newValue As String)
  r = FindInvoiceListRowByInvoiceId(invoiceId)
  If r > 0 Then
  listWs.Cells(r, 3).Value = newValue
+ End If
+
+ Application.Calculate
+CleanFail:
+ Application.EnableEvents = True
+ gSyncInProgress = False
+End Sub
+
+' Invoice Date - the invoice sheet's own value cell (row 10, col 7 -
+' WriteReferenceStyleRight "Date") was edited directly. Second exception
+' to columns 1/3/4 being fixed (see PropagateDateOfSupply above) - this
+' one mirrors it exactly for column 2 (Invoice Date) instead of column 3.
+Public Sub PropagateInvoiceDate(invoiceId As String, newValue As String)
+ If gSyncInProgress Then Exit Sub
+ If invoiceId = "" Then Exit Sub
+ gSyncInProgress = True
+ Application.EnableEvents = False
+ On Error GoTo CleanFail
+
+ Dim listWs As Worksheet, r As Long
+ Set listWs = InvoiceListSheet()
+ If listWs Is Nothing Then GoTo CleanFail
+ r = FindInvoiceListRowByInvoiceId(invoiceId)
+ If r > 0 Then
+ listWs.Cells(r, 2).Value = newValue
  End If
 
  Application.Calculate
@@ -1235,6 +1309,29 @@ Private Sub HandleInvoiceLineEdit(ws As Worksheet, productRow As Long)
  rate = ws.Cells(productRow, 6).Value
  amount = qty * rate ' Total Amount (column 8) is already a live formula - never overwritten here.
 
+ ' Brand-new product typed directly into a row that wasn't part of the
+ ' batch at generation time (hRow = 0) - register it into
+ ' _hidden_invoice_data now, the same shape AppendHiddenDataRow already
+ ' uses for a runtime-appended invoice, so it behaves exactly like a
+ ' generated line from here on and can mirror onto Purchase/Sales
+ ' Summary below instead of being silently invoice-sheet-only.
+ If hRow = 0 And prodName <> "" Then
+ Dim newBatchId As String, newInvoiceId As String, newInvNum As String
+ Dim newPartnerId As String, newPartnerName As String
+ GetSheetIdentity ws, newBatchId, newInvoiceId, newInvNum, newPartnerId, newPartnerName
+ If newInvoiceId <> "" Then
+ Dim matchedProductId As String, matchedHsn As String
+ matchedProductId = ""
+ If FindProductByName(prodName, matchedProductId, matchedHsn) Then
+ If hsn = "" Then hsn = matchedHsn
+ End If
+ AppendHiddenDataRow newBatchId, newInvoiceId, newInvNum, matchedProductId, prodName, hsn, "", _
+ qty, rate, amount, newPartnerId, newPartnerName, ws.Name, blockIdx
+ hRow = FindHiddenRowBySheetAndBlock(ws.Name, blockIdx)
+ productId = matchedProductId
+ End If
+ End If
+
  If hRow > 0 Then
  Dim hws As Worksheet
  Set hws = HiddenDataSheet()
@@ -1260,7 +1357,18 @@ Private Sub HandleInvoiceLineEdit(ws As Worksheet, productRow As Long)
  Dim listWs As Worksheet, listRow As Long
  Set listWs = InvoiceListSheet()
  listRow = FindInvoiceListRowByInvoiceId(CStr(hws.Cells(hRow, HID_COL_INVOICE_ID).Value))
- If listRow > 0 Then
+ ' Every invoice sheet is always padded to MIN_PRODUCT_ROWS_VBA (16)
+ ' blank rows, but Purchase/Sales Summary's own width is sized only to
+ ' the batch's actual widest invoice at generation time - a block index
+ ' this high could fall past Summary's existing columns and into its
+ ' fixed tail (Invoice Amount/Transport Mode/etc). Guard against writing
+ ' into those: a genuinely new product past the current width still
+ ' gets tracked in _hidden_invoice_data above (so it keeps its own
+ ' totals/renumbering working), it just can't be mirrored onto Summary
+ ' until Summary itself grows that many blocks - not attempted here.
+ Dim listTailStartCol As Long
+ listTailStartCol = InvoiceAmountColumnOnSummary(listWs)
+ If listRow > 0 And listTailStartCol > 0 And PS_PRODUCT_BLOCK_START_COL + blockIdx * 4 + 3 < listTailStartCol Then
  Dim listBase As Long
  listBase = PS_PRODUCT_BLOCK_START_COL + blockIdx * 4
  listWs.Cells(listRow, listBase).Value = IIf(hsn <> "", prodName & " (" & hsn & ")", prodName)
@@ -1269,11 +1377,13 @@ Private Sub HandleInvoiceLineEdit(ws As Worksheet, productRow As Long)
  EnsureSummaryTotalPriceFormula listWs, listRow, listBase
  End If
  End If
- ' hRow = 0 means this row wasn't part of the batch at generation time -
- ' a brand-new product typed directly into a blank row. Its own totals
- ' and Amount in Words still update below (live formulas), it just
- ' doesn't retroactively appear in Product/Supplier Summary, which stay
- ' a snapshot of the batch as of download time.
+ ' A brand-new product typed into a row that was blank at generation
+ ' time (hRow = 0 on entry) is now registered above and mirrored onto
+ ' Purchase/Sales Summary like any other line, provided it fits within
+ ' Summary's current width (see the guard above). It still never
+ ' retroactively appears in Product Summary as a NEW row (only as a
+ ' Name/HSN correction if it matched an existing product by name) -
+ ' that sheet stays a snapshot of the batch as of download time.
 
  Application.Calculate
  UpdateAmountInWords ws
@@ -1326,6 +1436,28 @@ Public Sub HandleInvoiceSheetChange(ws As Worksheet, Target As Range)
  GetSheetIdentity ws, batchId, invoiceId, invNum, partnerId, partnerName
  If invoiceId <> "" Then
  PropagateDateOfSupply invoiceId, CStr(ws.Cells(7, 3).Value)
+ End If
+ End If
+
+ ' Invoice Date (row 10, col 7 - WriteReferenceStyleRight "Date") is
+ ' two-way synced with Purchase/Sales Summary's own Invoice Date column -
+ ' see PropagateInvoiceDate above.
+ If Not Application.Intersect(Target, ws.Cells(10, 7)) Is Nothing Then
+ GetSheetIdentity ws, batchId, invoiceId, invNum, partnerId, partnerName
+ If invoiceId <> "" Then
+ PropagateInvoiceDate invoiceId, CStr(ws.Cells(10, 7).Value)
+ End If
+ End If
+
+ ' Invoice No (row 9, col 7 - INV_INVOICE_NUMBER_ROW/
+ ' INV_INVOICE_NUMBER_VALUE_COL) edited directly on the invoice sheet -
+ ' cascades a full renumber of every other invoice, same as editing
+ ' Purchase/Sales Summary's own Invoice Number column (see
+ ' HandleInvoiceSheetInvoiceNumberEdit).
+ If Not Application.Intersect(Target, ws.Cells(INV_INVOICE_NUMBER_ROW, INV_INVOICE_NUMBER_VALUE_COL)) Is Nothing Then
+ GetSheetIdentity ws, batchId, invoiceId, invNum, partnerId, partnerName
+ If invoiceId <> "" Then
+ HandleInvoiceSheetInvoiceNumberEdit ws, invoiceId
  End If
  End If
 
@@ -1419,7 +1551,42 @@ Private Sub HandleInvoiceListProductEdit(listWs As Worksheet, rowNum As Long, bl
 
  Dim hRow As Long
  hRow = FindHiddenRowByInvoiceAndBlock(invoiceId, blockIdx)
- If hRow = 0 Then GoTo CleanFail ' not a real, generated line - nothing to sync
+ If hRow = 0 Then
+ ' Brand-new product block typed directly onto Purchase/Sales Summary,
+ ' past what this invoice had at generation time - register it into
+ ' _hidden_invoice_data so the write-through below (driven purely by
+ ' hRow) mirrors it onto the invoice sheet's own row too, provided
+ ' that row actually exists there (every invoice sheet is always
+ ' padded to MIN_PRODUCT_ROWS_VBA rows). Reverse direction of
+ ' HandleInvoiceLineEdit's own hRow=0 handling (item 4 of the feature
+ ' request).
+ If prodName = "" Or blockIdx < 0 Or blockIdx > MIN_PRODUCT_ROWS_VBA - 1 Then GoTo CleanFail
+
+ Dim newSheetName As String
+ newSheetName = SheetNameForInvoiceRow(rowNum)
+ If newSheetName = "" Then GoTo CleanFail
+ Dim newInvWs As Worksheet
+ Set newInvWs = Nothing
+ On Error Resume Next
+ Set newInvWs = ThisWorkbook.Worksheets(newSheetName)
+ On Error GoTo CleanFail
+ If newInvWs Is Nothing Then GoTo CleanFail
+
+ Dim newBatchId As String, newInvoiceIdOut As String, newInvNum As String
+ Dim newPartnerId As String, newPartnerName As String
+ GetSheetIdentity newInvWs, newBatchId, newInvoiceIdOut, newInvNum, newPartnerId, newPartnerName
+
+ Dim matchedProductId As String, matchedHsn As String
+ matchedProductId = ""
+ If FindProductByName(prodName, matchedProductId, matchedHsn) Then
+ If hsn = "" Then hsn = matchedHsn
+ End If
+
+ AppendHiddenDataRow newBatchId, invoiceId, newInvNum, matchedProductId, prodName, hsn, "", _
+ qty, rate, qty * rate, newPartnerId, newPartnerName, newSheetName, blockIdx
+ hRow = FindHiddenRowByInvoiceAndBlock(invoiceId, blockIdx)
+ If hRow = 0 Then GoTo CleanFail
+ End If
 
  Dim hws As Worksheet
  Set hws = HiddenDataSheet()
@@ -1485,9 +1652,17 @@ Public Sub HandleInvoiceListRowChange(listWs As Worksheet, Target As Range)
 
  Dim touched As New Collection, area As Range, c As Range
  Dim dosRows As New Collection, partnerRows As New Collection
+ Dim invDateRows As New Collection, invNumRows As New Collection
  For Each area In Target.Areas
  For Each c In area.Cells
- If c.Row >= PS_DATA_START_ROW And c.Column >= PS_PRODUCT_BLOCK_START_COL And c.Column < tailStartCol Then
+ If c.Row >= PS_DATA_START_ROW And c.Column = 1 Then
+ ' Invoice Number (column 1) - editing it directly cascades a
+ ' full renumber of every other invoice, same format, anchored
+ ' to this edit (see RenumberFromEditedInvoiceNumber). Distinct
+ ' from columns 2-4 above/below, which only ever correct THIS
+ ' one row.
+ AddUnique invNumRows, CStr(c.Row)
+ ElseIf c.Row >= PS_DATA_START_ROW And c.Column >= PS_PRODUCT_BLOCK_START_COL And c.Column < tailStartCol Then
  Dim offsetInBlock As Long
  offsetInBlock = (c.Column - PS_PRODUCT_BLOCK_START_COL) Mod 4
  ' Only Name (0)/Qty (1)/Rate (2) drive a re-sync - Total
@@ -1497,7 +1672,12 @@ Public Sub HandleInvoiceListRowChange(listWs As Worksheet, Target As Range)
  blockIdx = (c.Column - PS_PRODUCT_BLOCK_START_COL) \ 4
  AddUnique touched, c.Row & "|" & blockIdx
  End If
- ' Date of Supply (column 3) is the one exception to columns 1-4
+ ' Invoice Date (column 2) - two-way synced with the invoice
+ ' sheet's own Date cell (see PropagateInvoiceDate/
+ ' HandleInvoiceListInvoiceDateEdit for both directions).
+ ElseIf c.Row >= PS_DATA_START_ROW And c.Column = 2 Then
+ AddUnique invDateRows, CStr(c.Row)
+ ' Date of Supply (column 3) is another exception to columns 1/4
  ' otherwise being fixed/reference-only on this sheet - two-way
  ' synced with the invoice sheet's own Date of Supply cell (see
  ' PropagateDateOfSupply for the reverse direction).
@@ -1531,6 +1711,19 @@ Public Sub HandleInvoiceListRowChange(listWs As Worksheet, Target As Range)
  For k = 1 To partnerRows.Count
  HandleInvoiceListPartnerEdit listWs, CLng(partnerRows(k))
  Next k
+
+ Dim m As Long
+ For m = 1 To invDateRows.Count
+ HandleInvoiceListInvoiceDateEdit listWs, CLng(invDateRows(m))
+ Next m
+
+ ' Processed last, and only the first touched row if several were
+ ' pasted at once - each call already renumbers every OTHER row via a
+ ' full cascade, so a second one immediately after would anchor off a
+ ' row whose position/number just changed underneath it.
+ If invNumRows.Count > 0 Then
+ HandleInvoiceListInvoiceNumberEdit listWs, CLng(invNumRows(1))
+ End If
 End Sub
 
 ' Reverse direction of the invoice-sheet-side partner rename (see
@@ -1598,6 +1791,33 @@ Private Sub HandleInvoiceListDateOfSupplyEdit(listWs As Worksheet, rowNum As Lon
  If ws Is Nothing Then GoTo CleanFail
 
  ws.Cells(7, 3).Value = listWs.Cells(rowNum, 3).Value
+
+ Application.Calculate
+CleanFail:
+ Application.EnableEvents = True
+ gSyncInProgress = False
+End Sub
+
+' Reverse direction of PropagateInvoiceDate - a user edited Invoice Date
+' directly on Purchase/Sales Summary. Writes the correction into the
+' corresponding invoice sheet's own Date cell (row 10, col 7), matched by
+' Invoice ID via _hidden_invoice_data.
+Private Sub HandleInvoiceListInvoiceDateEdit(listWs As Worksheet, rowNum As Long)
+ gSyncInProgress = True
+ Application.EnableEvents = False
+ On Error GoTo CleanFail
+
+ Dim sheetName As String
+ sheetName = SheetNameForInvoiceRow(rowNum)
+ If sheetName = "" Then GoTo CleanFail
+
+ Dim ws As Worksheet
+ On Error Resume Next
+ Set ws = ThisWorkbook.Worksheets(sheetName)
+ On Error GoTo CleanFail
+ If ws Is Nothing Then GoTo CleanFail
+
+ ws.Cells(10, 7).Value = listWs.Cells(rowNum, 2).Value
 
  Application.Calculate
 CleanFail:
@@ -1709,6 +1929,17 @@ Private Sub AppendInvoiceListRow(invoiceNumber As String, isSales As Boolean, in
  listWs.Cells(newRow, 3).Value = "" ' Date of Supply
  listWs.Cells(newRow, PS_COL_PARTNER_NAME).Value = partnerName
 
+ ' Text format on Invoice Number/Invoice Date/Date of Supply - without
+ ' it, typing a date or a leading-zero invoice number directly into one
+ ' of these cells gets silently reinterpreted by Excel as a real date
+ ' serial or a number (dropping leading zeros), reformatted in the
+ ' system's own locale instead of showing what was typed. Row-insert
+ ' above already copies this from the row above via CopyOrigin, but a
+ ' brand-new invoice may be the very first row, so set it explicitly too.
+ listWs.Cells(newRow, 1).NumberFormat = "@"
+ listWs.Cells(newRow, 2).NumberFormat = "@"
+ listWs.Cells(newRow, 3).NumberFormat = "@"
+
  ' Prompt 11: Invoice Amount/Transport Mode/Vehicle Number/Invoice ID/
  ' Partner ID no longer sit at a fixed column - the product blocks now
  ' come immediately after Supplier (section 4), so each is found
@@ -1750,22 +1981,30 @@ Private Sub AppendInvoiceListRow(invoiceNumber As String, isSales As Boolean, in
  listWs.Cells(totalRow, amountCol).Formula = "=SUM(" & amountLetter & PS_DATA_START_ROW & ":" & amountLetter & newRow & ")"
 End Sub
 
+' Total row count across the WHOLE sheet (every header/product/Total/GRAND
+' TOTAL row) - column 1 is always populated on every one of those, unlike
+' PT_COL_PARTNER_ID, which is blank except on a block's own header row -
+' see the PT_COL_PARTNER_ID constant's own comment.
 Private Function PartnerSummaryRowCount() As Long
  Dim ws As Worksheet, r As Long
  Set ws = PartnerSummarySheet()
  r = PT_DATA_START_ROW
- Do While ws.Cells(r, PT_COL_PARTNER_ID).Value <> ""
+ Do While ws.Cells(r, 1).Value <> ""
  r = r + 1
  Loop
  PartnerSummaryRowCount = r - PT_DATA_START_ROW
 End Function
 
+' Only ever matches a block's own header row (guarded by PT_COL_PARTNER_ID
+' being non-blank) - never a product row whose own name cell happens to
+' collide with a partner's name, and never "Total"/"GRAND TOTAL".
 Private Function FindPartnerSummaryRowByName(name As String) As Long
  Dim ws As Worksheet, r As Long, n As Long
  Set ws = PartnerSummarySheet()
  n = PartnerSummaryRowCount()
  For r = PT_DATA_START_ROW To PT_DATA_START_ROW + n - 1
- If LCase(Trim(CStr(ws.Cells(r, PT_COL_NAME).Value))) = LCase(Trim(name)) Then
+ If ws.Cells(r, PT_COL_PARTNER_ID).Value <> "" And _
+ LCase(Trim(CStr(ws.Cells(r, PT_COL_NAME).Value))) = LCase(Trim(name)) Then
  FindPartnerSummaryRowByName = r
  Exit Function
  End If
@@ -1773,39 +2012,57 @@ Private Function FindPartnerSummaryRowByName(name As String) As Long
  FindPartnerSummaryRowByName = 0
 End Function
 
-' Creates exactly one new Supplier/Customer Summary row for a genuinely new
-' partner (section 6) - never called when an existing partner already
-' matched by name in the caller.
-Private Sub AppendPartnerSummaryRow(partnerId As String, name As String)
- Dim ws As Worksheet, listWs As Worksheet, n As Long, newRow As Long, totalRow As Long
+' Where a new partner's block should be inserted - right where the
+' sheet's own GRAND TOTAL row currently sits, pushing it (and its SUM
+' formula range, which Excel auto-extends on an adjacent row insert)
+' down by however many rows the new block needs. Falls back to "right
+' after the last used row" if no GRAND TOTAL row is found at all (e.g. a
+' batch with zero partners, before this function's own caller adds the
+' first one).
+Private Function FindPartnerSummaryGrandTotalRow() As Long
+ Dim ws As Worksheet, r As Long
  Set ws = PartnerSummarySheet()
- Set listWs = InvoiceListSheet()
- n = PartnerSummaryRowCount()
- newRow = PT_DATA_START_ROW + n
+ r = PT_DATA_START_ROW
+ Do While ws.Cells(r, 1).Value <> ""
+ If CStr(ws.Cells(r, 1).Value) = "GRAND TOTAL" Then
+ FindPartnerSummaryGrandTotalRow = r
+ Exit Function
+ End If
+ r = r + 1
+ Loop
+ FindPartnerSummaryGrandTotalRow = r
+End Function
+
+' Creates a new Supplier/Customer Summary BLOCK (a group-header row plus
+' its own Total row - the minimum shape every partner has, per the
+' per-product breakdown feature) for a genuinely new partner (section 6) -
+' never called when an existing partner already matched by name in the
+' caller. No product rows are inserted here (none exist yet for a
+' brand-new partner); the Total row's own SUMIF is against
+' _hidden_invoice_data by Partner ID alone, so it starts at 0 and
+' resolves correctly the moment a product is typed onto this partner's
+' invoice (see HandleInvoiceLineEdit's own hRow=0 registration) - it
+' never depends on any specific product-row range existing.
+Private Sub AppendPartnerSummaryRow(partnerId As String, name As String)
+ Dim ws As Worksheet, newRow As Long, totalRow As Long
+ Set ws = PartnerSummarySheet()
+ newRow = FindPartnerSummaryGrandTotalRow()
 
  ws.Rows(newRow).Insert Shift:=xlDown, CopyOrigin:=xlFormatFromLeftOrAbove
+ ws.Rows(newRow + 1).Insert Shift:=xlDown, CopyOrigin:=xlFormatFromLeftOrAbove
+
  ws.Cells(newRow, PT_COL_NAME).Value = name
  ws.Cells(newRow, PT_COL_PARTNER_ID).Value = partnerId
 
- ' Prompt 11: whole-column references (not a range bounded to today's
- ' invoice count) - the same robustness fix SummaryWorkbookService.ts
- ' already applies at generation time (Prompt 9, section 8), now also
- ' applied here so a partner row VBA creates at runtime is exactly as
- ' durable as one the generator wrote. The referenced columns are no
- ' longer fixed at I/E either - they move with the batch's widest
- ' invoice, so they're found the same dynamic way as everywhere else.
- Dim partnerIdColLetter As String, amountColLetter As String
- partnerIdColLetter = ColLetter(PartnerIdColumn(listWs))
- amountColLetter = ColLetter(InvoiceAmountColumnOnSummary(listWs))
  Dim partnerIdRange As String, amountRange As String
- partnerIdRange = "'" & listWs.Name & "'!$" & partnerIdColLetter & ":$" & partnerIdColLetter
- amountRange = "'" & listWs.Name & "'!$" & amountColLetter & ":$" & amountColLetter
- ws.Cells(newRow, 2).Formula = "=COUNTIF(" & partnerIdRange & ",D" & newRow & ")"
- ws.Cells(newRow, 3).Formula = "=SUMIF(" & partnerIdRange & ",D" & newRow & "," & amountRange & ")"
+ partnerIdRange = SHEET_HIDDEN_DATA & "!$" & ColLetter(HID_COL_PARTNER_ID) & ":$" & ColLetter(HID_COL_PARTNER_ID)
+ amountRange = SHEET_HIDDEN_DATA & "!$" & ColLetter(HID_COL_AMOUNT) & ":$" & ColLetter(HID_COL_AMOUNT)
+ ws.Cells(newRow, 2).Formula = "=COUNTIF(" & partnerIdRange & ",E" & newRow & ")"
 
  totalRow = newRow + 1
- ws.Cells(totalRow, 2).Formula = "=SUM(B" & PT_DATA_START_ROW & ":B" & newRow & ")"
- ws.Cells(totalRow, 3).Formula = "=SUM(C" & PT_DATA_START_ROW & ":C" & newRow & ")"
+ ws.Range(ws.Cells(totalRow, 1), ws.Cells(totalRow, 3)).Merge
+ ws.Cells(totalRow, 1).Value = "Total"
+ ws.Cells(totalRow, 4).Formula = "=SUMIF(" & partnerIdRange & ",E" & newRow & "," & amountRange & ")"
 End Sub
 
 Private Function CurrentBatchId() As String
@@ -2049,9 +2306,13 @@ Private Function BuildBlankInvoiceSheet(sheetName As String, isSales As Boolean,
  ' only the name is known - address left blank, never invented or
  ' borrowed from a different supplier.
  If isSales Then
+ ' Name/Address are FORMULAS pointing at Batch Overview's "Company
+ ' Details" section - same pattern SummaryWorkbookService.ts now uses
+ ' for every generated Sales invoice, so a runtime-added invoice stays
+ ' just as live-editable-from-Batch-Overview as a generated one.
+ ws.Cells(1, 1).Formula = "='" & BATCH_OVERVIEW_SHEET_NAME_VBA & "'!C" & BATCH_OVERVIEW_SALES_COMPANY_NAME_ROW_VBA
+ ws.Cells(2, 1).Formula = "='" & BATCH_OVERVIEW_SHEET_NAME_VBA & "'!C" & BATCH_OVERVIEW_SALES_COMPANY_ADDRESS_ROW_VBA
  If Not anyTemplate Is Nothing Then
- ws.Cells(1, 1).Value = anyTemplate.Cells(1, 1).Value
- ws.Cells(2, 1).Value = anyTemplate.Cells(2, 1).Value
  ws.Cells(1, 1).Font.Size = anyTemplate.Cells(1, 1).Font.Size
  End If
  Else
@@ -2078,7 +2339,9 @@ Private Function BuildBlankInvoiceSheet(sheetName As String, isSales As Boolean,
  ' those stay blank rather than guessed or borrowed from someone else.
  WriteReferenceStyleLeft ws, 5, "Transport Mode", ""
  If isSales Then
- WriteConcatRight ws, 5, TemplateCellText(anyTemplate, 5, 4, "GSTIN : ")
+ ws.Range(ws.Cells(5, 4), ws.Cells(5, 8)).Merge
+ ws.Cells(5, 4).Formula = "=""GSTIN : ""&'" & BATCH_OVERVIEW_SHEET_NAME_VBA & "'!C" & BATCH_OVERVIEW_SALES_COMPANY_GSTIN_ROW_VBA
+ ws.Cells(5, 4).Font.Bold = True
  Else
  WriteConcatRight ws, 5, TemplateCellText(partnerTemplate, 5, 4, "GSTIN : ")
  End If
@@ -2115,16 +2378,38 @@ Private Function BuildBlankInvoiceSheet(sheetName As String, isSales As Boolean,
  WriteReferenceStyleLeft ws, 13, "State", TemplateCellText(partnerTemplate, 13, 3)
  WriteConcatRight ws, 13, TemplateCellText(partnerTemplate, 13, 4)
  Else
- WriteReferenceStyleLeft ws, INV_PARTNER_ROW, "Name", TemplateCellText(anyTemplate, INV_PARTNER_ROW, 3)
+ ' Purchase's receiver is always our own company - Name/Address/GSTIN/
+ ' PAN are FORMULAS pointing at Batch Overview's "Company Details"
+ ' section (see the Sales branch above and BuildInvoiceSheet's own
+ ' TS-side equivalent), not copied text, so a runtime-added Purchase
+ ' invoice stays just as live-editable-from-Batch-Overview as a
+ ' generated one.
+ WriteReferenceStyleLeft ws, INV_PARTNER_ROW, "Name", ""
+ ws.Cells(INV_PARTNER_ROW, 3).Formula = "='" & BATCH_OVERVIEW_SHEET_NAME_VBA & "'!C" & BATCH_OVERVIEW_PURCHASE_COMPANY_NAME_ROW_VBA
  WriteReferenceStyleRight ws, INV_PARTNER_ROW, "Invoice No", displayNumber
- WriteReferenceStyleLeft ws, 10, "Address", TemplateCellText(anyTemplate, 10, 3)
+ WriteReferenceStyleLeft ws, 10, "Address", ""
+ ws.Cells(10, 3).Formula = "='" & BATCH_OVERVIEW_SHEET_NAME_VBA & "'!C" & BATCH_OVERVIEW_PURCHASE_COMPANY_ADDRESS_ROW_VBA
  WriteReferenceStyleRight ws, 10, "Date", ""
- WriteReferenceStyleLeft ws, 11, "GSTIN", TemplateCellText(anyTemplate, 11, 3)
+ WriteReferenceStyleLeft ws, 11, "GSTIN", ""
+ ws.Cells(11, 3).Formula = "='" & BATCH_OVERVIEW_SHEET_NAME_VBA & "'!C" & BATCH_OVERVIEW_PURCHASE_COMPANY_GSTIN_ROW_VBA
  WriteConcatRight ws, 11, TemplateCellText(anyTemplate, 11, 4)
- WriteReferenceStyleLeft ws, 12, "PAN", TemplateCellText(anyTemplate, 12, 3)
+ WriteReferenceStyleLeft ws, 12, "PAN", ""
+ ws.Cells(12, 3).Formula = "='" & BATCH_OVERVIEW_SHEET_NAME_VBA & "'!C" & BATCH_OVERVIEW_PURCHASE_COMPANY_PAN_ROW_VBA
  WriteReferenceStyleLeft ws, 13, "State", TemplateCellText(anyTemplate, 13, 3)
  WriteConcatRight ws, 13, TemplateCellText(anyTemplate, 13, 4)
  End If
+
+ ' Text format on Date of Supply/Invoice No/Invoice Date (row 7 col 3,
+ ' row INV_PARTNER_ROW col 7, row 10 col 7 - all three exist regardless
+ ' of the isSales branch above) - without it, typing a date or a
+ ' leading-zero invoice number directly into one of these cells gets
+ ' silently reinterpreted by Excel as a real date serial or a number,
+ ' reformatted in the system's own locale instead of showing what was
+ ' typed. Matches SummaryWorkbookService.ts's own fix for these same
+ ' three cells at generation time.
+ ws.Cells(7, 3).NumberFormat = "@"
+ ws.Cells(INV_PARTNER_ROW, 7).NumberFormat = "@"
+ ws.Cells(10, 7).NumberFormat = "@"
 
  ' Rows 14-15: the vertical product table header - same two-row merge
  ' as the generator's own INV_PRODUCT_HEADER_ROW.
@@ -2333,6 +2618,10 @@ Public Sub LockDerivedTotalColumns()
  Set prodWs = ProductSummarySheet()
  If Not prodWs Is Nothing Then
  LockRangeAgainstEditing prodWs.Range(prodWs.Cells(PR_DATA_START_ROW, PR_COL_AMOUNT), prodWs.Cells(5000, PR_COL_AMOUNT))
+ ' Avg Rate is purely derived (Amount/Qty) - unlike Amount, there is no
+ ' HandleProductSummaryRowChange trigger for it (editing it directly
+ ' would just strip its formula with no redistribution to restore it).
+ LockRangeAgainstEditing prodWs.Range(prodWs.Cells(PR_DATA_START_ROW, PR_COL_AVG_RATE), prodWs.Cells(5000, PR_COL_AVG_RATE))
  End If
 
  On Error GoTo 0
@@ -2610,7 +2899,12 @@ End Function
 ' text (Invoice Number, sheet name) changes. Uses a two-phase rename
 ' (every sheet to a unique temp name FIRST, then every temp name to its
 ' final name) so no intermediate collision is ever possible (section 4).
-Public Sub RenumberAllInvoices()
+' startSeq/anchorFormatNumber let a single edited invoice number act as the
+' anchor for the whole cascade (see HandleInvoiceListInvoiceNumberEdit /
+' the invoice-sheet-side equivalent below) instead of always restarting at
+' 1 using each row's own prior prefix - the delete-triggered call sites
+' below pass neither, so they keep the original gap-free 1..N behavior.
+Public Sub RenumberAllInvoices(Optional startSeq As Long = 1, Optional anchorFormatNumber As String = "")
  Dim listWs As Worksheet, hws As Worksheet
  Set listWs = InvoiceListSheet()
  Set hws = HiddenDataSheet()
@@ -2642,9 +2936,13 @@ Public Sub RenumberAllInvoices()
  ' permanently lose the real prefix after the first renumber).
  ' _hidden_invoice_data always keeps the FULL real number - that is
  ' the one true source for this computation, for both batch types.
+ If anchorFormatNumber <> "" Then
+ curNumber = anchorFormatNumber
+ Else
  curNumber = FullInvoiceNumberForRow(r)
+ End If
  oldSheetNames(i) = SheetNameForInvoiceRow(r)
- newNumbers(i) = FormatInvoiceNumberVba(curNumber, i)
+ newNumbers(i) = FormatInvoiceNumberVba(curNumber, startSeq + i - 1)
  Next i
 
  ' Phase 1: every affected sheet to a unique temporary name.
@@ -2732,6 +3030,96 @@ Public Sub RenumberAllInvoices()
  ' exists).
 
  Application.Calculate
+End Sub
+
+' Rebuilds the FULL invoice number (the one _hidden_invoice_data keeps,
+' with the batch's "AT-" style abbreviation prefix) from a user-edited
+' DISPLAY value (which, for Purchase, has that abbreviation stripped - see
+' StripInvoicePrefixForDisplayVba). Takes the abbreviation piece straight
+' off the row's own prior full number, so it's preserved even though the
+' user never saw or typed it; Sales has no stripped abbreviation at all,
+' so its display value already IS the full number.
+Private Function ReconstructFullInvoiceNumberVba(oldFullNumber As String, newDisplayValue As String, isSales As Boolean) As String
+ If isSales Then
+ ReconstructFullInvoiceNumberVba = newDisplayValue
+ Exit Function
+ End If
+ Dim oldDisplayValue As String
+ oldDisplayValue = StripInvoicePrefixForDisplayVba(oldFullNumber)
+ Dim abbrevPrefix As String
+ abbrevPrefix = Left(oldFullNumber, Len(oldFullNumber) - Len(oldDisplayValue))
+ ReconstructFullInvoiceNumberVba = abbrevPrefix & newDisplayValue
+End Function
+
+' Shared by both edit-triggered renumber entry points below (Summary sheet
+' column 1, and the invoice sheet's own Invoice No cell): the edited row
+' becomes the anchor for a full cascade, so every OTHER invoice renumbers
+' relative to it, in the same format, keeping today's top-to-bottom order -
+' e.g. editing row 1's number to end ...0000001 renumbers row 2 to
+' ...0000002, row 3 to ...0000003, and so on (this is "SOO THATS A
+' ADDITION" from the feature request - distinct from the pre-existing
+' delete-row-triggers-renumber behavior, which always restarts at 1 using
+' each row's own prior prefix; see the plain RenumberAllInvoices() call
+' sites).
+Private Sub RenumberFromEditedInvoiceNumber(rowNum As Long, oldFullNumber As String, newDisplayValue As String, isSales As Boolean)
+ Dim newFullNumber As String
+ newFullNumber = ReconstructFullInvoiceNumberVba(oldFullNumber, newDisplayValue, isSales)
+
+ Dim prefix As String, width As Long, seqValue As Long
+ seqValue = ExtractTrailingDigits(newFullNumber, prefix, width)
+ ' No trailing digit run to renumber from (e.g. the user typed something
+ ' with no numeric tail) - nothing safe to cascade, leave every other
+ ' invoice alone.
+ If seqValue = -1 Then Exit Sub
+
+ Dim position As Long
+ position = rowNum - PS_DATA_START_ROW + 1
+ If position < 1 Then Exit Sub
+
+ Dim startSeq As Long
+ startSeq = seqValue - (position - 1)
+
+ ' Same guard every other RenumberAllInvoices call site already uses
+ ' (section 15) - without it, every cell RenumberAllInvoices itself
+ ' writes (across this sheet and every invoice sheet) would re-fire
+ ' Worksheet_Change and re-enter this whole cascade.
+ gSyncInProgress = True
+ Application.EnableEvents = False
+ On Error GoTo CleanFail
+ RenumberAllInvoices startSeq, newFullNumber
+CleanFail:
+ Application.EnableEvents = True
+ gSyncInProgress = False
+End Sub
+
+' Forward direction: the Purchase/Sales Summary's own Invoice Number
+' column (column 1) was edited directly.
+Private Sub HandleInvoiceListInvoiceNumberEdit(listWs As Worksheet, rowNum As Long)
+ If gSyncInProgress Then Exit Sub
+ Dim oldFullNumber As String
+ oldFullNumber = FullInvoiceNumberForRow(rowNum)
+ If oldFullNumber = "" Then Exit Sub
+ Dim isSales As Boolean
+ isSales = (listWs.Name = SHEET_SALES_SUMMARY)
+ RenumberFromEditedInvoiceNumber rowNum, oldFullNumber, CStr(listWs.Cells(rowNum, 1).Value), isSales
+End Sub
+
+' Reverse direction: the invoice sheet's own Invoice No cell (row 9, col
+' 7 - INV_INVOICE_NUMBER_ROW/INV_INVOICE_NUMBER_VALUE_COL) was edited
+' directly.
+Private Sub HandleInvoiceSheetInvoiceNumberEdit(ws As Worksheet, invoiceId As String)
+ If gSyncInProgress Then Exit Sub
+ Dim listWs As Worksheet, rowNum As Long
+ Set listWs = InvoiceListSheet()
+ If listWs Is Nothing Then Exit Sub
+ rowNum = FindInvoiceListRowByInvoiceId(invoiceId)
+ If rowNum = 0 Then Exit Sub
+ Dim oldFullNumber As String
+ oldFullNumber = FullInvoiceNumberForRow(rowNum)
+ If oldFullNumber = "" Then Exit Sub
+ Dim isSales As Boolean
+ isSales = (listWs.Name = SHEET_SALES_SUMMARY)
+ RenumberFromEditedInvoiceNumber rowNum, oldFullNumber, CStr(ws.Cells(INV_INVOICE_NUMBER_ROW, INV_INVOICE_NUMBER_VALUE_COL).Value), isSales
 End Sub
 
 ' Finds the invoice sheet name for a given Purchase/Sales Summary row via

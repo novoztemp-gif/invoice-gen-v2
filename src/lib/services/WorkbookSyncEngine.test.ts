@@ -772,7 +772,10 @@ describe("Prompt 5 — VBA structural checks", () => {
     expect(s).toMatch(/Public Function ReconcileDeletedInvoiceRows\(/);
     expect(s).toMatch(/Public Sub HandleInvoiceSheetBeforeDelete\(/);
     expect(s).toMatch(/Public Sub DeleteInvoiceByStableId\(/);
-    expect(s).toMatch(/Public Sub RenumberAllInvoices\(\)/);
+    // Now takes optional startSeq/anchorFormatNumber params (an edited
+    // invoice number cascades a renumber anchored to it) — the
+    // no-args call sites (delete-triggered) keep the original behavior.
+    expect(s).toMatch(/Public Sub RenumberAllInvoices\(Optional startSeq/);
   });
 
   it("renumbering uses a two-phase temporary-name rename to avoid intermediate collisions (section 4)", () => {

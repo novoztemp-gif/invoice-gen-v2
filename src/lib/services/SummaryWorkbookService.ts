@@ -581,9 +581,18 @@ function buildInvoiceListSheet(
     viewInvoiceCell.value = { formula: `HYPERLINK("#'${invSheetName}'!A1","View Invoice")` };
 
     row.height = 18;
-    styleDataCell(row.getCell(1), isOdd, "center");
-    styleDataCell(row.getCell(2), isOdd, "center");
-    styleDataCell(row.getCell(3), isOdd, "center");
+    // Text format ("@") on Invoice Number/Invoice Date/Date of Supply —
+    // all three are directly user-editable (see SyncEngine.bas's
+    // RenumberFromEditedInvoiceNumber/PropagateInvoiceDate/
+    // PropagateDateOfSupply) and stored as plain ISO-style strings
+    // everywhere else in this app. Without forcing Text, Excel
+    // autodetects a typed date/number-looking value, silently converts
+    // it to a real date serial or a number (dropping a leading-zero
+    // invoice number, e.g. "0000001" -> 1) and reformats/right-aligns it
+    // in the system's own locale format instead of the string typed.
+    styleDataCell(row.getCell(1), isOdd, "center", "@");
+    styleDataCell(row.getCell(2), isOdd, "center", "@");
+    styleDataCell(row.getCell(3), isOdd, "center", "@");
     styleDataCell(row.getCell(4), isOdd, "left");
     styleDataCell(row.getCell(invoiceAmountCol), isOdd, "right", CURRENCY_FORMAT);
     styleDataCell(row.getCell(transportCol), isOdd, "left");
@@ -640,80 +649,178 @@ function buildInvoiceListSheet(
   return sheet;
 }
 
+/**
+ * Each partner (supplier/customer) gets its own group: a name/invoice-count
+ * header, one row per product they appear on (Qty/Avg Rate/Amount, live
+ * formulas against _hidden_invoice_data), then that partner's own Total —
+ * only the amount, no Qty/Rate, since those don't sum meaningfully across
+ * different products. A grand TOTAL closes the sheet, matching every other
+ * summary sheet's own convention.
+ */
 function buildPartnerSummarySheet(
   workbook: ExcelJS.Workbook,
   sheetName: string,
-  partnerLabel: string,
-  invoiceListSheetName: string,
   batch: FilingBatch,
   invoices: FilingInvoice[],
   partnerMap: Map<string, FilingPartner>,
+  lineItems: LineItem[],
 ) {
   const sheet = workbook.addWorksheet(sheetName);
   configurePage(sheet, "3:3");
-  addTitleBanner(sheet, sheetName.toUpperCase(), 3);
+  addTitleBanner(sheet, sheetName.toUpperCase(), 4);
 
-  const headerRow = sheet.addRow([partnerLabel, "Invoice Count", "Total Amount"]);
+  const headerRow = sheet.addRow(["Product", "Qty", "Avg Rate", "Amount"]);
   headerRow.height = 22;
-  for (let c = 1; c <= 3; c++) styleHeaderCell(headerRow.getCell(c));
-  sheet.getCell(3, 4).value = "Partner ID";
-  styleHeaderCell(sheet.getCell(3, 4));
+  for (let c = 1; c <= 4; c++) styleHeaderCell(headerRow.getCell(c));
+  sheet.getCell(3, 5).value = "Partner ID";
+  styleHeaderCell(sheet.getCell(3, 5));
+  sheet.getCell(3, 6).value = "Product ID";
+  styleHeaderCell(sheet.getCell(3, 6));
 
-  const aggregate = new Map<string, { name: string; invoiceCount: number; totalAmount: number }>();
+  // Partner identity + invoice count, in first-seen order — the same
+  // aggregation this sheet used before the per-product breakdown below.
+  const aggregate = new Map<string, { name: string; invoiceCount: number }>();
   for (const inv of invoices) {
     const { id, name } = resolvePartner(inv, batch, partnerMap);
     const key = id || name;
-    if (!aggregate.has(key)) {
-      aggregate.set(key, { name, invoiceCount: 0, totalAmount: 0 });
-    }
-    const item = aggregate.get(key)!;
-    item.invoiceCount += 1;
-    item.totalAmount += num(inv.total_amount);
+    if (!aggregate.has(key)) aggregate.set(key, { name, invoiceCount: 0 });
+    aggregate.get(key)!.invoiceCount += 1;
   }
 
-  // Prompt 9, section 8: whole-column references, not a range bounded to
-  // today's invoice count — see computeSummaryColumnLayout's own doc for
-  // why. Prompt 11: those columns are no longer fixed at I/E — they move
-  // with the batch's widest invoice, same as everything past column 4 on
-  // Purchase/Sales Summary now does, so the letters are computed from the
-  // same layout function that sheet itself was built with.
-  const layout = computeSummaryColumnLayout(invoices);
-  const partnerIdColLetter = colLetter(layout.partnerIdCol);
-  const amountColLetter = colLetter(layout.invoiceAmountCol);
-  const partnerIdRange = `'${invoiceListSheetName}'!$${partnerIdColLetter}:$${partnerIdColLetter}`;
-  const amountRange = `'${invoiceListSheetName}'!$${amountColLetter}:$${amountColLetter}`;
+  // Per-partner product breakdown — each partner's own products, in
+  // first-seen order, aggregated by product ID (qty/amount summed here
+  // only to seed each formula's cached `result`; the live SUMIFS formulas
+  // below are what actually drives the displayed value).
+  const productsByPartner = new Map<
+    string,
+    Map<string, { name: string; hsn: string; qty: number; amount: number }>
+  >();
+  for (const li of lineItems) {
+    if (!li.productId) continue; // zero-product sentinel row
+    const partnerKey = li.partnerId || li.partnerName;
+    if (!productsByPartner.has(partnerKey)) productsByPartner.set(partnerKey, new Map());
+    const products = productsByPartner.get(partnerKey)!;
+    if (!products.has(li.productId)) {
+      products.set(li.productId, { name: li.productName || "Unknown Product", hsn: li.hsn, qty: 0, amount: 0 });
+    }
+    const p = products.get(li.productId)!;
+    p.qty += li.qty;
+    p.amount += li.amount;
+  }
 
-  let idx = 0;
+  // Whole-column references against the one normalized source of truth
+  // (same convention as buildProductSummarySheet's own formulas above) —
+  // never stale as the batch's data grows.
+  const partnerIdRange = `${HIDDEN_DATA_SHEET_NAME}!$K:$K`;
+  const productIdRange = `${HIDDEN_DATA_SHEET_NAME}!$D:$D`;
+  const qtyRange = `${HIDDEN_DATA_SHEET_NAME}!$H:$H`;
+  const amountRange = `${HIDDEN_DATA_SHEET_NAME}!$J:$J`;
+
+  let r = 4;
+  let partnerIdx = 0;
   aggregate.forEach((item, key) => {
-    const isOdd = idx % 2 === 1;
-    const r = 4 + idx;
-    const row = sheet.addRow([
-      item.name,
-      { formula: `COUNTIF(${partnerIdRange},D${r})`, result: item.invoiceCount },
-      { formula: `SUMIF(${partnerIdRange},D${r},${amountRange})`, result: item.totalAmount },
-      key,
-    ]);
-    row.height = 18;
-    styleDataCell(row.getCell(1), isOdd, "left");
-    styleDataCell(row.getCell(2), isOdd, "right");
-    styleDataCell(row.getCell(3), isOdd, "right", CURRENCY_FORMAT);
-    idx++;
+    const isOdd = partnerIdx % 2 === 1;
+
+    // Column 1 is the BARE partner name here — never merged with the
+    // invoice count into one string — because SyncEngine.bas reads/writes
+    // this exact cell directly for rename propagation and "does this
+    // partner already exist" lookups (PT_COL_NAME), and
+    // AppendPartnerSummaryRow (a partner added at runtime from inside
+    // Excel) writes this same shape: bare name at column 1, a live
+    // Invoice Count formula at column 2. Keeping both paths identical
+    // avoids a real bug: a baked-in "Name (N invoices)" string would
+    // never match a bare-name lookup, causing a runtime "add invoice for
+    // an existing partner" to wrongly treat them as new and create a
+    // duplicate block.
+    const headerRowNum = r;
+    const groupHeaderRow = sheet.getRow(r);
+    const nameCell = groupHeaderRow.getCell(1);
+    nameCell.value = item.name;
+    nameCell.font = { name: "Calibri", size: 11, bold: true, color: { argb: HEADER_NAVY } };
+    nameCell.alignment = { vertical: "middle" };
+    const countCell = groupHeaderRow.getCell(2);
+    countCell.value = {
+      formula: `COUNTIF(${partnerIdRange},$E$${headerRowNum})`,
+      result: item.invoiceCount,
+    };
+    countCell.font = { name: "Calibri", size: 11, bold: true, color: { argb: HEADER_NAVY } };
+    countCell.alignment = { horizontal: "right", vertical: "middle" };
+    for (let c = 1; c <= 4; c++) {
+      const cell = groupHeaderRow.getCell(c);
+      cell.fill = HEADER_BAND_FILL as any;
+      cell.border = THIN_BORDER as any;
+    }
+    sheet.getCell(r, 5).value = key;
+    groupHeaderRow.height = 20;
+    r++;
+
+    const products = productsByPartner.get(key) || new Map();
+    let partnerTotalAmount = 0;
+    products.forEach((p, productId) => {
+      const row = sheet.getRow(r);
+      const nameCell = row.getCell(1);
+      nameCell.value = p.hsn ? `${p.name} (${p.hsn})` : p.name;
+      styleDataCell(nameCell, isOdd, "left");
+      nameCell.alignment = { horizontal: "left", vertical: "middle", wrapText: true };
+
+      const qtyCell = row.getCell(2);
+      qtyCell.value = {
+        formula: `SUMIFS(${qtyRange},${partnerIdRange},$E$${headerRowNum},${productIdRange},$F${r})`,
+        result: p.qty,
+      };
+      styleDataCell(qtyCell, isOdd, "right", QUANTITY_FORMAT);
+
+      const avgRateCell = row.getCell(3);
+      avgRateCell.value = { formula: `IF(B${r}=0,0,D${r}/B${r})`, result: p.qty === 0 ? 0 : p.amount / p.qty };
+      styleDataCell(avgRateCell, isOdd, "right", CURRENCY_FORMAT);
+
+      const amountCell = row.getCell(4);
+      amountCell.value = {
+        formula: `SUMIFS(${amountRange},${partnerIdRange},$E$${headerRowNum},${productIdRange},$F${r})`,
+        result: p.amount,
+      };
+      styleDataCell(amountCell, isOdd, "right", CURRENCY_FORMAT);
+
+      row.getCell(6).value = productId;
+      partnerTotalAmount += p.amount;
+      r++;
+    });
+
+    // A SUMIF by Partner ID alone against _hidden_invoice_data, not a SUM
+    // over this block's own product rows — matches
+    // AppendPartnerSummaryRow's own VBA formula exactly, so a partner
+    // added at runtime (starting with zero product rows) still totals
+    // correctly the instant a product is typed onto their invoice,
+    // without needing any row range to be kept in sync.
+    const totalRow = sheet.getRow(r);
+    sheet.mergeCells(r, 1, r, 3);
+    totalRow.getCell(1).value = "Total";
+    totalRow.getCell(4).value = {
+      formula: `SUMIF(${partnerIdRange},$E$${headerRowNum},${amountRange})`,
+      result: partnerTotalAmount,
+    };
+    totalRow.height = 18;
+    styleTotalCell(totalRow.getCell(1), "right");
+    styleTotalCell(totalRow.getCell(4), "right", CURRENCY_FORMAT);
+    r++;
+
+    partnerIdx++;
   });
 
-  const totalsRowNum = aggregate.size + 4;
-  const totalsRow = sheet.addRow([
-    "TOTAL",
-    { formula: `SUM(B4:B${totalsRowNum - 1})` },
-    { formula: `SUM(C4:C${totalsRowNum - 1})` },
-  ]);
-  totalsRow.height = 20;
-  styleTotalCell(totalsRow.getCell(1), "center");
-  styleTotalCell(totalsRow.getCell(2), "right");
-  styleTotalCell(totalsRow.getCell(3), "right", CURRENCY_FORMAT);
+  const grandTotalRowNum = r;
+  sheet.mergeCells(grandTotalRowNum, 1, grandTotalRowNum, 3);
+  const grandTotalRow = sheet.getRow(grandTotalRowNum);
+  grandTotalRow.getCell(1).value = "GRAND TOTAL";
+  grandTotalRow.getCell(4).value = {
+    formula: `SUMIF($A$4:$A$${grandTotalRowNum - 1},"Total",$D$4:$D$${grandTotalRowNum - 1})`,
+  };
+  grandTotalRow.height = 20;
+  styleTotalCell(grandTotalRow.getCell(1), "right");
+  styleTotalCell(grandTotalRow.getCell(4), "right", CURRENCY_FORMAT);
 
-  sheet.autoFilter = { from: "A3", to: "C3" };
   sheet.views = [{ state: "frozen", ySplit: 3 }];
-  sheet.getColumn(4).hidden = true;
+  sheet.getColumn(5).hidden = true;
+  sheet.getColumn(6).hidden = true;
   autoFitWidths(sheet, 16, 1);
   return sheet;
 }
@@ -800,11 +907,11 @@ function buildProductSummarySheet(workbook: ExcelJS.Workbook, lineItems: LineIte
   configurePage(sheet, "3:3");
   addTitleBanner(sheet, "PRODUCT SUMMARY", 4);
 
-  const headerRow = sheet.addRow(["Product", "HSN", "Total Quantity", "Total Amount"]);
+  const headerRow = sheet.addRow(["Product", "HSN", "Total Quantity", "Avg Rate", "Total Amount"]);
   headerRow.height = 22;
-  for (let c = 1; c <= 4; c++) styleHeaderCell(headerRow.getCell(c));
-  sheet.getCell(3, 5).value = "Product ID";
-  styleHeaderCell(sheet.getCell(3, 5));
+  for (let c = 1; c <= 5; c++) styleHeaderCell(headerRow.getCell(c));
+  sheet.getCell(3, 6).value = "Product ID";
+  styleHeaderCell(sheet.getCell(3, 6));
 
   const aggregate = new Map<
     string,
@@ -844,8 +951,9 @@ function buildProductSummarySheet(workbook: ExcelJS.Workbook, lineItems: LineIte
     const row = sheet.addRow([
       item.name,
       item.hsn,
-      { formula: `SUMIF(${productIdRange},E${r},${qtyRange})`, result: item.totalQuantity },
-      { formula: `SUMIF(${productIdRange},E${r},${amountRange})`, result: item.totalAmount },
+      { formula: `SUMIF(${productIdRange},F${r},${qtyRange})`, result: item.totalQuantity },
+      { formula: `IF(C${r}=0,0,E${r}/C${r})`, result: item.totalQuantity === 0 ? 0 : item.totalAmount / item.totalQuantity },
+      { formula: `SUMIF(${productIdRange},F${r},${amountRange})`, result: item.totalAmount },
       key,
     ]);
     row.height = 18;
@@ -853,6 +961,7 @@ function buildProductSummarySheet(workbook: ExcelJS.Workbook, lineItems: LineIte
     styleDataCell(row.getCell(2), isOdd, "center");
     styleDataCell(row.getCell(3), isOdd, "right", QUANTITY_FORMAT);
     styleDataCell(row.getCell(4), isOdd, "right", CURRENCY_FORMAT);
+    styleDataCell(row.getCell(5), isOdd, "right", CURRENCY_FORMAT);
     idx++;
   });
 
@@ -861,17 +970,19 @@ function buildProductSummarySheet(workbook: ExcelJS.Workbook, lineItems: LineIte
     "TOTAL",
     "",
     { formula: `SUM(C4:C${totalsRowNum - 1})` },
-    { formula: `SUM(D4:D${totalsRowNum - 1})` },
+    { formula: `IF(C${totalsRowNum}=0,0,E${totalsRowNum}/C${totalsRowNum})` },
+    { formula: `SUM(E4:E${totalsRowNum - 1})` },
   ]);
   totalsRow.height = 20;
   styleTotalCell(totalsRow.getCell(1), "center");
   styleTotalCell(totalsRow.getCell(2), "center");
   styleTotalCell(totalsRow.getCell(3), "right", QUANTITY_FORMAT);
   styleTotalCell(totalsRow.getCell(4), "right", CURRENCY_FORMAT);
+  styleTotalCell(totalsRow.getCell(5), "right", CURRENCY_FORMAT);
 
-  sheet.autoFilter = { from: "A3", to: "D3" };
+  sheet.autoFilter = { from: "A3", to: "E3" };
   sheet.views = [{ state: "frozen", ySplit: 3 }];
-  sheet.getColumn(5).hidden = true;
+  sheet.getColumn(6).hidden = true;
   autoFitWidths(sheet, 16, 1);
   return sheet;
 }
@@ -1118,7 +1229,8 @@ function buildSalesBatchOverviewSheet(
   writeBankDetailRow(sheet, row++, "PAN", issuingCompany?.pan || "", true);
   row++; // spacer
 
-  writeBatchOverviewDetailSections(sheet, row, batch, stats, "Customer");
+  const afterDetailRow = writeBatchOverviewDetailSections(sheet, row, batch, stats, "Customer");
+  writeCompanyDetailsSection(sheet, afterDetailRow, issuingCompany);
 
   setBatchOverviewColumnWidths(sheet);
   return sheet;
@@ -1131,6 +1243,7 @@ function buildPurchaseBatchOverviewSheet(
   partnerLabel: string,
   partnerMap: Map<string, FilingPartner>,
   lineItems: LineItem[],
+  issuingCompany: FilingIssuingCompany | null,
 ) {
   const sheet = workbook.addWorksheet(BATCH_OVERVIEW_SHEET_NAME);
   configurePage(sheet);
@@ -1142,7 +1255,8 @@ function buildPurchaseBatchOverviewSheet(
   writeStatCard(sheet, BATCH_OVERVIEW_HERO_ROW, 7, "Average Invoice", stats.averageInvoice, CURRENCY_FORMAT);
 
   const row = BATCH_OVERVIEW_HERO_ROW + 3; // 2 card rows + 1 spacer
-  writeBatchOverviewDetailSections(sheet, row, batch, stats, partnerLabel);
+  const afterDetailRow = writeBatchOverviewDetailSections(sheet, row, batch, stats, partnerLabel);
+  writeCompanyDetailsSection(sheet, afterDetailRow, issuingCompany);
 
   setBatchOverviewColumnWidths(sheet);
   return sheet;
@@ -1249,6 +1363,46 @@ export const BATCH_OVERVIEW_IFSC_ROW = 11;
 export const BATCH_OVERVIEW_PAN_ROW = 12;
 export const BATCH_OVERVIEW_VALUE_COL = 2;
 
+/** Batch Overview's "Company Details" section (both batch types) — the
+ * company identity fields shown once on every invoice in the batch
+ * (Sales: the top banner; Purchase: the Receiver/"Billed to" box, since
+ * Purchase's receiver is always our own company). Appended after
+ * writeBatchOverviewDetailSections's fixed, deterministic sequence, so
+ * these row numbers must be kept in sync with that function's own body if
+ * it (or, for Sales, the bank-detail block above it) ever grows or
+ * shrinks — same maintenance convention as the bank-detail rows above.
+ * Purchase: hero cards (3-5) -> writeBatchOverviewDetailSections(6) ->
+ * returns 24 -> Company Details header at 24, fields 25-28.
+ * Sales: hero cards (3-5) -> bank block (6-13) ->
+ * writeBatchOverviewDetailSections(14) -> returns 32 -> Company Details
+ * header at 32, fields 33-36. */
+export const BATCH_OVERVIEW_PURCHASE_COMPANY_NAME_ROW = 25;
+export const BATCH_OVERVIEW_PURCHASE_COMPANY_ADDRESS_ROW = 26;
+export const BATCH_OVERVIEW_PURCHASE_COMPANY_GSTIN_ROW = 27;
+export const BATCH_OVERVIEW_PURCHASE_COMPANY_PAN_ROW = 28;
+export const BATCH_OVERVIEW_SALES_COMPANY_NAME_ROW = 33;
+export const BATCH_OVERVIEW_SALES_COMPANY_ADDRESS_ROW = 34;
+export const BATCH_OVERVIEW_SALES_COMPANY_GSTIN_ROW = 35;
+export const BATCH_OVERVIEW_SALES_COMPANY_PAN_ROW = 36;
+
+/** Writes the 4-field "Company Details" section (header + Name/Address/
+ * GSTIN/PAN, each editable) starting at `startRow`, matching the exact
+ * row numbers the BATCH_OVERVIEW_*_COMPANY_*_ROW constants above assume.
+ * Shared by both batch types so they stay in lockstep. */
+function writeCompanyDetailsSection(
+  sheet: ExcelJS.Worksheet,
+  startRow: number,
+  issuingCompany: FilingIssuingCompany | null,
+) {
+  let row = startRow;
+  batchOverviewSectionHeader(sheet, row, "Company Details");
+  row++;
+  writeBankDetailRow(sheet, row++, "Company Name", issuingCompany?.company_name || "", true);
+  writeBankDetailRow(sheet, row++, "Address", issuingCompany?.address || "", true);
+  writeBankDetailRow(sheet, row++, "GSTIN", issuingCompany?.gstin || "", true);
+  writeBankDetailRow(sheet, row++, "PAN", issuingCompany?.pan || "", true);
+}
+
 function writeBankDetailRow(
   sheet: ExcelJS.Worksheet,
   row: number,
@@ -1332,10 +1486,19 @@ function buildInvoiceSheet(
     ? partner.company_name || partner.supplier_name || ""
     : issuingCompany?.company_name || "";
 
-  // Rows 1-3: seller identity header banner.
+  // Rows 1-3: seller identity header banner. Sales — Name/Address are
+  // FORMULAS pointing at Batch Overview's "Company Details" section (same
+  // one-way, no-VBA-needed pattern as the bank-detail rows below), so
+  // editing it there propagates to every Sales invoice's banner via
+  // Excel's own recalculation. Purchase's banner is the SUPPLIER instead
+  // (see the comment above `seller`), a genuinely per-invoice value, so it
+  // stays a plain value here.
   sheet.mergeCells(1, 1, 1, TOTAL_COLS);
   const titleCell = sheet.getCell(1, 1);
-  titleCell.value = sellerName;
+  titleCell.value =
+    isSales && batchOverviewSheetName
+      ? { formula: `'${batchOverviewSheetName}'!C${BATCH_OVERVIEW_SALES_COMPANY_NAME_ROW}` }
+      : sellerName;
   titleCell.font = { name: "Calibri", size: 16, bold: true, color: { argb: HEADER_NAVY } };
   titleCell.alignment = { horizontal: "center", vertical: "middle" };
   titleCell.fill = HEADER_BAND_FILL as any;
@@ -1343,7 +1506,10 @@ function buildInvoiceSheet(
 
   sheet.mergeCells(2, 1, 2, TOTAL_COLS);
   const addrCell = sheet.getCell(2, 1);
-  addrCell.value = seller?.address || "";
+  addrCell.value =
+    isSales && batchOverviewSheetName
+      ? { formula: `'${batchOverviewSheetName}'!C${BATCH_OVERVIEW_SALES_COMPANY_ADDRESS_ROW}` }
+      : seller?.address || "";
   addrCell.font = { name: "Calibri", size: 10, bold: true };
   addrCell.alignment = { horizontal: "center", vertical: "middle" };
   addrCell.fill = HEADER_BAND_FILL as any;
@@ -1381,7 +1547,10 @@ function buildInvoiceSheet(
   sheet.getCell(5, 3).value = inv.transport_mode || batch.transport_mode || "";
   sheet.getCell(5, 3).font = { name: "Calibri", size: 10 };
   sheet.mergeCells(5, 4, 5, 8);
-  sheet.getCell(5, 4).value = `GSTIN : ${seller?.gstin || ""}`;
+  sheet.getCell(5, 4).value =
+    isSales && batchOverviewSheetName
+      ? { formula: `"GSTIN : "&'${batchOverviewSheetName}'!C${BATCH_OVERVIEW_SALES_COMPANY_GSTIN_ROW}` }
+      : `GSTIN : ${seller?.gstin || ""}`;
   sheet.getCell(5, 4).font = { name: "Calibri", size: 10, bold: true, color: { argb: HEADER_NAVY } };
 
   // Row 6: Vehicle Number (editable), right side blank.
@@ -1400,6 +1569,12 @@ function buildInvoiceSheet(
   sheet.getCell(7, 1).font = { name: "Calibri", size: 10, bold: true };
   sheet.getCell(7, 3).value = inv.date_of_supply || inv.invoice_date || "";
   sheet.getCell(7, 3).font = { name: "Calibri", size: 10 };
+  // Text format — this cell is directly user-editable (two-way synced
+  // with Purchase/Sales Summary's own Date of Supply column, see
+  // PropagateDateOfSupply in SyncEngine.bas) and holds a plain ISO-style
+  // date string; without forcing Text, Excel silently reformats a typed
+  // date into a real date serial in the system's own locale format.
+  sheet.getCell(7, 3).numFmt = "@";
   sheet.mergeCells(7, 4, 7, 8);
   const phoneValue = isSales ? issuingCompany?.phone || "" : partner.mobile_number || "";
   sheet.getCell(7, 4).value = phoneValue ? `Phone : ${phoneValue}` : "";
@@ -1418,7 +1593,15 @@ function buildInvoiceSheet(
   sheet.getCell(9, 1).font = { name: "Calibri", size: 10, bold: true };
   sheet.getCell(9, 2).value = ":";
   sheet.getCell(9, 2).alignment = { horizontal: "center" };
-  sheet.getCell(9, 3).value = receiverName;
+  // Purchase's receiver is always our own company (never per-invoice), so
+  // Name/Address/GSTIN/PAN below are FORMULAS pointing at Batch Overview's
+  // "Company Details" section (same one-way, no-VBA pattern used for
+  // Sales' banner above and the bank-detail rows) rather than plain
+  // values — editing Batch Overview propagates to every Purchase invoice.
+  sheet.getCell(9, 3).value =
+    !isSales && batchOverviewSheetName
+      ? { formula: `'${batchOverviewSheetName}'!C${BATCH_OVERVIEW_PURCHASE_COMPANY_NAME_ROW}` }
+      : receiverName;
   sheet.getCell(9, 3).font = { name: "Calibri", size: 10, bold: true };
   sheet.mergeCells(9, 4, 9, 5);
   sheet.getCell(9, 4).value = "Invoice No";
@@ -1431,6 +1614,12 @@ function buildInvoiceSheet(
     : stripInvoicePrefixForDisplay(inv.invoice_number || "");
   sheet.getCell(9, 7).value = displayInvoiceNumber;
   sheet.getCell(9, 7).font = { name: "Calibri", size: 10, bold: true };
+  // Text format — user-editable (see RenumberFromEditedInvoiceNumber in
+  // SyncEngine.bas), and a purely-numeric invoice number (Purchase's
+  // display strips the "AT-" prefix) would otherwise get silently
+  // reinterpreted as a real number by Excel, dropping its leading zeros
+  // (e.g. "0000001" -> 1).
+  sheet.getCell(9, 7).numFmt = "@";
   // Prompt 6: this is the partner-rename sync TRIGGER cell for Sales (row
   // 9 = customer name) — editing it stays inside the workbook only, never
   // written back to the app/DB. For Purchase, this row is now "Receiver"
@@ -1443,7 +1632,11 @@ function buildInvoiceSheet(
   sheet.getCell(10, 1).font = { name: "Calibri", size: 10, bold: true };
   sheet.getCell(10, 2).value = ":";
   sheet.getCell(10, 2).alignment = { horizontal: "center" };
-  sheet.getCell(10, 3).value = isSales ? receiver?.address || "" : issuingCompany?.address || "";
+  sheet.getCell(10, 3).value = isSales
+    ? receiver?.address || ""
+    : batchOverviewSheetName
+      ? { formula: `'${batchOverviewSheetName}'!C${BATCH_OVERVIEW_PURCHASE_COMPANY_ADDRESS_ROW}` }
+      : issuingCompany?.address || "";
   sheet.getCell(10, 3).font = { name: "Calibri", size: 10 };
   sheet.getCell(10, 3).alignment = { vertical: "top", wrapText: true };
   sheet.getRow(10).height = 40;
@@ -1455,13 +1648,22 @@ function buildInvoiceSheet(
   sheet.mergeCells(10, 7, 10, 8);
   sheet.getCell(10, 7).value = inv.invoice_date || "";
   sheet.getCell(10, 7).font = { name: "Calibri", size: 10, bold: true };
+  // Text format — this exact symptom (typed date silently reformatted
+  // to the system locale's date format and right-aligned) is what
+  // prompted this fix; see PropagateInvoiceDate in SyncEngine.bas for
+  // the two-way sync this cell drives.
+  sheet.getCell(10, 7).numFmt = "@";
 
   // Row 11: GSTIN paired with a single concatenated Financial Year cell.
   sheet.getCell(11, 1).value = "GSTIN";
   sheet.getCell(11, 1).font = { name: "Calibri", size: 10, bold: true };
   sheet.getCell(11, 2).value = ":";
   sheet.getCell(11, 2).alignment = { horizontal: "center" };
-  sheet.getCell(11, 3).value = isSales ? receiver?.gstin || "Unregistered" : issuingCompany?.gstin || "N/A";
+  sheet.getCell(11, 3).value = isSales
+    ? receiver?.gstin || "Unregistered"
+    : batchOverviewSheetName
+      ? { formula: `'${batchOverviewSheetName}'!C${BATCH_OVERVIEW_PURCHASE_COMPANY_GSTIN_ROW}` }
+      : issuingCompany?.gstin || "N/A";
   sheet.getCell(11, 3).font = { name: "Calibri", size: 10, bold: true };
   sheet.mergeCells(11, 4, 11, 8);
   sheet.getCell(11, 4).value = `Financial Year: ${batch.financial_year || ""}`;
@@ -1472,7 +1674,11 @@ function buildInvoiceSheet(
   sheet.getCell(12, 1).font = { name: "Calibri", size: 10, bold: true };
   sheet.getCell(12, 2).value = ":";
   sheet.getCell(12, 2).alignment = { horizontal: "center" };
-  sheet.getCell(12, 3).value = isSales ? receiver?.pan || "" : issuingCompany?.pan || "";
+  sheet.getCell(12, 3).value = isSales
+    ? receiver?.pan || ""
+    : batchOverviewSheetName
+      ? { formula: `'${batchOverviewSheetName}'!C${BATCH_OVERVIEW_PURCHASE_COMPANY_PAN_ROW}` }
+      : issuingCompany?.pan || "";
   sheet.getCell(12, 3).font = { name: "Calibri", size: 10, bold: true };
   sheet.mergeCells(12, 4, 12, 8);
 
@@ -1776,7 +1982,7 @@ export class SummaryWorkbookService {
     if (isSales) {
       buildSalesBatchOverviewSheet(workbook, batch, invoiceMeta, partnerMap, lineItems, issuingCompany);
     } else {
-      buildPurchaseBatchOverviewSheet(workbook, batch, invoiceMeta, partnerLabel, partnerMap, lineItems);
+      buildPurchaseBatchOverviewSheet(workbook, batch, invoiceMeta, partnerLabel, partnerMap, lineItems, issuingCompany);
     }
 
     // Sheet 2: Purchase/Sales Summary
@@ -1797,11 +2003,10 @@ export class SummaryWorkbookService {
     buildPartnerSummarySheet(
       workbook,
       partnerSummarySheetName,
-      `${partnerLabel} Name`,
-      summarySheetName,
       batch,
       invoices,
       partnerMap,
+      lineItems,
     );
 
     // Sheet 5+: one per finalized invoice, in the same order as `invoices`,
