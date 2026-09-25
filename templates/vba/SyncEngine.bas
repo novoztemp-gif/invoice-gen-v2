@@ -1324,17 +1324,26 @@ Private Sub HandleInvoiceLineEdit(ws As Worksheet, productRow As Long)
  matchedProductId = ""
  If FindProductByName(prodName, matchedProductId, matchedHsn) Then
  If hsn = "" Then hsn = matchedHsn
+ Else
+ ' Genuinely new product - never seen anywhere in this batch's
+ ' product master by this exact name - so there's no real Product
+ ' ID to key off. Synthesize a stable one from the normalized name
+ ' instead of leaving it blank: every future line for this same
+ ' new product name (any invoice, any partner) groups under the
+ ' same key, which is what lets Product/Partner Summary's own
+ ' SUMIF/SUMIFS formulas - and EnsurePartnerSummaryProductRow below
+ ' - treat it exactly like a real product instead of silently
+ ' dropping it (a blank ProductID would lump every DIFFERENT new
+ ' product together instead).
+ matchedProductId = "NAME:" & UCase(Trim(prodName))
  End If
  AppendHiddenDataRow newBatchId, newInvoiceId, newInvNum, matchedProductId, prodName, hsn, "", _
  qty, rate, amount, newPartnerId, newPartnerName, ws.Name, blockIdx
  hRow = FindHiddenRowBySheetAndBlock(ws.Name, blockIdx)
  productId = matchedProductId
  ' Item 7: give this partner's own block in Supplier/Customer Summary
- ' a breakdown row for it too - a no-op if it already has one, or if
- ' this product couldn't be matched to a real Product ID at all.
- If matchedProductId <> "" Then
+ ' a breakdown row for it too - a no-op if it already has one.
  EnsurePartnerSummaryProductRow newPartnerId, matchedProductId, prodName, hsn
- End If
  End If
  End If
 
@@ -1586,6 +1595,11 @@ Private Sub HandleInvoiceListProductEdit(listWs As Worksheet, rowNum As Long, bl
  matchedProductId = ""
  If FindProductByName(prodName, matchedProductId, matchedHsn) Then
  If hsn = "" Then hsn = matchedHsn
+ Else
+ ' Genuinely new product - see HandleInvoiceLineEdit's own hRow=0
+ ' branch for why this synthesized ID (rather than a blank one)
+ ' matters.
+ matchedProductId = "NAME:" & UCase(Trim(prodName))
  End If
 
  AppendHiddenDataRow newBatchId, invoiceId, newInvNum, matchedProductId, prodName, hsn, "", _
@@ -1594,9 +1608,7 @@ Private Sub HandleInvoiceListProductEdit(listWs As Worksheet, rowNum As Long, bl
  If hRow = 0 Then GoTo CleanFail
  ' Item 7: same Supplier/Customer Summary breakdown-row fix as
  ' HandleInvoiceLineEdit's own hRow=0 branch.
- If matchedProductId <> "" Then
  EnsurePartnerSummaryProductRow newPartnerId, matchedProductId, prodName, hsn
- End If
  End If
 
  Dim hws As Worksheet
@@ -2823,6 +2835,13 @@ Private Sub PlaceProductOnInvoice(ws As Worksheet, productId As String, productN
  partnerId, partnerName, ws.Name, r - INV_PRODUCT_DATA_ROW
  Application.EnableEvents = True
  gSyncInProgress = False
+
+ ' This registers the hidden-data row itself (unlike a product typed
+ ' directly into a blank row, which HandleInvoiceLineEdit's own hRow=0
+ ' branch registers) - HandleInvoiceLineEdit below always sees hRow > 0
+ ' for it, so that branch's own EnsurePartnerSummaryProductRow call never
+ ' fires for this path. Same fix, called directly here instead.
+ EnsurePartnerSummaryProductRow partnerId, productId, productName, hsn
 
  HandleInvoiceLineEdit ws, r
 End Sub
